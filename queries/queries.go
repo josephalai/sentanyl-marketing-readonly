@@ -1,15 +1,16 @@
 package queries
 
 import (
-	"github.com/josephalai/sentanyl/marketing-service/models"
+	
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	
 	"gopkg.in/mgo.v2/bson"
 )
 
 // FindFunnelByPublicId looks up a funnel by its public_id and hydrates it.
-func FindFunnelByPublicId(publicId string) (*models.Funnel, error) {
-	var funnel models.Funnel
+func FindFunnelByPublicId(publicId string) (*pkgmodels.Funnel, error) {
+	var funnel pkgmodels.Funnel
 	err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
 		"public_id":             publicId,
 		"timestamps.deleted_at": nil,
@@ -17,13 +18,12 @@ func FindFunnelByPublicId(publicId string) (*models.Funnel, error) {
 	if err != nil {
 		return nil, err
 	}
-	funnel.Hydrate()
 	return &funnel, nil
 }
 
 // FindFunnelsBySubscriber returns all non-deleted funnels for a subscriber.
-func FindFunnelsBySubscriber(subscriberId string) ([]models.Funnel, error) {
-	var funnels []models.Funnel
+func FindFunnelsBySubscriber(subscriberId string) ([]pkgmodels.Funnel, error) {
+	var funnels []pkgmodels.Funnel
 	err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
 		"subscriber_id":         subscriberId,
 		"timestamps.deleted_at": nil,
@@ -32,8 +32,8 @@ func FindFunnelsBySubscriber(subscriberId string) ([]models.Funnel, error) {
 }
 
 // FindOffersByTenant returns all non-deleted offers for a tenant.
-func FindOffersByTenant(tenantID bson.ObjectId) ([]models.Offer, error) {
-	var offers []models.Offer
+func FindOffersByTenant(tenantID bson.ObjectId) ([]pkgmodels.Offer, error) {
+	var offers []pkgmodels.Offer
 	err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
@@ -42,6 +42,6 @@ func FindOffersByTenant(tenantID bson.ObjectId) ([]models.Offer, error) {
 }
 
 // InsertEmail inserts an email into the instant email collection.
-func InsertEmail(email *models.Email) error {
+func InsertEmail(email *pkgmodels.Email) error {
 	return db.GetCollection(pkgmodels.InstantEmailCollection).Insert(email)
 }

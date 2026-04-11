@@ -6,9 +6,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
-	"github.com/josephalai/sentanyl/marketing-service/models"
+	
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	
 )
 
 // RegisterEmailRoutes registers all email-related endpoints.
@@ -30,7 +31,7 @@ func handleInsertEmail(c *gin.Context) {
 		return
 	}
 
-	email := models.NewInstantEmail()
+	email := pkgmodels.NewInstantEmail()
 	email.From = req.From
 	email.To = req.To
 	email.SubjectLine = req.SubjectLine

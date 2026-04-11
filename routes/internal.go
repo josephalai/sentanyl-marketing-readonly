@@ -6,9 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/josephalai/sentanyl/marketing-service/models"
+	
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	
 )
 
 // RegisterInternalRoutes registers internal-only endpoints (no auth).
@@ -18,8 +19,8 @@ func RegisterInternalRoutes(rg *gin.RouterGroup) {
 
 // HydrateFunnelRequest is the payload for the internal hydration endpoint.
 type HydrateFunnelRequest struct {
-	Funnel *models.Funnel `json:"funnel"`
-	Story  *models.Story  `json:"story"`
+	Funnel *pkgmodels.Funnel `json:"funnel"`
+	Story  *pkgmodels.Story  `json:"story"`
 }
 
 // HandleInternalHydrateFunnel accepts hydrated Funnel and Story data from the
@@ -71,39 +72,39 @@ func insertEntities(entities []interface{}) error {
 // resolveCollection determines the MongoDB collection name for a given entity.
 func resolveCollection(entity interface{}) string {
 	switch entity.(type) {
-	case models.Funnel:
+	case pkgmodels.Funnel:
 		return pkgmodels.FunnelCollection
-	case models.FunnelRoute:
+	case pkgmodels.FunnelRoute:
 		return pkgmodels.FunnelRouteCollection
-	case models.FunnelStage:
+	case pkgmodels.FunnelStage:
 		return pkgmodels.FunnelStageCollection
-	case models.FunnelPage:
+	case pkgmodels.FunnelPage:
 		return pkgmodels.FunnelPageCollection
-	case models.PageBlock:
+	case pkgmodels.PageBlock:
 		return pkgmodels.PageBlockCollection
-	case models.PageForm:
+	case pkgmodels.PageForm:
 		return pkgmodels.PageFormCollection
-	case models.Trigger:
+	case pkgmodels.Trigger:
 		return pkgmodels.TriggerCollection
-	case models.Action:
+	case pkgmodels.Action:
 		return pkgmodels.ActionCollection
-	case models.BadgeTransaction:
+	case pkgmodels.BadgeTransaction:
 		return pkgmodels.BadgeTransactionCollection
-	case models.RequiredBadge:
+	case pkgmodels.RequiredBadge:
 		return pkgmodels.BadgeCollection
-	case models.Story:
+	case pkgmodels.Story:
 		return pkgmodels.StoryCollection
-	case models.Storyline:
+	case pkgmodels.Storyline:
 		return pkgmodels.StorylineCollection
-	case models.Enactment:
+	case pkgmodels.Enactment:
 		return pkgmodels.EnactmentCollection
-	case models.Scene:
+	case pkgmodels.Scene:
 		return pkgmodels.SceneCollection
-	case models.Message:
+	case pkgmodels.Message:
 		return pkgmodels.MessageCollection
-	case models.MessageContent:
+	case pkgmodels.MessageContent:
 		return pkgmodels.MessageContentCollection
-	case models.Tag:
+	case pkgmodels.Tag:
 		return pkgmodels.TagCollection
 	default:
 		log.Printf("resolveCollection: unknown entity type %T, using default", entity)

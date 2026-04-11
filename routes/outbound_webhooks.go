@@ -7,9 +7,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
-	"github.com/josephalai/sentanyl/marketing-service/models"
+	
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -28,7 +29,7 @@ func handleListOutboundWebhooks(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "subscriber_id is required"})
 		return
 	}
-	var hooks []models.OutboundWebhook
+	var hooks []pkgmodels.OutboundWebhook
 	if err := db.GetCollection(pkgmodels.OutboundWebhookCollection).Find(bson.M{
 		"subscriber_id":         sId,
 		"timestamps.deleted_at": bson.M{"$exists": false},
@@ -46,7 +47,7 @@ func handleGetOutboundWebhook(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "subscriber_id is required"})
 		return
 	}
-	hook := models.OutboundWebhook{}
+	hook := pkgmodels.OutboundWebhook{}
 	if err := db.GetCollection(pkgmodels.OutboundWebhookCollection).Find(bson.M{
 		"subscriber_id": sId,
 		"public_id":     webhookId,
@@ -58,7 +59,7 @@ func handleGetOutboundWebhook(c *gin.Context) {
 }
 
 func handleCreateOutboundWebhook(c *gin.Context) {
-	hook := models.NewOutboundWebhook()
+	hook := pkgmodels.NewOutboundWebhook()
 	if err := c.BindJSON(hook); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
@@ -77,7 +78,7 @@ func handleUpdateOutboundWebhook(c *gin.Context) {
 	webhookId := c.Param("webhookId")
 	var req struct {
 		SubscriberId string                 `json:"subscriber_id"`
-		Webhook      models.OutboundWebhook `json:"outbound_webhook"`
+		Webhook      pkgmodels.OutboundWebhook `json:"outbound_webhook"`
 	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -103,7 +104,7 @@ func handleDeleteOutboundWebhook(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	hook := models.OutboundWebhook{}
+	hook := pkgmodels.OutboundWebhook{}
 	if err := db.GetCollection(pkgmodels.OutboundWebhookCollection).Find(bson.M{
 		"subscriber_id": req.SubscriberId,
 		"public_id":     webhookId,

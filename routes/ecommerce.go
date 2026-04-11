@@ -7,10 +7,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
-	"github.com/josephalai/sentanyl/marketing-service/models"
+	
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -57,7 +58,7 @@ func handleTenantCreateProduct(c *gin.Context) {
 		ProductType  string           `json:"product_type"`
 		ThumbnailURL string           `json:"thumbnail_url"`
 		Status       string           `json:"status"`
-		Modules      []*models.Module `json:"modules"`
+		Modules      []*pkgmodels.Module `json:"modules"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
@@ -69,7 +70,7 @@ func handleTenantCreateProduct(c *gin.Context) {
 		status = req.Status
 	}
 
-	product := &models.Product{
+	product := &pkgmodels.Product{
 		Id:           bson.NewObjectId(),
 		PublicId:     utils.GeneratePublicId(),
 		TenantID:     tenantID,
@@ -97,7 +98,7 @@ func handleTenantListProducts(c *gin.Context) {
 		return
 	}
 
-	var products []models.Product
+	var products []pkgmodels.Product
 	err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
@@ -130,7 +131,7 @@ func handleTenantUpdateProduct(c *gin.Context) {
 		ProductType  string           `json:"product_type"`
 		ThumbnailURL string           `json:"thumbnail_url"`
 		Status       string           `json:"status"`
-		Modules      []*models.Module `json:"modules"`
+		Modules      []*pkgmodels.Module `json:"modules"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -223,7 +224,7 @@ func handleCreateOffer(c *gin.Context) {
 		return
 	}
 
-	offer := models.NewOffer(req.Title, tenantID)
+	offer := pkgmodels.NewOffer(req.Title, tenantID)
 	offer.PricingModel = req.PricingModel
 	offer.Amount = req.Amount
 	if req.Currency != "" {
@@ -253,7 +254,7 @@ func handleListOffers(c *gin.Context) {
 		return
 	}
 
-	var offers []models.Offer
+	var offers []pkgmodels.Offer
 	err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
@@ -373,7 +374,7 @@ func handleCreateCoupon(c *gin.Context) {
 		return
 	}
 
-	coupon := models.NewCoupon(req.Code, tenantID)
+	coupon := pkgmodels.NewCoupon(req.Code, tenantID)
 	coupon.DiscountType = req.DiscountType
 	coupon.Value = req.Value
 	coupon.Duration = req.Duration
@@ -395,7 +396,7 @@ func handleListCoupons(c *gin.Context) {
 		return
 	}
 
-	var coupons []models.Coupon
+	var coupons []pkgmodels.Coupon
 	err := db.GetCollection(pkgmodels.CouponCollection).Find(bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
@@ -468,7 +469,7 @@ func handleGetContact(c *gin.Context) {
 		return
 	}
 
-	var purchases []models.PurchaseLog
+	var purchases []pkgmodels.PurchaseLog
 	db.GetCollection(pkgmodels.PurchaseLogCollection).Find(bson.M{
 		"user_id":   contact.Id,
 		"tenant_id": tenantID,
@@ -518,7 +519,7 @@ func handleGetLibraryProducts(c *gin.Context) {
 
 	var badgeNames []string
 	for _, badgeID := range contact.Badges {
-		var badge models.Badge
+		var badge pkgmodels.Badge
 		err := db.GetCollection(pkgmodels.BadgeCollection).FindId(badgeID).One(&badge)
 		if err == nil {
 			badgeNames = append(badgeNames, badge.Name)
@@ -530,7 +531,7 @@ func handleGetLibraryProducts(c *gin.Context) {
 		return
 	}
 
-	var offers []models.Offer
+	var offers []pkgmodels.Offer
 	db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"tenant_id":             tenantID,
 		"granted_badges":        bson.M{"$in": badgeNames},
@@ -554,7 +555,7 @@ func handleGetLibraryProducts(c *gin.Context) {
 		return
 	}
 
-	var products []models.Product
+	var products []pkgmodels.Product
 	db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
 		"_id":                   bson.M{"$in": productIDs},
 		"tenant_id":             tenantID,
