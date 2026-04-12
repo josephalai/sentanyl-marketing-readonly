@@ -1,16 +1,36 @@
 package routes
 
 import (
+	"log"
 	"net/http"
+	"os"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
-	
+	"github.com/josephalai/sentanyl/marketing-service/email"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
-	
 )
+
+// smtpProvider is initialised once from env vars at startup.
+var smtpProvider *email.SMTPProvider
+
+func init() {
+	if os.Getenv("EMAIL_PROVIDER") == "smtp" {
+		host := os.Getenv("SMTP_HOST")
+		if host == "" {
+			host = "localhost"
+		}
+		port := 1025
+		if p, err := strconv.Atoi(os.Getenv("SMTP_PORT")); err == nil {
+			port = p
+		}
+		smtpProvider = email.NewSMTPProvider(host, port)
+		log.Printf("email: SMTP provider configured → %s:%d", host, port)
+	}
+}
 
 // RegisterEmailRoutes registers all email-related endpoints.
 func RegisterEmailRoutes(rg *gin.RouterGroup) {
@@ -31,22 +51,34 @@ func handleInsertEmail(c *gin.Context) {
 		return
 	}
 
-	email := pkgmodels.NewInstantEmail()
-	email.From = req.From
-	email.To = req.To
-	email.SubjectLine = req.SubjectLine
-	email.Html = req.Html
-	email.ReplyTo = req.ReplyTo
+	msg := pkgmodels.NewInstantEmail()
+	msg.From = req.From
+	msg.To = req.To
+	msg.SubjectLine = req.SubjectLine
+	msg.Html = req.Html
+	msg.ReplyTo = req.ReplyTo
 
-	if err := db.GetCollection(pkgmodels.InstantEmailCollection).Insert(email); err != nil {
+	if err := db.GetCollection(pkgmodels.InstantEmailCollection).Insert(msg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert email"})
 		return
 	}
 
+	// Send immediately via SMTP (MailHog in dev).
+	sent := false
+	if smtpProvider != nil {
+		if err := smtpProvider.SendEmail(req.From, req.To, req.SubjectLine, req.Html, req.ReplyTo); err != nil {
+			log.Printf("email: SMTP send failed: %v", err)
+		} else {
+			sent = true
+			log.Printf("email: sent → %s subject=%q", req.To, req.SubjectLine)
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"status":    "OK",
-		"id":        email.GetIdHex(),
-		"public_id": email.PublicId,
+		"id":        msg.GetIdHex(),
+		"public_id": msg.PublicId,
+		"sent":      sent,
 	})
 }
 

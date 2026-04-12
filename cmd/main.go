@@ -37,17 +37,30 @@ func main() {
 	r := gin.Default()
 	r.Use(httputil.CORSMiddleware())
 
-	// Public marketing routes (page serving, events).
+	// Public marketing routes (page serving, events, subscriber-scoped product reads).
 	api := r.Group("/api/marketing")
 	routes.RegisterFunnelRoutes(api)
 	routes.RegisterEmailRoutes(api)
 	routes.RegisterOutboundWebhookRoutes(api)
 
 	// Protected tenant routes (require JWT).
-	// Routes register under /api/marketing/* matching the Caddy gateway prefix.
-	tenantAPI := r.Group("/api/marketing")
+	// Scoped under /api/marketing/tenant/* to avoid collisions with public routes above.
+	// Caddy routes all /api/marketing/* to this service, so both are reachable.
+	tenantAPI := r.Group("/api/marketing/tenant")
 	tenantAPI.Use(auth.RequireTenantAuth())
 	routes.RegisterEcommerceRoutes(tenantAPI)
+
+	// Legacy /api/tenant/* paths — frontend pages call these directly (pre-refactor paths).
+	// Caddy now routes /api/tenant/products*, /api/tenant/offers*, etc. to this service.
+	legacyTenantAPI := r.Group("/api/tenant")
+	legacyTenantAPI.Use(auth.RequireTenantAuth())
+	routes.RegisterEcommerceRoutes(legacyTenantAPI)
+	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
+
+	// Legacy /api/funnel/* path — FunnelTemplatesPage calls /api/funnel/template.
+	legacyFunnelAPI := r.Group("/api/funnel")
+	legacyFunnelAPI.Use(auth.RequireTenantAuth())
+	routes.RegisterLegacyFunnelTemplateRoutes(legacyFunnelAPI)
 
 	// Customer-facing routes (require customer JWT).
 	customerAPI := r.Group("/api/customer")
