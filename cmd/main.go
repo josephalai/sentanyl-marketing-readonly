@@ -37,14 +37,15 @@ func main() {
 	r := gin.Default()
 	r.Use(httputil.CORSMiddleware())
 
-	// Public funnel routes (page serving, events).
-	api := r.Group("/api")
+	// Public marketing routes (page serving, events).
+	api := r.Group("/api/marketing")
 	routes.RegisterFunnelRoutes(api)
 	routes.RegisterEmailRoutes(api)
 	routes.RegisterOutboundWebhookRoutes(api)
 
 	// Protected tenant routes (require JWT).
-	tenantAPI := r.Group("/api/tenant")
+	// Routes register under /api/marketing/* matching the Caddy gateway prefix.
+	tenantAPI := r.Group("/api/marketing")
 	tenantAPI.Use(auth.RequireTenantAuth())
 	routes.RegisterEcommerceRoutes(tenantAPI)
 
