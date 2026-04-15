@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/josephalai/sentanyl/marketing-service/handlers"
+	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/config"
@@ -33,6 +34,9 @@ func main() {
 	db.MongoDefaultCollectionName = "funnels"
 	db.UsingLocalMongo = true
 	db.InitMongoConnection()
+
+	// Ensure MongoDB indexes for website builder collections.
+	site.EnsureIndexes()
 
 	// Set up Gin router.
 	r := gin.Default()
@@ -78,6 +82,9 @@ func main() {
 	// Public website delivery route (no auth — serves published HTML snapshots).
 	// Caddy routes designated website hosts to this endpoint.
 	handlers.RegisterPublicSiteRoutes(api)
+
+	// Public form submission and checkout routes (no auth — for published websites).
+	handlers.RegisterPublicFormRoutes(api)
 
 	// Internal routes (no auth — internal network only).
 	internal := r.Group("/internal")

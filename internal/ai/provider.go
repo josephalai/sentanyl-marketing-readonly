@@ -6,7 +6,7 @@ type SiteAIProvider interface {
 	GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error)
 	// GeneratePage generates a single page's Puck document.
 	GeneratePage(prompt string) (map[string]any, error)
-	// EditPage applies AI-driven edits to an existing page document.
+	// EditPage returns a set of patch operations to apply to the current document.
 	EditPage(req PageEditRequest) (*PageEditResult, error)
 }
 
@@ -62,8 +62,18 @@ type PageEditRequest struct {
 	CurrentDocument map[string]any `json:"current_document"`
 }
 
-// PageEditResult is the output of AI page editing.
+// PatchOp represents a single patch operation returned by the AI provider.
+type PatchOp struct {
+	Op     string         `json:"op"`
+	NodeID string         `json:"nodeId,omitempty"`
+	Path   string         `json:"path,omitempty"`
+	Props  map[string]any `json:"props,omitempty"`
+	Node   map[string]any `json:"node,omitempty"`
+	Index  *int           `json:"index,omitempty"`
+}
+
+// PageEditResult is the output of AI page editing — returns patch operations.
 type PageEditResult struct {
-	UpdatedDocument map[string]any `json:"updated_document"`
-	Summary         string         `json:"summary"`
+	Operations []PatchOp `json:"operations"`
+	Summary    string    `json:"summary"`
 }

@@ -56,7 +56,7 @@ func (p *OpenAIProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 	}
 	var result PageEditResult
 	if err := json.Unmarshal([]byte(resp), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+		return nil, fmt.Errorf("failed to parse AI edit response: %w", err)
 	}
 	return &result, nil
 }

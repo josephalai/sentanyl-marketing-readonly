@@ -7,6 +7,7 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
@@ -182,12 +183,28 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 	case "ImageSection":
 		src, _ := props["src"].(string)
 		alt, _ := props["alt"].(string)
+		// Support Sentanyl asset pipeline: if assetId is provided, resolve asset URL.
+		if assetID, ok := props["assetId"].(string); ok && assetID != "" && bson.IsObjectIdHex(assetID) {
+			if assetURL := resolveAssetURL(assetID); assetURL != "" {
+				src = assetURL
+			}
+		}
 		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
 		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", esc(src), esc(alt)))
 		sb.WriteString("</section>\n")
 
 	case "VideoSection", "SentanylVideoPlayer":
 		videoURL, _ := props["videoUrl"].(string)
+		// Support Sentanyl asset pipeline: if videoId or assetId is provided, resolve asset URL.
+		if videoID, ok := props["videoId"].(string); ok && videoID != "" && bson.IsObjectIdHex(videoID) {
+			if assetURL := resolveAssetURL(videoID); assetURL != "" {
+				videoURL = assetURL
+			}
+		} else if assetID, ok := props["assetId"].(string); ok && assetID != "" && bson.IsObjectIdHex(assetID) {
+			if assetURL := resolveAssetURL(assetID); assetURL != "" {
+				videoURL = assetURL
+			}
+		}
 		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
 		sb.WriteString(fmt.Sprintf("<video controls style=\"max-width:100%%\"><source src=\"%s\"></video>\n", esc(videoURL)))
 		sb.WriteString("</section>\n")
@@ -288,18 +305,69 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		if formTitle == "" {
 			formTitle = "Get in Touch"
 		}
+		buttonText, _ := props["buttonText"].(string)
+		if buttonText == "" {
+			buttonText = "Submit"
+		}
+		nextURL, _ := props["nextUrl"].(string)
+		includePhone, _ := props["includePhone"].(bool)
+		includeMessage, _ := props["includeMessage"].(bool)
 		sb.WriteString("<section class=\"section\">\n")
 		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(formTitle)))
-		sb.WriteString("<form style=\"max-width:500px;margin:0 auto\">\n")
-		sb.WriteString("<input type=\"text\" placeholder=\"Name\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
-		sb.WriteString("<input type=\"email\" placeholder=\"Email\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
-		sb.WriteString("<button type=\"submit\" class=\"cta-button\" style=\"width:100%%;border:none;cursor:pointer\">Submit</button>\n")
+		sb.WriteString("<form method=\"POST\" action=\"/api/marketing/site/form/submit\" style=\"max-width:500px;margin:0 auto\">\n")
+		sb.WriteString("<input type=\"text\" name=\"name\" placeholder=\"Name\" required style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
+		sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"Email\" required style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
+		if includePhone {
+			sb.WriteString("<input type=\"tel\" name=\"phone\" placeholder=\"Phone\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
+		}
+		if includeMessage {
+			sb.WriteString("<textarea name=\"message\" placeholder=\"Message\" rows=\"4\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\"></textarea>\n")
+		}
+		if nextURL != "" {
+			sb.WriteString(fmt.Sprintf("<input type=\"hidden\" name=\"next_url\" value=\"%s\">\n", esc(nextURL)))
+		}
+		sb.WriteString(fmt.Sprintf("<button type=\"submit\" class=\"cta-button\" style=\"width:100%%;border:none;cursor:pointer\">%s</button>\n", esc(buttonText)))
 		sb.WriteString("</form>\n</section>\n")
 
 	case "SentanylCheckoutForm":
+		heading, _ := props["heading"].(string)
+		if heading == "" {
+			heading = "Complete Your Purchase"
+		}
+		offerID, _ := props["offerId"].(string)
+		successURL, _ := props["successUrl"].(string)
+		cancelURL, _ := props["cancelUrl"].(string)
 		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
-		sb.WriteString("<div class=\"card\"><h3>Checkout</h3><p>Secure checkout powered by Sentanyl</p></div>\n")
-		sb.WriteString("</section>\n")
+		sb.WriteString(fmt.Sprintf("<div class=\"card\"><h3>%s</h3>\n", esc(heading)))
+		sb.WriteString("<p>Secure checkout powered by Sentanyl</p>\n")
+		if offerID != "" {
+			sb.WriteString("<script>\n")
+			sb.WriteString("function startCheckout() {\n")
+			sb.WriteString("  fetch('/api/marketing/site/checkout/start', {\n")
+			sb.WriteString("    method: 'POST',\n")
+			sb.WriteString("    headers: {'Content-Type': 'application/json'},\n")
+			sb.WriteString(fmt.Sprintf("    body: JSON.stringify({offer_id:'%s'", esc(offerID)))
+			if successURL != "" {
+				sb.WriteString(fmt.Sprintf(",success_url:'%s'", esc(successURL)))
+			}
+			if cancelURL != "" {
+				sb.WriteString(fmt.Sprintf(",cancel_url:'%s'", esc(cancelURL)))
+			}
+			sb.WriteString("})\n")
+			sb.WriteString("  }).then(r=>r.json()).then(d=>{\n")
+			sb.WriteString("    if(d.error){alert(d.error);return;}\n")
+			sb.WriteString("    if(d.stripe_price_id && window.Stripe){\n")
+			sb.WriteString("      // Stripe.js redirect would go here\n")
+			sb.WriteString("      alert('Checkout ready: '+d.title+' — $'+(d.amount/100));\n")
+			sb.WriteString("    } else {\n")
+			sb.WriteString("      alert('Offer: '+d.title+' — $'+(d.amount/100));\n")
+			sb.WriteString("    }\n")
+			sb.WriteString("  }).catch(e=>alert('Checkout error'));\n")
+			sb.WriteString("}\n")
+			sb.WriteString("</script>\n")
+			sb.WriteString("<button class=\"cta-button\" onclick=\"startCheckout()\" style=\"border:none;cursor:pointer\">Buy Now</button>\n")
+		}
+		sb.WriteString("</div>\n</section>\n")
 
 	case "SentanylOfferCard":
 		title, _ := props["title"].(string)
@@ -348,4 +416,18 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		// Unknown component — render as a generic section.
 		sb.WriteString(fmt.Sprintf("<section class=\"section\"><p>[%s]</p></section>\n", esc(compType)))
 	}
+}
+
+// resolveAssetURL looks up a Sentanyl asset by ObjectId and returns its
+// file_url. Returns empty string if not found or invalid.
+func resolveAssetURL(assetID string) string {
+	if !bson.IsObjectIdHex(assetID) {
+		return ""
+	}
+	var asset pkgmodels.Asset
+	err := db.GetCollection(pkgmodels.AssetCollection).FindId(bson.ObjectIdHex(assetID)).One(&asset)
+	if err != nil {
+		return ""
+	}
+	return asset.FileURL
 }

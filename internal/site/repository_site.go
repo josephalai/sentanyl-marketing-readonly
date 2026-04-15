@@ -1,6 +1,7 @@
 package site
 
 import (
+	"strings"
 	"time"
 
 	"gopkg.in/mgo.v2/bson"
@@ -83,8 +84,27 @@ func SoftDeleteSite(id, tenantID bson.ObjectId) error {
 	)
 }
 
-// FindSiteByDomain finds a published site matching a domain in attached_domains.
+// FindSiteByDomain finds a published site matching a domain.
+// Supports both attached custom domains and the dev host pattern
+// ({public_id}.site.lvh.me).
 func FindSiteByDomain(domain string) (*pkgmodels.Site, error) {
+	// Try dev host pattern first: {public_id}.site.lvh.me
+	if strings.HasSuffix(domain, ".site.lvh.me") {
+		publicID := strings.TrimSuffix(domain, ".site.lvh.me")
+		if publicID != "" {
+			var site pkgmodels.Site
+			err := db.GetCollection(pkgmodels.SiteCollection).Find(bson.M{
+				"public_id":             publicID,
+				"status":                "published",
+				"timestamps.deleted_at": nil,
+			}).One(&site)
+			if err == nil {
+				return &site, nil
+			}
+		}
+	}
+
+	// Fall back to attached custom domains.
 	var site pkgmodels.Site
 	err := db.GetCollection(pkgmodels.SiteCollection).Find(bson.M{
 		"attached_domains":      domain,

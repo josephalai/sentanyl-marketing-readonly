@@ -70,13 +70,79 @@ func ServiceDeletePage(pageID, tenantID bson.ObjectId) error {
 }
 
 // ServiceSaveDocument saves a Puck document as the draft for a page.
+// Creates a draft_snapshot version and updates the page's draft_version_id.
 func ServiceSaveDocument(pageID, tenantID bson.ObjectId, document map[string]any) error {
 	if err := ValidatePuckDocument(document); err != nil {
 		return fmt.Errorf("document validation failed: %w", err)
 	}
+
+	// Ensure component IDs exist on each node.
+	ensureComponentIDs(document)
+
+	// Fetch the page to get siteID for version creation.
+	page, err := GetSitePageByID(pageID, tenantID)
+	if err != nil {
+		return fmt.Errorf("page not found: %w", err)
+	}
+
+	// Create a draft snapshot version.
+	latestVer, _ := GetLatestVersionNumber(pageID, tenantID)
+	version := NewSitePageVersion(page.SiteID, pageID, tenantID, VersionTypeDraft, latestVer+1)
+	version.PuckRoot = document
+	version.SEO = page.SEO
+	version.Metadata = &SiteVersionMetadata{GeneratedBy: "manual"}
+	if err := CreateSitePageVersion(version); err != nil {
+		return fmt.Errorf("failed to create draft version: %w", err)
+	}
+
+	// Update the page with the new draft document and version pointer.
 	return UpdateSitePage(pageID, tenantID, bson.M{
-		"draft_document": document,
+		"draft_document":   document,
+		"draft_version_id": version.PublicId,
 	})
+}
+
+// ensureComponentIDs adds a unique ID to each component's props if one is not
+// already present. This ensures patch operations can target components reliably.
+func ensureComponentIDs(doc map[string]any) {
+	content, ok := doc["content"].([]any)
+	if !ok {
+		return
+	}
+	for _, item := range content {
+		comp, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		ensureNodeID(comp)
+	}
+}
+
+func ensureNodeID(comp map[string]any) {
+	props, ok := comp["props"].(map[string]any)
+	if !ok {
+		props = map[string]any{}
+		comp["props"] = props
+	}
+	if _, hasID := props["id"]; !hasID {
+		props["id"] = bson.NewObjectId().Hex()
+	}
+	// Recurse into Columns children.
+	if comp["type"] == "Columns" {
+		if cols, ok := props["columns"].([]any); ok {
+			for _, col := range cols {
+				if colMap, ok := col.(map[string]any); ok {
+					if children, ok := colMap["children"].([]any); ok {
+						for _, child := range children {
+							if childComp, ok := child.(map[string]any); ok {
+								ensureNodeID(childComp)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // ServiceGetDocument returns the current draft document for a page.

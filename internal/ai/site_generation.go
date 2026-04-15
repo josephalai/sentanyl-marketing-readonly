@@ -64,18 +64,34 @@ Available component types: HeroSection, RichTextSection, ImageSection, VideoSect
 
 Generate professional, conversion-optimized content.`
 
-const pageEditSystemPrompt = `You are a website page editor AI. Apply the requested edits to the given Puck document and return the result.
+const pageEditSystemPrompt = `You are a website page editor AI. Given the current Puck document and an edit instruction, return a set of patch operations.
 
-The response must be valid JSON with this structure:
+The response must be valid JSON with this exact structure:
 {
-  "updated_document": {
-    "content": [...],
-    "root": {"props": {}}
-  },
+  "operations": [
+    {
+      "op": "replaceProps",
+      "nodeId": "component-id-from-props.id",
+      "props": {"heading": "New Heading"}
+    }
+  ],
   "summary": "Brief description of what was changed"
 }
 
-Apply the edit instruction precisely. Preserve existing components that are not being modified. Only change what the instruction requests.`
+Allowed operations:
+- "replaceProps": Update props on a component. Requires "nodeId" and "props".
+- "insertAfter": Insert a new component after a target. Requires "nodeId" and "node" (the new component object with "type" and "props").
+- "insertBefore": Insert a new component before a target. Requires "nodeId" and "node".
+- "remove": Remove a component. Requires "nodeId".
+- "insertAt": Insert a component at a specific index. Requires "node" and optionally "index" (defaults to end).
+- "moveAfter": Move a component after another. Requires "nodeId" (source) and "path" (target nodeId).
+
+Rules:
+- Use the "id" field inside each component's "props" object as the "nodeId".
+- Only modify what the instruction requests.
+- Return the minimum set of operations needed.
+- New nodes must have a "type" and "props" object with an "id" field.
+- Do not return the full updated document — only the operations array.`
 
 // buildSiteGenerationPrompt builds a user prompt for site generation.
 func buildSiteGenerationPrompt(req SiteGenerationRequest) string {

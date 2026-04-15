@@ -199,6 +199,9 @@ func handleAIEditPage(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
 		return
 	}
+	if currentDoc == nil {
+		currentDoc = map[string]any{"content": []any{}, "root": map[string]any{"props": map[string]any{}}}
+	}
 
 	editReq := ai.PageEditRequest{
 		Instruction:     req.Instruction,
@@ -211,16 +214,39 @@ func handleAIEditPage(c *gin.Context) {
 		return
 	}
 
-	// Save the updated document.
-	if err := site.ServiceSaveDocument(bson.ObjectIdHex(pageID), tenantID, result.UpdatedDocument); err != nil {
+	// Convert AI patch operations to site.PatchDocument.
+	patchOps := make([]site.PatchOperation, 0, len(result.Operations))
+	for _, aiOp := range result.Operations {
+		patchOps = append(patchOps, site.PatchOperation{
+			Op:     aiOp.Op,
+			NodeID: aiOp.NodeID,
+			Path:   aiOp.Path,
+			Props:  aiOp.Props,
+			Node:   aiOp.Node,
+			Index:  aiOp.Index,
+		})
+	}
+	patches := site.PatchDocument{Operations: patchOps}
+
+	// Apply patches through the existing patch engine.
+	updatedDoc, err := site.ApplyPatches(currentDoc, patches)
+	if err != nil {
+		log.Printf("AI patch application failed: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to apply AI patches: " + err.Error()})
+		return
+	}
+
+	// Save the updated document as a new draft snapshot.
+	if err := site.ServiceSaveDocument(bson.ObjectIdHex(pageID), tenantID, updatedDoc); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save edited document"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":   "ok",
-		"document": result.UpdatedDocument,
-		"summary":  result.Summary,
+		"status":     "ok",
+		"document":   updatedDoc,
+		"operations": result.Operations,
+		"summary":    result.Summary,
 	})
 }
 

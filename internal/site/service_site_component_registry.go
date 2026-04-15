@@ -121,7 +121,8 @@ func buildComponentRegistry() []ComponentDef {
 			Label:    "Image",
 			Category: CategoryMedia,
 			Fields: []ComponentField{
-				{Name: "src", Label: "Image URL", Type: FieldTypeURL, Required: true},
+				{Name: "src", Label: "Image URL", Type: FieldTypeURL},
+				{Name: "assetId", Label: "Sentanyl Asset ID", Type: FieldTypeText},
 				{Name: "alt", Label: "Alt Text", Type: FieldTypeText},
 				{Name: "caption", Label: "Caption", Type: FieldTypeText},
 			},
@@ -135,7 +136,8 @@ func buildComponentRegistry() []ComponentDef {
 			Label:    "Video",
 			Category: CategoryMedia,
 			Fields: []ComponentField{
-				{Name: "videoUrl", Label: "Video URL", Type: FieldTypeURL, Required: true},
+				{Name: "videoUrl", Label: "Video URL", Type: FieldTypeURL},
+				{Name: "assetId", Label: "Sentanyl Asset ID", Type: FieldTypeText},
 				{Name: "autoplay", Label: "Autoplay", Type: FieldTypeToggle, DefaultValue: false},
 			},
 			DefaultProps: map[string]any{
@@ -264,6 +266,7 @@ func buildComponentRegistry() []ComponentDef {
 				{Name: "title", Label: "Form Title", Type: FieldTypeText, DefaultValue: "Get Started"},
 				{Name: "formId", Label: "Form ID (Sentanyl)", Type: FieldTypeText},
 				{Name: "buttonText", Label: "Submit Button Text", Type: FieldTypeText, DefaultValue: "Submit"},
+				{Name: "nextUrl", Label: "Redirect URL After Submit", Type: FieldTypeURL},
 				{Name: "fields", Label: "Form Fields", Type: FieldTypeArray},
 			},
 			DefaultProps: map[string]any{
@@ -281,6 +284,7 @@ func buildComponentRegistry() []ComponentDef {
 				{Name: "buttonText", Label: "Submit Button Text", Type: FieldTypeText, DefaultValue: "Send Message"},
 				{Name: "includePhone", Label: "Include Phone Field", Type: FieldTypeToggle, DefaultValue: false},
 				{Name: "includeMessage", Label: "Include Message Field", Type: FieldTypeToggle, DefaultValue: true},
+				{Name: "nextUrl", Label: "Redirect URL After Submit", Type: FieldTypeURL},
 			},
 			DefaultProps: map[string]any{
 				"title":          "Contact Us",
@@ -298,6 +302,8 @@ func buildComponentRegistry() []ComponentDef {
 				{Name: "productId", Label: "Product ID", Type: FieldTypeText},
 				{Name: "heading", Label: "Heading", Type: FieldTypeText, DefaultValue: "Complete Your Purchase"},
 				{Name: "showPriceBreakdown", Label: "Show Price Breakdown", Type: FieldTypeToggle, DefaultValue: true},
+				{Name: "successUrl", Label: "Success Redirect URL", Type: FieldTypeURL},
+				{Name: "cancelUrl", Label: "Cancel Redirect URL", Type: FieldTypeURL},
 			},
 			DefaultProps: map[string]any{
 				"heading":            "Complete Your Purchase",
