@@ -18,6 +18,7 @@ func RegisterSiteAIRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.POST("/sites/:siteId/ai-generate", handleAIGenerateSite)
 	tenantAPI.POST("/sites/:siteId/pages/:pageId/ai-generate", handleAIGeneratePage)
 	tenantAPI.POST("/sites/:siteId/pages/:pageId/ai-edit", handleAIEditPage)
+	tenantAPI.POST("/sites/:siteId/pages/:pageId/patch", handlePatchPage)
 }
 
 func handleAIGenerateSite(c *gin.Context) {
@@ -220,5 +221,56 @@ func handleAIEditPage(c *gin.Context) {
 		"status":   "ok",
 		"document": result.UpdatedDocument,
 		"summary":  result.Summary,
+	})
+}
+
+func handlePatchPage(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	pageID := c.Param("pageId")
+	if !bson.IsObjectIdHex(pageID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+		return
+	}
+
+	var patches site.PatchDocument
+	if err := c.ShouldBindJSON(&patches); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid patch document"})
+		return
+	}
+	if len(patches.Operations) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no operations provided"})
+		return
+	}
+
+	// Get current document.
+	currentDoc, err := site.ServiceGetDocument(bson.ObjectIdHex(pageID), tenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
+		return
+	}
+	if currentDoc == nil {
+		currentDoc = map[string]any{"content": []any{}, "root": map[string]any{"props": map[string]any{}}}
+	}
+
+	// Apply patches.
+	updatedDoc, err := site.ApplyPatches(currentDoc, patches)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Save the patched document.
+	if err := site.ServiceSaveDocument(bson.ObjectIdHex(pageID), tenantID, updatedDoc); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save patched document"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "ok",
+		"document": updatedDoc,
 	})
 }

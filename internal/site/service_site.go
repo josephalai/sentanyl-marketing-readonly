@@ -19,8 +19,8 @@ type SiteCreateRequest struct {
 
 // ServiceCreateSite creates a new site for a tenant.
 func ServiceCreateSite(req SiteCreateRequest, tenantID bson.ObjectId) (*pkgmodels.Site, error) {
-	if req.Name == "" {
-		return nil, fmt.Errorf("site name is required")
+	if err := ValidateSiteCreate(req); err != nil {
+		return nil, err
 	}
 	site := &pkgmodels.Site{
 		Id:       bson.NewObjectId(),
@@ -59,6 +59,9 @@ type SiteUpdateRequest struct {
 
 // ServiceUpdateSite updates a site.
 func ServiceUpdateSite(siteID, tenantID bson.ObjectId, req SiteUpdateRequest) error {
+	if err := ValidateSiteUpdate(req); err != nil {
+		return err
+	}
 	updates := bson.M{}
 	if req.Name != "" {
 		updates["name"] = req.Name

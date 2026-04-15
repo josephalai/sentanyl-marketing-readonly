@@ -18,6 +18,7 @@ func RegisterSiteRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.PUT("/sites/:siteId", handleUpdateSite)
 	tenantAPI.DELETE("/sites/:siteId", handleDeleteSite)
 	tenantAPI.POST("/sites/:siteId/domains/:domainId/attach", handleAttachDomain)
+	tenantAPI.GET("/sites/components/registry", handleComponentRegistry)
 }
 
 func handleCreateSite(c *gin.Context) {
@@ -136,4 +137,9 @@ func handleAttachDomain(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func handleComponentRegistry(c *gin.Context) {
+	defs := site.GetAllComponentDefs()
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "components": defs})
 }

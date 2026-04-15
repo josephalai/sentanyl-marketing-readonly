@@ -15,11 +15,8 @@ type PageCreateRequest struct {
 
 // ServiceCreatePage creates a new page for a site.
 func ServiceCreatePage(req PageCreateRequest, siteID, tenantID bson.ObjectId) (*SitePage, error) {
-	if req.Name == "" {
-		return nil, fmt.Errorf("page name is required")
-	}
-	if req.Slug == "" {
-		return nil, fmt.Errorf("page slug is required")
+	if err := ValidatePageCreate(req); err != nil {
+		return nil, err
 	}
 	page := NewSitePage(req.Name, req.Slug, siteID, tenantID)
 	page.IsHome = req.IsHome
@@ -48,6 +45,9 @@ type PageUpdateRequest struct {
 
 // ServiceUpdatePage updates page metadata.
 func ServiceUpdatePage(pageID, tenantID bson.ObjectId, req PageUpdateRequest) error {
+	if err := ValidatePageUpdate(req); err != nil {
+		return err
+	}
 	updates := bson.M{}
 	if req.Name != "" {
 		updates["name"] = req.Name
@@ -71,6 +71,9 @@ func ServiceDeletePage(pageID, tenantID bson.ObjectId) error {
 
 // ServiceSaveDocument saves a Puck document as the draft for a page.
 func ServiceSaveDocument(pageID, tenantID bson.ObjectId, document map[string]any) error {
+	if err := ValidatePuckDocument(document); err != nil {
+		return fmt.Errorf("document validation failed: %w", err)
+	}
 	return UpdateSitePage(pageID, tenantID, bson.M{
 		"draft_document": document,
 	})
