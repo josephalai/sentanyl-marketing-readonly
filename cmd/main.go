@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/josephalai/sentanyl/marketing-service/handlers"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/config"
@@ -66,6 +67,17 @@ func main() {
 	customerAPI := r.Group("/api/customer")
 	customerAPI.Use(auth.RequireCustomerAuth())
 	routes.RegisterCustomerLibraryRoutes(customerAPI)
+
+	// Website builder tenant routes (require JWT).
+	// Scoped under /api/tenant/sites* — Caddy routes these to marketing-service.
+	handlers.RegisterSiteRoutes(legacyTenantAPI)
+	handlers.RegisterSitePageRoutes(legacyTenantAPI)
+	handlers.RegisterSiteAIRoutes(legacyTenantAPI)
+	handlers.RegisterSitePublishRoutes(legacyTenantAPI)
+
+	// Public website delivery route (no auth — serves published HTML snapshots).
+	// Caddy routes designated website hosts to this endpoint.
+	handlers.RegisterPublicSiteRoutes(api)
 
 	// Internal routes (no auth — internal network only).
 	internal := r.Group("/internal")
