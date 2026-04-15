@@ -2,6 +2,7 @@ package site
 
 import (
 	"fmt"
+	"html"
 	"strings"
 
 	"gopkg.in/mgo.v2/bson"
@@ -60,22 +61,22 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 	sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
 	sb.WriteString("<meta charset=\"UTF-8\">\n")
 	sb.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
-	sb.WriteString(fmt.Sprintf("<title>%s</title>\n", title))
+	sb.WriteString(fmt.Sprintf("<title>%s</title>\n", html.EscapeString(title)))
 	if metaDesc != "" {
-		sb.WriteString(fmt.Sprintf("<meta name=\"description\" content=\"%s\">\n", metaDesc))
+		sb.WriteString(fmt.Sprintf("<meta name=\"description\" content=\"%s\">\n", html.EscapeString(metaDesc)))
 	}
 	if seo != nil {
 		if seo.CanonicalURL != "" {
-			sb.WriteString(fmt.Sprintf("<link rel=\"canonical\" href=\"%s\">\n", seo.CanonicalURL))
+			sb.WriteString(fmt.Sprintf("<link rel=\"canonical\" href=\"%s\">\n", html.EscapeString(seo.CanonicalURL)))
 		}
 		if seo.OpenGraphTitle != "" {
-			sb.WriteString(fmt.Sprintf("<meta property=\"og:title\" content=\"%s\">\n", seo.OpenGraphTitle))
+			sb.WriteString(fmt.Sprintf("<meta property=\"og:title\" content=\"%s\">\n", html.EscapeString(seo.OpenGraphTitle)))
 		}
 		if seo.OpenGraphDesc != "" {
-			sb.WriteString(fmt.Sprintf("<meta property=\"og:description\" content=\"%s\">\n", seo.OpenGraphDesc))
+			sb.WriteString(fmt.Sprintf("<meta property=\"og:description\" content=\"%s\">\n", html.EscapeString(seo.OpenGraphDesc)))
 		}
 		if seo.OpenGraphImageURL != "" {
-			sb.WriteString(fmt.Sprintf("<meta property=\"og:image\" content=\"%s\">\n", seo.OpenGraphImageURL))
+			sb.WriteString(fmt.Sprintf("<meta property=\"og:image\" content=\"%s\">\n", html.EscapeString(seo.OpenGraphImageURL)))
 		}
 		if seo.NoIndex {
 			sb.WriteString("<meta name=\"robots\" content=\"noindex, nofollow\">\n")
@@ -105,10 +106,10 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 	// Render navigation if site has one.
 	if site != nil && site.Navigation != nil && len(site.Navigation.HeaderNavLinks) > 0 {
 		sb.WriteString("<nav class=\"nav\"><div><strong>")
-		sb.WriteString(site.Name)
+		sb.WriteString(html.EscapeString(site.Name))
 		sb.WriteString("</strong></div><ul class=\"nav-links\">")
 		for _, link := range site.Navigation.HeaderNavLinks {
-			sb.WriteString(fmt.Sprintf("<li><a href=\"%s\">%s</a></li>", link.URL, link.Label))
+			sb.WriteString(fmt.Sprintf("<li><a href=\"%s\">%s</a></li>", html.EscapeString(link.URL), html.EscapeString(link.Label)))
 		}
 		sb.WriteString("</ul></nav>\n")
 	}
@@ -131,7 +132,7 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 			if i > 0 {
 				sb.WriteString(" | ")
 			}
-			sb.WriteString(fmt.Sprintf("<a href=\"%s\" style=\"color:#9ca3af\">%s</a>", link.URL, link.Label))
+			sb.WriteString(fmt.Sprintf("<a href=\"%s\" style=\"color:#9ca3af\">%s</a>", html.EscapeString(link.URL), html.EscapeString(link.Label)))
 		}
 		sb.WriteString("</p></footer>\n")
 	}
@@ -148,6 +149,9 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		props = map[string]any{}
 	}
 
+	// escAttr escapes a string for safe use in HTML attributes.
+	esc := func(s string) string { return html.EscapeString(s) }
+
 	switch compType {
 	case "HeroSection":
 		heading, _ := props["heading"].(string)
@@ -156,36 +160,36 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		ctaURL, _ := props["ctaUrl"].(string)
 		sb.WriteString("<section class=\"hero\">\n")
 		if heading != "" {
-			sb.WriteString(fmt.Sprintf("<h1>%s</h1>\n", heading))
+			sb.WriteString(fmt.Sprintf("<h1>%s</h1>\n", esc(heading)))
 		}
 		if subheading != "" {
-			sb.WriteString(fmt.Sprintf("<p>%s</p>\n", subheading))
+			sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(subheading)))
 		}
 		if ctaText != "" {
 			if ctaURL == "" {
 				ctaURL = "#"
 			}
-			sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", ctaURL, ctaText))
+			sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", esc(ctaURL), esc(ctaText)))
 		}
 		sb.WriteString("</section>\n")
 
 	case "RichTextSection":
 		content, _ := props["content"].(string)
 		sb.WriteString("<section class=\"section\">\n")
-		sb.WriteString(content)
+		sb.WriteString(content) // Rich text is intentionally unescaped HTML
 		sb.WriteString("\n</section>\n")
 
 	case "ImageSection":
 		src, _ := props["src"].(string)
 		alt, _ := props["alt"].(string)
 		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
-		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", src, alt))
+		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", esc(src), esc(alt)))
 		sb.WriteString("</section>\n")
 
 	case "VideoSection", "SentanylVideoPlayer":
 		videoURL, _ := props["videoUrl"].(string)
 		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
-		sb.WriteString(fmt.Sprintf("<video controls style=\"max-width:100%%\"><source src=\"%s\"></video>\n", videoURL))
+		sb.WriteString(fmt.Sprintf("<video controls style=\"max-width:100%%\"><source src=\"%s\"></video>\n", esc(videoURL)))
 		sb.WriteString("</section>\n")
 
 	case "CTASection":
@@ -194,13 +198,13 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		buttonURL, _ := props["buttonUrl"].(string)
 		sb.WriteString("<section class=\"section\" style=\"text-align:center;background:#f3f4f6;padding:60px 20px\">\n")
 		if heading != "" {
-			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", heading))
+			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
 		}
 		if buttonText != "" {
 			if buttonURL == "" {
 				buttonURL = "#"
 			}
-			sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", buttonURL, buttonText))
+			sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", esc(buttonURL), esc(buttonText)))
 		}
 		sb.WriteString("</section>\n")
 
@@ -212,8 +216,8 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 					quote, _ := t["quote"].(string)
 					author, _ := t["author"].(string)
 					sb.WriteString("<div class=\"testimonial\">\n")
-					sb.WriteString(fmt.Sprintf("<p>\"%s\"</p>\n", quote))
-					sb.WriteString(fmt.Sprintf("<p><strong>— %s</strong></p>\n", author))
+					sb.WriteString(fmt.Sprintf("<p>\"%s\"</p>\n", esc(quote)))
+					sb.WriteString(fmt.Sprintf("<p><strong>— %s</strong></p>\n", esc(author)))
 					sb.WriteString("</div>\n")
 				}
 			}
@@ -228,8 +232,8 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 					q, _ := faq["question"].(string)
 					a, _ := faq["answer"].(string)
 					sb.WriteString("<div class=\"faq-item\">\n")
-					sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", q))
-					sb.WriteString(fmt.Sprintf("<p>%s</p>\n", a))
+					sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(q)))
+					sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(a)))
 					sb.WriteString("</div>\n")
 				}
 			}
@@ -241,7 +245,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		if height == "" {
 			height = "40px"
 		}
-		sb.WriteString(fmt.Sprintf("<div style=\"height:%s\"></div>\n", height))
+		sb.WriteString(fmt.Sprintf("<div style=\"height:%s\"></div>\n", esc(height)))
 
 	case "Button":
 		label, _ := props["label"].(string)
@@ -249,7 +253,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		if href == "" {
 			href = "#"
 		}
-		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", href, label))
+		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", esc(href), esc(label)))
 
 	case "Columns":
 		sb.WriteString("<section class=\"section\"><div class=\"columns\">\n")
@@ -276,7 +280,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 	case "Footer":
 		text, _ := props["text"].(string)
 		sb.WriteString("<footer class=\"footer\"><p>")
-		sb.WriteString(text)
+		sb.WriteString(esc(text))
 		sb.WriteString("</p></footer>\n")
 
 	case "SentanylLeadForm", "SentanylContactForm":
@@ -285,7 +289,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 			formTitle = "Get in Touch"
 		}
 		sb.WriteString("<section class=\"section\">\n")
-		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", formTitle))
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(formTitle)))
 		sb.WriteString("<form style=\"max-width:500px;margin:0 auto\">\n")
 		sb.WriteString("<input type=\"text\" placeholder=\"Name\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
 		sb.WriteString("<input type=\"email\" placeholder=\"Email\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
@@ -300,7 +304,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 	case "SentanylOfferCard":
 		title, _ := props["title"].(string)
 		sb.WriteString("<div class=\"card\" style=\"text-align:center\">\n")
-		sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", title))
+		sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(title)))
 		sb.WriteString("<a class=\"cta-button\" href=\"#\">Get This Offer</a>\n")
 		sb.WriteString("</div>\n")
 
@@ -310,7 +314,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 			heading = compType
 		}
 		sb.WriteString("<section class=\"section\">\n")
-		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", heading))
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
 		sb.WriteString("<div class=\"columns\"><div class=\"card\"><p>Items loaded dynamically</p></div></div>\n")
 		sb.WriteString("</section>\n")
 
@@ -338,10 +342,10 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		if href == "" {
 			href = "#"
 		}
-		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", href, label))
+		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", esc(href), esc(label)))
 
 	default:
 		// Unknown component — render as a generic section.
-		sb.WriteString(fmt.Sprintf("<section class=\"section\"><p>[%s]</p></section>\n", compType))
+		sb.WriteString(fmt.Sprintf("<section class=\"section\"><p>[%s]</p></section>\n", esc(compType)))
 	}
 }
