@@ -38,6 +38,7 @@ func GetVersionByID(id, tenantID bson.ObjectId) (*SitePageVersion, error) {
 }
 
 // GetLatestVersionNumber returns the current max version number for a page.
+// Returns 0 with no error when no versions exist yet.
 func GetLatestVersionNumber(pageID, tenantID bson.ObjectId) (int, error) {
 	var version SitePageVersion
 	err := db.GetCollection(pkgmodels.SitePageVersionCollection).Find(bson.M{
@@ -46,7 +47,10 @@ func GetLatestVersionNumber(pageID, tenantID bson.ObjectId) (int, error) {
 		"timestamps.deleted_at": nil,
 	}).Sort("-version_number").One(&version)
 	if err != nil {
-		return 0, nil // No versions yet
+		if err.Error() == "not found" {
+			return 0, nil
+		}
+		return 0, err
 	}
 	return version.VersionNumber, nil
 }
