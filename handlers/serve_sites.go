@@ -125,14 +125,21 @@ func handleAttachDomain(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
 		return
 	}
+	domainID := c.Param("domainId")
 	var req struct {
-		Domain string `json:"domain" binding:"required"`
+		Domain string `json:"domain"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "domain is required"})
+	_ = c.ShouldBindJSON(&req)
+	// Use domainId from URL path if present (and not "_"), otherwise use body domain string.
+	domainRef := domainID
+	if domainRef == "" || domainRef == "_" {
+		domainRef = req.Domain
+	}
+	if domainRef == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "domain id or hostname is required"})
 		return
 	}
-	if err := site.ServiceAttachDomain(bson.ObjectIdHex(siteID), tenantID, req.Domain); err != nil {
+	if err := site.ServiceAttachDomain(bson.ObjectIdHex(siteID), tenantID, domainRef); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

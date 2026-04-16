@@ -343,6 +343,8 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		if offerID != "" {
 			sb.WriteString("<script>\n")
 			sb.WriteString("function startCheckout() {\n")
+			sb.WriteString("  var btn = document.getElementById('checkout-btn');\n")
+			sb.WriteString("  btn.disabled = true; btn.textContent = 'Processing...';\n")
 			sb.WriteString("  fetch('/api/marketing/site/checkout/start', {\n")
 			sb.WriteString("    method: 'POST',\n")
 			sb.WriteString("    headers: {'Content-Type': 'application/json'},\n")
@@ -355,36 +357,93 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 			}
 			sb.WriteString("})\n")
 			sb.WriteString("  }).then(r=>r.json()).then(d=>{\n")
-			sb.WriteString("    if(d.error){alert(d.error);return;}\n")
-			sb.WriteString("    if(d.stripe_price_id && window.Stripe){\n")
-			sb.WriteString("      // Stripe.js redirect would go here\n")
-			sb.WriteString("      alert('Checkout ready: '+d.title+' — $'+(d.amount/100));\n")
-			sb.WriteString("    } else {\n")
-			sb.WriteString("      alert('Offer: '+d.title+' — $'+(d.amount/100));\n")
-			sb.WriteString("    }\n")
-			sb.WriteString("  }).catch(e=>alert('Checkout error'));\n")
+			sb.WriteString("    if(d.checkout_url){window.location.href=d.checkout_url;return;}\n")
+			sb.WriteString("    if(d.error){btn.textContent=d.error;btn.disabled=false;return;}\n")
+			sb.WriteString("    btn.textContent='Buy Now';btn.disabled=false;\n")
+			sb.WriteString("  }).catch(function(){btn.textContent='Error — try again';btn.disabled=false;});\n")
 			sb.WriteString("}\n")
 			sb.WriteString("</script>\n")
-			sb.WriteString("<button class=\"cta-button\" onclick=\"startCheckout()\" style=\"border:none;cursor:pointer\">Buy Now</button>\n")
+			sb.WriteString("<button id=\"checkout-btn\" class=\"cta-button\" onclick=\"startCheckout()\" style=\"border:none;cursor:pointer\">Buy Now</button>\n")
 		}
 		sb.WriteString("</div>\n</section>\n")
 
 	case "SentanylOfferCard":
 		title, _ := props["title"].(string)
+		ctaText, _ := props["ctaText"].(string)
+		offerIDStr, _ := props["offerId"].(string)
+		if ctaText == "" {
+			ctaText = "Get This Offer"
+		}
+		// Try to load real offer data if offerId is valid.
+		if offerIDStr != "" && bson.IsObjectIdHex(offerIDStr) {
+			var offer pkgmodels.Offer
+			err := db.GetCollection(pkgmodels.OfferCollection).FindId(bson.ObjectIdHex(offerIDStr)).One(&offer)
+			if err == nil {
+				if title == "" {
+					title = offer.Title
+				}
+				sb.WriteString("<div class=\"card\" style=\"text-align:center\">\n")
+				sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(title)))
+				if offer.Amount > 0 {
+					sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.5rem;font-weight:bold;margin:0.5rem 0\">$%.2f %s</p>\n", float64(offer.Amount)/100, esc(strings.ToUpper(offer.Currency))))
+				}
+				sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"#\">%s</a>\n", esc(ctaText)))
+				sb.WriteString("</div>\n")
+				break
+			}
+		}
+		if title == "" {
+			title = "Offer"
+		}
 		sb.WriteString("<div class=\"card\" style=\"text-align:center\">\n")
 		sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(title)))
-		sb.WriteString("<a class=\"cta-button\" href=\"#\">Get This Offer</a>\n")
+		sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"#\">%s</a>\n", esc(ctaText)))
 		sb.WriteString("</div>\n")
 
-	case "SentanylOfferGrid", "SentanylProductGrid", "SentanylCourseGrid":
+	case "SentanylOfferGrid":
 		heading, _ := props["heading"].(string)
 		if heading == "" {
-			heading = compType
+			heading = "Our Offers"
 		}
 		sb.WriteString("<section class=\"section\">\n")
 		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
-		sb.WriteString("<div class=\"columns\"><div class=\"card\"><p>Items loaded dynamically</p></div></div>\n")
-		sb.WriteString("</section>\n")
+		sb.WriteString("<div class=\"columns\">\n")
+		if cards := renderOfferGrid(props); cards != "" {
+			sb.WriteString(cards)
+		} else {
+			sb.WriteString("<div class=\"card\"><p>No offers available</p></div>\n")
+		}
+		sb.WriteString("</div>\n</section>\n")
+
+	case "SentanylProductGrid":
+		heading, _ := props["heading"].(string)
+		if heading == "" {
+			heading = "Our Products"
+		}
+		sb.WriteString("<section class=\"section\">\n")
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+		sb.WriteString("<div class=\"columns\">\n")
+		if cards := renderProductGrid(props, ""); cards != "" {
+			sb.WriteString(cards)
+		} else {
+			sb.WriteString("<div class=\"card\"><p>No products available</p></div>\n")
+		}
+		sb.WriteString("</div>\n</section>\n")
+
+	case "SentanylCourseGrid":
+		heading, _ := props["heading"].(string)
+		if heading == "" {
+			heading = "Our Courses"
+		}
+		sb.WriteString("<section class=\"section\">\n")
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+		sb.WriteString("<div class=\"columns\">\n")
+		if cards := renderProductGrid(props, "course"); cards != "" {
+			sb.WriteString(cards)
+		} else {
+			sb.WriteString("<div class=\"card\"><p>No courses available</p></div>\n")
+		}
+		sb.WriteString("</div>\n</section>\n")
 
 	case "SentanylCountdown":
 		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
@@ -401,16 +460,64 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		sb.WriteString("<div class=\"card\"><h3>📅 Schedule a Call</h3></div>\n")
 		sb.WriteString("</section>\n")
 
-	case "SentanylLibraryLink", "SentanylFunnelLink", "SentanylFunnelCTA":
+	case "SentanylLibraryLink":
 		label, _ := props["label"].(string)
 		href, _ := props["href"].(string)
+		libraryID, _ := props["libraryId"].(string)
 		if label == "" {
-			label = compType
+			label = "Access Library"
+		}
+		if href == "" && libraryID != "" {
+			href = "/library/" + html.EscapeString(libraryID)
 		}
 		if href == "" {
 			href = "#"
 		}
 		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", esc(href), esc(label)))
+
+	case "SentanylFunnelLink":
+		label, _ := props["label"].(string)
+		href, _ := props["href"].(string)
+		funnelID, _ := props["funnelId"].(string)
+		if label == "" {
+			label = "Enter Funnel"
+		}
+		if href == "" && funnelID != "" && bson.IsObjectIdHex(funnelID) {
+			if funnelURL := resolveFunnelURL(funnelID); funnelURL != "" {
+				href = funnelURL
+			}
+		}
+		if href == "" {
+			href = "#"
+		}
+		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", esc(href), esc(label)))
+
+	case "SentanylFunnelCTA":
+		heading, _ := props["heading"].(string)
+		description, _ := props["description"].(string)
+		buttonText, _ := props["buttonText"].(string)
+		buttonURL, _ := props["buttonUrl"].(string)
+		funnelID, _ := props["funnelId"].(string)
+		if buttonText == "" {
+			buttonText = "Get Started"
+		}
+		if buttonURL == "" && funnelID != "" && bson.IsObjectIdHex(funnelID) {
+			if fURL := resolveFunnelURL(funnelID); fURL != "" {
+				buttonURL = fURL
+			}
+		}
+		if buttonURL == "" {
+			buttonURL = "#"
+		}
+		sb.WriteString("<section class=\"section\" style=\"text-align:center;background:#f3f4f6;padding:60px 20px\">\n")
+		if heading != "" {
+			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+		}
+		if description != "" {
+			sb.WriteString(fmt.Sprintf("<p style=\"margin:1rem 0;color:#4b5563\">%s</p>\n", esc(description)))
+		}
+		sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", esc(buttonURL), esc(buttonText)))
+		sb.WriteString("</section>\n")
 
 	default:
 		// Unknown component — render as a generic section.
@@ -430,4 +537,109 @@ func resolveAssetURL(assetID string) string {
 		return ""
 	}
 	return asset.FileURL
+}
+
+// renderOfferGrid fetches offers by comma-separated IDs and renders HTML cards.
+func renderOfferGrid(props map[string]any) string {
+	idsStr, _ := props["offerIds"].(string)
+	if idsStr == "" {
+		return ""
+	}
+	ids := parseObjectIDs(idsStr)
+	if len(ids) == 0 {
+		return ""
+	}
+	var offers []pkgmodels.Offer
+	err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
+		"_id":                   bson.M{"$in": ids},
+		"timestamps.deleted_at": nil,
+	}).All(&offers)
+	if err != nil || len(offers) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, o := range offers {
+		sb.WriteString("<div class=\"card\" style=\"text-align:center\">\n")
+		sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", html.EscapeString(o.Title)))
+		if o.Amount > 0 {
+			sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.5rem;font-weight:bold;margin:0.5rem 0\">$%.2f %s</p>\n", float64(o.Amount)/100, html.EscapeString(strings.ToUpper(o.Currency))))
+		}
+		sb.WriteString("<a class=\"cta-button\" href=\"#\">Get This Offer</a>\n")
+		sb.WriteString("</div>\n")
+	}
+	return sb.String()
+}
+
+// renderProductGrid fetches products by comma-separated IDs and renders HTML cards.
+// If productType is non-empty, filters by product_type (e.g. "course").
+func renderProductGrid(props map[string]any, productType string) string {
+	idsKey := "productIds"
+	if productType == "course" {
+		idsKey = "courseIds"
+	}
+	idsStr, _ := props[idsKey].(string)
+	if idsStr == "" {
+		return ""
+	}
+	ids := parseObjectIDs(idsStr)
+	if len(ids) == 0 {
+		return ""
+	}
+	query := bson.M{
+		"_id":                   bson.M{"$in": ids},
+		"timestamps.deleted_at": nil,
+	}
+	if productType != "" {
+		query["product_type"] = productType
+	}
+	var products []pkgmodels.Product
+	err := db.GetCollection(pkgmodels.ProductCollection).Find(query).All(&products)
+	if err != nil || len(products) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range products {
+		sb.WriteString("<div class=\"card\" style=\"text-align:center\">\n")
+		if p.ThumbnailURL != "" {
+			sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\" style=\"max-width:100%%;border-radius:8px;margin-bottom:12px\">\n", html.EscapeString(p.ThumbnailURL), html.EscapeString(p.Name)))
+		}
+		sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", html.EscapeString(p.Name)))
+		if p.Description != "" {
+			sb.WriteString(fmt.Sprintf("<p style=\"color:#6b7280;margin:0.5rem 0\">%s</p>\n", html.EscapeString(p.Description)))
+		}
+		if p.Price > 0 {
+			sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.2rem;font-weight:bold\">$%.2f</p>\n", p.Price))
+		}
+		sb.WriteString("</div>\n")
+	}
+	return sb.String()
+}
+
+// resolveFunnelURL looks up a funnel by ObjectId and returns its domain or a fallback URL.
+func resolveFunnelURL(funnelID string) string {
+	if !bson.IsObjectIdHex(funnelID) {
+		return ""
+	}
+	var f pkgmodels.Funnel
+	err := db.GetCollection(pkgmodels.FunnelCollection).FindId(bson.ObjectIdHex(funnelID)).One(&f)
+	if err != nil {
+		return ""
+	}
+	if f.Domain != "" {
+		return f.Domain
+	}
+	return "/api/funnel/" + f.PublicId
+}
+
+// parseObjectIDs splits a comma-separated string of hex IDs into ObjectId slice.
+func parseObjectIDs(s string) []bson.ObjectId {
+	parts := strings.Split(s, ",")
+	var ids []bson.ObjectId
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if bson.IsObjectIdHex(p) {
+			ids = append(ids, bson.ObjectIdHex(p))
+		}
+	}
+	return ids
 }

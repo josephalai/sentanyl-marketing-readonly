@@ -107,6 +107,18 @@ func handleAIGenerateSite(c *gin.Context) {
 			log.Printf("Failed to create AI-generated page %s: %v", pageResult.Name, err)
 			continue
 		}
+		// Create a draft snapshot version for the generated page.
+		version := site.NewSitePageVersion(siteObjID, page.Id, tenantID, site.VersionTypeDraft, 1)
+		version.PuckRoot = pageResult.PuckRoot
+		version.SEO = page.SEO
+		version.Metadata = &site.SiteVersionMetadata{GeneratedBy: "ai-generate"}
+		if err := site.CreateSitePageVersion(version); err != nil {
+			log.Printf("Failed to create version for AI-generated page %s: %v", pageResult.Name, err)
+		} else {
+			_ = site.UpdateSitePage(page.Id, tenantID, bson.M{
+				"draft_version_id": version.PublicId,
+			})
+		}
 		createdPages = append(createdPages, *page)
 	}
 

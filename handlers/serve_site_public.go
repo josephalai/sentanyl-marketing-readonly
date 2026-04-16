@@ -1,9 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -206,23 +207,6 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		return
 	}
 
-	// Check if Stripe is configured.
-	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
-	if stripeKey == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error":    "payment processing is not configured",
-			"offer_id": offer.Id.Hex(),
-			"title":    offer.Title,
-			"amount":   offer.Amount,
-			"currency": offer.Currency,
-		})
-		return
-	}
-
-	// Stripe is configured — return checkout details for client-side redirect.
-	// In a full implementation this would create a Stripe Checkout Session.
-	// For now, return the offer info and Stripe price ID so the client can
-	// initiate the checkout through Stripe.js or a redirect.
 	successURL := req.SuccessURL
 	if successURL == "" {
 		successURL = "/"
@@ -232,14 +216,94 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		cancelURL = "/"
 	}
 
+	// Resolve the tenant's Stripe keys.
+	var tenant pkgmodels.Tenant
+	err = db.GetCollection(pkgmodels.TenantCollection).FindId(s.TenantID).One(&tenant)
+	if err != nil || tenant.StripeSecretKey == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":    "payment processing is not configured for this business",
+			"offer_id": offer.Id.Hex(),
+			"title":    offer.Title,
+			"amount":   offer.Amount,
+			"currency": offer.Currency,
+		})
+		return
+	}
+
+	// Create a Stripe Checkout Session using the tenant's Stripe key.
+	stripeSessionURL, err := createStripeCheckoutSession(tenant.StripeSecretKey, &offer, successURL, cancelURL, domain)
+	if err != nil {
+		log.Printf("Stripe checkout session creation failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"status":          "ok",
-		"offer_id":        offer.Id.Hex(),
-		"title":           offer.Title,
-		"amount":          offer.Amount,
-		"currency":        offer.Currency,
-		"stripe_price_id": offer.StripePriceID,
-		"success_url":     successURL,
-		"cancel_url":      cancelURL,
+		"status":       "ok",
+		"checkout_url": stripeSessionURL,
+		"offer_id":     offer.Id.Hex(),
+		"title":        offer.Title,
+		"amount":       offer.Amount,
+		"currency":     offer.Currency,
 	})
+}
+
+// createStripeCheckoutSession creates a Stripe Checkout Session via the API.
+// Uses the tenant's own Stripe secret key.
+func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, successURL, cancelURL, domain string) (string, error) {
+	// Build line items based on offer price ID or amount.
+	lineItemParams := "line_items[0][quantity]=1"
+	if offer.StripePriceID != "" {
+		lineItemParams += "&line_items[0][price]=" + offer.StripePriceID
+	} else {
+		lineItemParams += "&line_items[0][price_data][currency]=" + offer.Currency
+		lineItemParams += "&line_items[0][price_data][unit_amount]=" + fmt.Sprintf("%d", offer.Amount)
+		lineItemParams += "&line_items[0][price_data][product_data][name]=" + offer.Title
+	}
+
+	// Build absolute URLs for success and cancel.
+	scheme := "https"
+	if strings.Contains(domain, "lvh.me") || strings.Contains(domain, "localhost") {
+		scheme = "http"
+	}
+	absSuccess := successURL
+	if !strings.HasPrefix(absSuccess, "http") {
+		absSuccess = scheme + "://" + domain + successURL
+	}
+	absCancel := cancelURL
+	if !strings.HasPrefix(absCancel, "http") {
+		absCancel = scheme + "://" + domain + cancelURL
+	}
+
+	body := "mode=payment&success_url=" + absSuccess + "&cancel_url=" + absCancel + "&" + lineItemParams
+
+	httpReq, err := http.NewRequest("POST", "https://api.stripe.com/v1/checkout/sessions", strings.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.SetBasicAuth(stripeKey, "")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("stripe API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var stripeResp struct {
+		URL   string `json:"url"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stripeResp); err != nil {
+		return "", fmt.Errorf("failed to decode stripe response: %w", err)
+	}
+	if stripeResp.Error != nil {
+		return "", fmt.Errorf("stripe error: %s", stripeResp.Error.Message)
+	}
+	if stripeResp.URL == "" {
+		return "", fmt.Errorf("stripe returned no checkout URL")
+	}
+	return stripeResp.URL, nil
 }

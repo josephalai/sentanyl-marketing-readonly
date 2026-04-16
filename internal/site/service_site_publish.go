@@ -54,13 +54,26 @@ func ServicePublishPage(pageID, tenantID bson.ObjectId) (string, error) {
 }
 
 // ServiceRestoreVersion restores a page's draft from a previous version.
+// Updates both the draft document and the draft_version_id pointer.
 func ServiceRestoreVersion(pageID, versionID, tenantID bson.ObjectId) error {
 	version, err := GetVersionByID(versionID, tenantID)
 	if err != nil {
 		return fmt.Errorf("version not found: %w", err)
 	}
+
+	// Create a new draft snapshot version for the restore.
+	latestVer, _ := GetLatestVersionNumber(pageID, tenantID)
+	newVersion := NewSitePageVersion(version.SiteID, pageID, tenantID, VersionTypeDraft, latestVer+1)
+	newVersion.PuckRoot = version.PuckRoot
+	newVersion.SEO = version.SEO
+	newVersion.Metadata = &SiteVersionMetadata{GeneratedBy: "restore"}
+	if err := CreateSitePageVersion(newVersion); err != nil {
+		return fmt.Errorf("failed to create restore version: %w", err)
+	}
+
 	return UpdateSitePage(pageID, tenantID, bson.M{
-		"draft_document": version.PuckRoot,
-		"seo":            version.SEO,
+		"draft_document":   version.PuckRoot,
+		"seo":              version.SEO,
+		"draft_version_id": newVersion.PublicId,
 	})
 }
