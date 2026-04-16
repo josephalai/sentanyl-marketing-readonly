@@ -167,3 +167,27 @@ func ServiceAttachDomain(siteID, tenantID bson.ObjectId, domainID string) error 
 		"attached_domains": domains,
 	})
 }
+
+// VerifyDomainForTLS checks that the given hostname is currently attached to
+// a published site, and that the domain is verified in the platform domain
+// system. This is used by Caddy's on-demand TLS validation endpoint.
+func VerifyDomainForTLS(hostname string) error {
+	// 1. Check that a published site has this domain attached.
+	_, err := FindSiteByDomain(hostname)
+	if err != nil {
+		return fmt.Errorf("no published site for domain %s", hostname)
+	}
+
+	// 2. Verify the domain is registered and verified in tenant_domains.
+	var tenantDomain pkgmodels.TenantDomain
+	err = db.GetCollection(pkgmodels.DomainCollection).Find(bson.M{
+		"hostname":              hostname,
+		"is_verified":           true,
+		"timestamps.deleted_at": nil,
+	}).One(&tenantDomain)
+	if err != nil {
+		return fmt.Errorf("domain %s not verified in platform", hostname)
+	}
+
+	return nil
+}

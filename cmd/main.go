@@ -78,6 +78,7 @@ func main() {
 	handlers.RegisterSitePageRoutes(legacyTenantAPI)
 	handlers.RegisterSiteAIRoutes(legacyTenantAPI)
 	handlers.RegisterSitePublishRoutes(legacyTenantAPI)
+	handlers.RegisterSiteResourceRoutes(legacyTenantAPI)
 
 	// Public website delivery route (no auth — serves published HTML snapshots).
 	// Caddy routes designated website hosts to this endpoint.
@@ -89,6 +90,10 @@ func main() {
 	// Internal routes (no auth — internal network only).
 	internal := r.Group("/internal")
 	routes.RegisterInternalRoutes(internal)
+
+	// Internal domain validation for Caddy on-demand TLS.
+	// Caddy calls this to verify a hostname before issuing a certificate.
+	handlers.RegisterInternalDomainCheck(internal)
 
 	log.Printf("marketing-service: listening on :%s", port)
 	if err := r.Run(":" + port); err != nil {
