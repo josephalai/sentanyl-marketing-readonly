@@ -22,7 +22,7 @@ func CreateSite(s *pkgmodels.Site) error {
 	now := time.Now()
 	s.SoftDeletes.CreatedAt = &now
 	if s.Status == "" {
-		s.Status = "draft"
+		s.Status = pkgmodels.SiteStatusDraft
 	}
 	return db.GetCollection(pkgmodels.SiteCollection).Insert(s)
 }
