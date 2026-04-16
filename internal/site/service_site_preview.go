@@ -116,13 +116,17 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 	}
 
 	// Render Puck content array.
+	var tenantID bson.ObjectId
+	if site != nil {
+		tenantID = site.TenantID
+	}
 	if content, ok := doc["content"].([]any); ok {
 		for _, item := range content {
 			comp, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
-			renderComponent(&sb, comp)
+			renderComponent(&sb, comp, tenantID)
 		}
 	}
 
@@ -143,7 +147,7 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 }
 
 // renderComponent renders a single Puck component to HTML.
-func renderComponent(sb *strings.Builder, comp map[string]any) {
+func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.ObjectId) {
 	compType, _ := comp["type"].(string)
 	props, _ := comp["props"].(map[string]any)
 	if props == nil {
@@ -281,7 +285,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 					if children, ok := colMap["children"].([]any); ok {
 						for _, child := range children {
 							if childComp, ok := child.(map[string]any); ok {
-								renderComponent(sb, childComp)
+								renderComponent(sb, childComp, tenantID)
 							}
 						}
 					}
@@ -423,7 +427,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		sb.WriteString("<section class=\"section\">\n")
 		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
 		sb.WriteString("<div class=\"columns\">\n")
-		if cards := renderProductGrid(props, ""); cards != "" {
+		if cards := renderProductGrid(props, "", tenantID); cards != "" {
 			sb.WriteString(cards)
 		} else {
 			sb.WriteString("<div class=\"card\"><p>No products available</p></div>\n")
@@ -438,7 +442,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any) {
 		sb.WriteString("<section class=\"section\">\n")
 		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
 		sb.WriteString("<div class=\"columns\">\n")
-		if cards := renderProductGrid(props, "course"); cards != "" {
+		if cards := renderProductGrid(props, "course", tenantID); cards != "" {
 			sb.WriteString(cards)
 		} else {
 			sb.WriteString("<div class=\"card\"><p>No courses available</p></div>\n")
@@ -572,28 +576,35 @@ func renderOfferGrid(props map[string]any) string {
 
 // renderProductGrid fetches products by comma-separated IDs and renders HTML cards.
 // If productType is non-empty, filters by product_type (e.g. "course").
-func renderProductGrid(props map[string]any, productType string) string {
+// When ids are empty and productType == "course", auto-loads up to 12 active
+// courses for tenantID so the block is useful without explicit picks.
+func renderProductGrid(props map[string]any, productType string, tenantID bson.ObjectId) string {
 	idsKey := "productIds"
 	if productType == "course" {
 		idsKey = "courseIds"
 	}
 	idsStr, _ := props[idsKey].(string)
-	if idsStr == "" {
-		return ""
-	}
 	ids := parseObjectIDs(idsStr)
-	if len(ids) == 0 {
-		return ""
-	}
-	query := bson.M{
-		"_id":                   bson.M{"$in": ids},
-		"timestamps.deleted_at": nil,
-	}
+
+	query := bson.M{"timestamps.deleted_at": nil}
 	if productType != "" {
 		query["product_type"] = productType
 	}
+	if len(ids) > 0 {
+		query["_id"] = bson.M{"$in": ids}
+	} else if productType == "course" && tenantID != "" {
+		query["tenant_id"] = tenantID
+		query["status"] = "active"
+	} else {
+		return ""
+	}
+
+	q := db.GetCollection(pkgmodels.ProductCollection).Find(query)
+	if len(ids) == 0 {
+		q = q.Sort("-timestamps.created_at").Limit(12)
+	}
 	var products []pkgmodels.Product
-	err := db.GetCollection(pkgmodels.ProductCollection).Find(query).All(&products)
+	err := q.All(&products)
 	if err != nil || len(products) == 0 {
 		return ""
 	}

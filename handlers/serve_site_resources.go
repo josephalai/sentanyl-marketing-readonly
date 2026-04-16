@@ -65,6 +65,14 @@ func handleListResources(c *gin.Context) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "resources": items})
 
+	case "courses":
+		items, err := listTenantCourses(tenantID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list courses"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "resources": items})
+
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown resource type: " + resourceType})
 	}
@@ -114,6 +122,24 @@ func listTenantFunnels(tenantID bson.ObjectId) ([]resourceItem, error) {
 	items := make([]resourceItem, 0, len(funnels))
 	for _, f := range funnels {
 		items = append(items, resourceItem{ID: f.Id.Hex(), Name: f.Name})
+	}
+	return items, nil
+}
+
+func listTenantCourses(tenantID bson.ObjectId) ([]resourceItem, error) {
+	var courses []pkgmodels.Product
+	err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"tenant_id":             tenantID,
+		"product_type":          "course",
+		"status":                "active",
+		"timestamps.deleted_at": nil,
+	}).Select(bson.M{"_id": 1, "name": 1}).All(&courses)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]resourceItem, 0, len(courses))
+	for _, c := range courses {
+		items = append(items, resourceItem{ID: c.Id.Hex(), Name: c.Name})
 	}
 	return items, nil
 }

@@ -5,6 +5,96 @@ import (
 	"strings"
 )
 
+const componentSchemaReference = `
+## Component Types and Required Props
+
+Every component in the "content" array must have "type" and "props". The "props" object MUST include a unique "id" string (e.g. "hero-1", "text-2"). Use ONLY the prop names listed below — other names will be silently ignored.
+
+### Layout / Content Components
+
+**HeroSection** — Full-width hero banner with gradient background
+  props: id, heading (string), subheading (string), ctaText (string), ctaUrl (string)
+
+**RichTextSection** — Free-form HTML content block. IMPORTANT: the "content" prop must be an HTML string, NOT plain text.
+  props: id, content (HTML string, e.g. "<h2>About Us</h2><p>We help businesses grow...</p><ul><li>Benefit one</li></ul>")
+
+**ImageSection** — Image with optional caption
+  props: id, src (image URL string), alt (string), caption (string)
+
+**VideoSection** — Embedded video player
+  props: id, videoUrl (string), autoplay ("true" or "false")
+
+**CTASection** — Call-to-action banner with button
+  props: id, heading (string), description (string), buttonText (string), buttonUrl (string)
+
+**TestimonialsSection** — Customer testimonial quotes. IMPORTANT: the "items" prop must be an array of objects, each with "quote" and "author" strings. Without items, the section renders empty.
+  props: id, heading (string), items (array of {"quote": "...", "author": "..."})
+  Example: {"type": "TestimonialsSection", "props": {"id": "testimonials-1", "heading": "What People Say", "items": [{"quote": "This changed my life!", "author": "Jane D."}, {"quote": "Incredible results.", "author": "Mike S."}]}}
+
+**FAQSection** — Frequently asked questions. IMPORTANT: the "items" prop must be an array of objects, each with "question" and "answer" strings. Without items, the section renders empty.
+  props: id, heading (string), items (array of {"question": "...", "answer": "..."})
+  Example: {"type": "FAQSection", "props": {"id": "faq-1", "heading": "FAQ", "items": [{"question": "How does it work?", "answer": "Simply sign up and..."}]}}
+
+**Spacer** — Vertical whitespace
+  props: id, height (string, e.g. "40px", "80px")
+
+**Button** — Standalone button link
+  props: id, label (string), href (string), variant ("primary" or "secondary" or "outline")
+
+### Platform Components (use only when contextually relevant)
+
+**SentanylLeadForm** — Lead capture form
+  props: id, title (string), buttonText (string), nextUrl (redirect URL string)
+
+**SentanylContactForm** — Contact form with optional fields
+  props: id, title (string), buttonText (string), includePhone ("true"/"false"), includeMessage ("true"/"false"), nextUrl (string)
+
+**SentanylCheckoutForm** — Purchase checkout form
+  props: id, heading (string), showPriceBreakdown ("true"/"false"), successUrl (string), cancelUrl (string)
+
+**SentanylOfferCard** — Single offer display card
+  props: id, title (string), showPrice ("true"/"false"), ctaText (string)
+
+**SentanylOfferGrid** — Grid of multiple offers
+  props: id, heading (string), columns (number, default 3)
+
+**SentanylProductGrid** — Grid of products
+  props: id, heading (string), columns (number, default 3)
+
+**SentanylVideoPlayer** — Enhanced video player
+  props: id, videoUrl (string), autoplay ("true"/"false"), showControls ("true"/"false")
+
+**SentanylCourseGrid** — Grid of courses
+  props: id, heading (string)
+
+**SentanylTestimonials** — Platform-sourced testimonials
+  props: id, heading (string), items (array of {"quote": "...", "author": "..."})
+
+**SentanylCountdown** — Countdown timer to a date
+  props: id, targetDate (ISO 8601 date string), heading (string)
+
+**SentanylQuiz** — Interactive quiz embed
+  props: id, title (string)
+
+**SentanylCalendarEmbed** — Calendar booking widget
+  props: id, calendarUrl (string), heading (string)
+
+**SentanylLibraryLink** — Link to content library
+  props: id, label (string), href (string)
+
+**SentanylFunnelLink** — Link to a sales funnel
+  props: id, label (string), href (string)
+
+**SentanylFunnelCTA** — Funnel call-to-action section
+  props: id, heading (string), description (string), buttonText (string), buttonUrl (string)
+
+## Content Quality Rules
+- Generate SUBSTANTIAL, realistic content for every component — never leave props empty or with generic placeholder text like "Lorem ipsum".
+- RichTextSection content should have multiple paragraphs, headings, and/or lists with real, relevant copy.
+- TestimonialsSection and FAQSection MUST include at least 3 items each with detailed, realistic content.
+- Write conversion-optimized, professional copy tailored to the business/topic described.
+`
+
 const siteGenerationSystemPrompt = `You are a website builder AI. Generate a complete website structure as JSON.
 
 The response must be valid JSON with this exact structure:
@@ -30,6 +120,7 @@ The response must be valid JSON with this exact structure:
           {
             "type": "HeroSection",
             "props": {
+              "id": "hero-1",
               "heading": "Welcome",
               "subheading": "Your tagline",
               "ctaText": "Get Started",
@@ -42,56 +133,47 @@ The response must be valid JSON with this exact structure:
     }
   ]
 }
-
-Available component types: HeroSection, RichTextSection, ImageSection, VideoSection, TestimonialsSection, FAQSection, CTASection, NavigationBar, Footer, Spacer, Columns, Button, SentanylLeadForm, SentanylCheckoutForm, SentanylOfferCard, SentanylOfferGrid, SentanylProductGrid, SentanylVideoPlayer, SentanylCourseGrid, SentanylTestimonials, SentanylCountdown, SentanylQuiz, SentanylCalendarEmbed, SentanylLibraryLink, SentanylFunnelLink, SentanylFunnelCTA, SentanylContactForm.
-
-Generate professional, conversion-optimized content. Use realistic placeholder text.`
+` + componentSchemaReference
 
 const pageGenerationSystemPrompt = `You are a website page builder AI. Generate a single page's Puck document as JSON.
 
-The response must be valid JSON with this structure:
+The response must be valid JSON with this exact structure:
 {
   "content": [
     {
       "type": "ComponentType",
-      "props": { ... }
+      "props": { "id": "unique-id", ... }
     }
   ],
   "root": {"props": {}}
 }
 
-Available component types: HeroSection, RichTextSection, ImageSection, VideoSection, TestimonialsSection, FAQSection, CTASection, Spacer, Columns, Button, SentanylLeadForm, SentanylCheckoutForm, SentanylOfferCard, SentanylOfferGrid, SentanylProductGrid, SentanylVideoPlayer, SentanylCourseGrid, SentanylTestimonials, SentanylCountdown, SentanylQuiz, SentanylCalendarEmbed, SentanylLibraryLink, SentanylFunnelLink, SentanylFunnelCTA, SentanylContactForm.
+Generate a page with at least 4-6 components. Every component must have fully populated props with substantial content.
+` + componentSchemaReference
 
-Generate professional, conversion-optimized content.`
-
-const pageEditSystemPrompt = `You are a website page editor AI. Given the current Puck document and an edit instruction, return a set of patch operations.
+const pageEditSystemPrompt = `You are a website page editor AI. Given the current Puck document and an edit instruction, return the complete modified document.
 
 The response must be valid JSON with this exact structure:
 {
-  "operations": [
-    {
-      "op": "replaceProps",
-      "nodeId": "component-id-from-props.id",
-      "props": {"heading": "New Heading"}
-    }
-  ],
+  "document": {
+    "content": [
+      {
+        "type": "ComponentType",
+        "props": { "id": "unique-id", ... }
+      }
+    ],
+    "root": {"props": {}}
+  },
   "summary": "Brief description of what was changed"
 }
 
-Allowed operations:
-- "replaceProps": Update props on a component. Requires "nodeId" and "props".
-- "insertAfter": Insert a new component after a target. Requires "nodeId" and "node" (the new component object with "type" and "props").
-- "insertBefore": Insert a new component before a target. Requires "nodeId" and "node".
-- "remove": Remove a component. Requires "nodeId".
-- "insertAt": Insert a component at a specific index. Requires "node" and optionally "index" (defaults to end).
-- "moveAfter": Move a component after another. Requires "nodeId" (source) and "path" (target nodeId).
-
 Rules:
-- Use the "id" field inside each component's "props" object as the "nodeId".
-- Only modify what the instruction requests.
-- Return the minimum set of operations needed.
-- New nodes must have a "type" and "props" object with an "id" field.
-- Do not return the full updated document — only the operations array.`
+- Preserve the existing document structure where possible.
+- Preserve existing component IDs when the component is kept or updated.
+- Apply the edit instruction fully — modify text, add/remove/reorder components as needed.
+- Return the complete document, not partial patches.
+- Every component must have fully populated props with substantial, realistic content.
+` + componentSchemaReference
 
 // buildSiteGenerationPrompt builds a user prompt for site generation.
 func buildSiteGenerationPrompt(req SiteGenerationRequest) string {

@@ -62,18 +62,8 @@ type PageEditRequest struct {
 	CurrentDocument map[string]any `json:"current_document"`
 }
 
-// PatchOp represents a single patch operation returned by the AI provider.
-type PatchOp struct {
-	Op     string         `json:"op"`
-	NodeID string         `json:"nodeId,omitempty"`
-	Path   string         `json:"path,omitempty"`
-	Props  map[string]any `json:"props,omitempty"`
-	Node   map[string]any `json:"node,omitempty"`
-	Index  *int           `json:"index,omitempty"`
-}
-
-// PageEditResult is the output of AI page editing — returns patch operations.
+// PageEditResult is the output of AI page editing — returns the full modified document.
 type PageEditResult struct {
-	Operations []PatchOp `json:"operations"`
-	Summary    string    `json:"summary"`
+	Document map[string]any `json:"document"`
+	Summary  string         `json:"summary"`
 }
