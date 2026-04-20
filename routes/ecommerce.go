@@ -5,15 +5,31 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
-	
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
-	
+
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
+
+// EnsureEcommerceIndexes creates indexes needed by the ecommerce collections.
+// Currently enforces a unique index on (tenant_id, code) for coupons so duplicate
+// redeem codes per tenant are rejected at the DB layer in addition to the
+// application-level pre-check.
+func EnsureEcommerceIndexes() {
+	col := db.GetCollection(pkgmodels.CouponCollection)
+	idx := mgo.Index{
+		Key:        []string{"tenant_id", "code"},
+		Unique:     true,
+		Background: true,
+	}
+	if err := col.EnsureIndex(idx); err != nil {
+		log.Printf("ecommerce: failed to ensure coupon unique index: %v", err)
+	}
+}
 
 // RegisterEcommerceRoutes registers all ecommerce-related endpoints.
 func RegisterEcommerceRoutes(rg *gin.RouterGroup) {
@@ -32,6 +48,8 @@ func RegisterEcommerceRoutes(rg *gin.RouterGroup) {
 	// Coupon CRUD
 	rg.POST("/coupons", handleCreateCoupon)
 	rg.GET("/coupons", handleListCoupons)
+	rg.PUT("/coupons/:id", handleUpdateCoupon)
+	rg.DELETE("/coupons/:id", handleDeleteCoupon)
 
 	// Contacts/CRM
 	rg.GET("/contacts", handleListContacts)
@@ -282,11 +300,12 @@ func handleUpdateOffer(c *gin.Context) {
 	}
 
 	var req struct {
-		Title         string   `json:"title"`
-		PricingModel  string   `json:"pricing_model"`
-		Amount        *int64   `json:"amount"`
-		Currency      string   `json:"currency"`
-		GrantedBadges []string `json:"granted_badges"`
+		Title            string   `json:"title"`
+		PricingModel     string   `json:"pricing_model"`
+		Amount           *int64   `json:"amount"`
+		Currency         string   `json:"currency"`
+		GrantedBadges    []string `json:"granted_badges"`
+		IncludedProducts []string `json:"included_products"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -308,6 +327,15 @@ func handleUpdateOffer(c *gin.Context) {
 	}
 	if req.GrantedBadges != nil {
 		update["granted_badges"] = req.GrantedBadges
+	}
+	if req.IncludedProducts != nil {
+		included := make([]bson.ObjectId, 0, len(req.IncludedProducts))
+		for _, pid := range req.IncludedProducts {
+			if bson.IsObjectIdHex(pid) {
+				included = append(included, bson.ObjectIdHex(pid))
+			}
+		}
+		update["included_products"] = included
 	}
 
 	if len(update) == 0 {
@@ -374,6 +402,21 @@ func handleCreateCoupon(c *gin.Context) {
 		return
 	}
 
+	existing, err := db.GetCollection(pkgmodels.CouponCollection).Find(bson.M{
+		"tenant_id":             tenantID,
+		"code":                  req.Code,
+		"timestamps.deleted_at": nil,
+	}).Count()
+	if err != nil {
+		log.Println("Error checking coupon uniqueness:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create coupon"})
+		return
+	}
+	if existing > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "coupon code already exists"})
+		return
+	}
+
 	coupon := pkgmodels.NewCoupon(req.Code, tenantID)
 	coupon.DiscountType = req.DiscountType
 	coupon.Value = req.Value
@@ -381,12 +424,105 @@ func handleCreateCoupon(c *gin.Context) {
 	coupon.MaxRedemptions = req.MaxRedemptions
 
 	if err := db.GetCollection(pkgmodels.CouponCollection).Insert(coupon); err != nil {
+		if mgo.IsDup(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "coupon code already exists"})
+			return
+		}
 		log.Println("Error creating coupon:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create coupon"})
 		return
 	}
 
 	c.JSON(http.StatusCreated, coupon)
+}
+
+func handleUpdateCoupon(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	couponID := c.Param("id")
+	if !bson.IsObjectIdHex(couponID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid coupon id"})
+		return
+	}
+
+	var req struct {
+		Code           *string `json:"code"`
+		DiscountType   *string `json:"discount_type"`
+		Value          *int64  `json:"value"`
+		Duration       *string `json:"duration"`
+		MaxRedemptions *int    `json:"max_redemptions"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	update := bson.M{}
+	if req.Code != nil && *req.Code != "" {
+		update["code"] = *req.Code
+	}
+	if req.DiscountType != nil && *req.DiscountType != "" {
+		update["discount_type"] = *req.DiscountType
+	}
+	if req.Value != nil {
+		update["value"] = *req.Value
+	}
+	if req.Duration != nil {
+		update["duration"] = *req.Duration
+	}
+	if req.MaxRedemptions != nil {
+		update["max_redemptions"] = *req.MaxRedemptions
+	}
+	if len(update) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	err := db.GetCollection(pkgmodels.CouponCollection).Update(
+		bson.M{"_id": bson.ObjectIdHex(couponID), "tenant_id": tenantID},
+		bson.M{"$set": update},
+	)
+	if err != nil {
+		if mgo.IsDup(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "coupon code already exists"})
+			return
+		}
+		log.Println("Error updating coupon:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update coupon"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "coupon updated"})
+}
+
+func handleDeleteCoupon(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	couponID := c.Param("id")
+	if !bson.IsObjectIdHex(couponID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid coupon id"})
+		return
+	}
+
+	err := db.GetCollection(pkgmodels.CouponCollection).Update(
+		bson.M{"_id": bson.ObjectIdHex(couponID), "tenant_id": tenantID},
+		bson.M{"$currentDate": bson.M{"timestamps.deleted_at": true}},
+	)
+	if err != nil {
+		log.Println("Error deleting coupon:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete coupon"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "coupon deleted"})
 }
 
 func handleListCoupons(c *gin.Context) {

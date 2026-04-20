@@ -38,6 +38,9 @@ func main() {
 	// Ensure MongoDB indexes for website builder collections.
 	site.EnsureIndexes()
 
+	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
+	routes.EnsureEcommerceIndexes()
+
 	// Set up Gin router.
 	r := gin.Default()
 	r.Use(httputil.CORSMiddleware())
