@@ -8,6 +8,33 @@ type SiteAIProvider interface {
 	GeneratePage(prompt string) (map[string]any, error)
 	// EditPage returns a set of patch operations to apply to the current document.
 	EditPage(req PageEditRequest) (*PageEditResult, error)
+	// GenerateEmail generates subject + HTML body for an email.
+	GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error)
+	// EditEmail rewrites an existing email subject/body given an instruction.
+	EditEmail(req EmailEditRequest) (*EmailGenerationResult, error)
+}
+
+// EmailGenerationRequest is the input for AI email generation.
+type EmailGenerationRequest struct {
+	Instruction   string   `json:"instruction"`
+	ContextChunks []string `json:"context_chunks,omitempty"` // text from context packs
+	BrandProfile  string   `json:"brand_profile,omitempty"`  // brand voice/positioning summary
+}
+
+// EmailEditRequest is the input for AI email editing.
+type EmailEditRequest struct {
+	Instruction    string   `json:"instruction"`
+	CurrentSubject string   `json:"current_subject"`
+	CurrentBody    string   `json:"current_body"`
+	ContextChunks  []string `json:"context_chunks,omitempty"`
+	BrandProfile   string   `json:"brand_profile,omitempty"`
+}
+
+// EmailGenerationResult is the output of AI email generation.
+type EmailGenerationResult struct {
+	Subject string `json:"subject"`
+	Body    string `json:"body"` // HTML body
+	Summary string `json:"summary,omitempty"`
 }
 
 // SiteGenerationRequest is the input for generating a full website.

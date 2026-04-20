@@ -61,6 +61,32 @@ func (p *OpenAIProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 	return &result, nil
 }
 
+func (p *OpenAIProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {
+	prompt := buildEmailGenerationPrompt(req.Instruction, req.ContextChunks, req.BrandProfile)
+	resp, err := p.chatCompletion(prompt, emailGenerationSystemPrompt)
+	if err != nil {
+		return nil, err
+	}
+	var result EmailGenerationResult
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse AI email response: %w", err)
+	}
+	return &result, nil
+}
+
+func (p *OpenAIProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult, error) {
+	prompt := buildEmailEditPrompt(req)
+	resp, err := p.chatCompletion(prompt, emailGenerationSystemPrompt)
+	if err != nil {
+		return nil, err
+	}
+	var result EmailGenerationResult
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse AI email edit response: %w", err)
+	}
+	return &result, nil
+}
+
 func (p *OpenAIProvider) chatCompletion(userMessage, systemMessage string) (string, error) {
 	reqBody := map[string]any{
 		"model": p.Model,

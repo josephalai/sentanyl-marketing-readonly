@@ -520,9 +520,10 @@ func handleCreateFunnelTemplate(c *gin.Context) {
 func handleUpdateFunnelTemplate(c *gin.Context) {
 	templateId := c.Param("templateId")
 	var updates struct {
-		Name        string `json:"name"`
-		HTMLContent string `json:"html_content"`
-		GlobalCSS   string `json:"global_css"`
+		Name         string                  `json:"name"`
+		HTMLContent  string                  `json:"html_content"`
+		GlobalCSS    string                  `json:"global_css"`
+		SlotManifest *pkgmodels.SlotManifest `json:"slot_manifest"`
 	}
 	if err := c.ShouldBindJSON(&updates); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid data"})
@@ -537,6 +538,9 @@ func handleUpdateFunnelTemplate(c *gin.Context) {
 	}
 	if updates.GlobalCSS != "" {
 		set["global_css"] = updates.GlobalCSS
+	}
+	if updates.SlotManifest != nil {
+		set["slot_manifest"] = updates.SlotManifest
 	}
 	if len(set) > 0 {
 		db.GetCollection(pkgmodels.FunnelTemplateCollection).Update(

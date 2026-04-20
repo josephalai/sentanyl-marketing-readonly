@@ -63,6 +63,32 @@ func (p *GeminiProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 	return &result, nil
 }
 
+func (p *GeminiProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {
+	prompt := buildEmailGenerationPrompt(req.Instruction, req.ContextChunks, req.BrandProfile)
+	resp, err := p.generateContent(emailGenerationSystemPrompt + "\n\n" + prompt)
+	if err != nil {
+		return nil, err
+	}
+	var result EmailGenerationResult
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse AI email response: %w", err)
+	}
+	return &result, nil
+}
+
+func (p *GeminiProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult, error) {
+	prompt := buildEmailEditPrompt(req)
+	resp, err := p.generateContent(emailGenerationSystemPrompt + "\n\n" + prompt)
+	if err != nil {
+		return nil, err
+	}
+	var result EmailGenerationResult
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse AI email edit response: %w", err)
+	}
+	return &result, nil
+}
+
 func (p *GeminiProvider) generateContent(prompt string) (string, error) {
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", p.Model, p.APIKey)
 

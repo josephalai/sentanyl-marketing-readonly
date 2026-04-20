@@ -48,6 +48,14 @@ func handleCreatePage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// If a starter kit was requested, pre-populate the draft document.
+	if req.StarterKitID != "" {
+		PatchPageCreationWithStarterKit(page.Id, tenantID, req.StarterKitID)
+		doc := GetStarterKitDocument(req.StarterKitID)
+		if doc != nil {
+			page.DraftDocument = doc
+		}
+	}
 	c.JSON(http.StatusCreated, gin.H{"status": "ok", "page": page})
 }
 

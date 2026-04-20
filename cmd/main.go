@@ -75,6 +75,18 @@ func main() {
 	customerAPI.Use(auth.RequireCustomerAuth())
 	routes.RegisterCustomerLibraryRoutes(customerAPI)
 
+	// Forms management (tenant-scoped CRUD for PageForm entities).
+	handlers.RegisterFormsRoutes(legacyTenantAPI)
+
+	// Email AI generation and editing.
+	handlers.RegisterEmailAIRoutes(legacyTenantAPI)
+
+	// Funnel AI — template-based generation.
+	handlers.RegisterFunnelAIRoutes(legacyTenantAPI)
+
+	// Site themes and starter kits.
+	handlers.RegisterSiteThemeRoutes(legacyTenantAPI)
+
 	// Website builder tenant routes (require JWT).
 	// Scoped under /api/tenant/sites* — Caddy routes these to marketing-service.
 	handlers.RegisterSiteRoutes(legacyTenantAPI)

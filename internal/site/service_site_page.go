@@ -8,9 +8,10 @@ import (
 
 // PageCreateRequest holds input for creating a new page.
 type PageCreateRequest struct {
-	Name   string `json:"name"`
-	Slug   string `json:"slug"`
-	IsHome bool   `json:"is_home,omitempty"`
+	Name         string `json:"name"`
+	Slug         string `json:"slug"`
+	IsHome       bool   `json:"is_home,omitempty"`
+	StarterKitID string `json:"starter_kit_id,omitempty"` // pre-seeds DraftDocument from a starter kit
 }
 
 // ServiceCreatePage creates a new page for a site.
