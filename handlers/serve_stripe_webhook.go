@@ -210,7 +210,7 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		return fmt.Errorf("grant badges: %w", err)
 	}
 
-	if err := recordSubscription(tenantID, contact.Id, offer.Id, session.Subscription); err != nil {
+	if err := recordSubscription(tenantID, contact.Id, offer.Id, session.ID, session.Subscription); err != nil {
 		return fmt.Errorf("record subscription: %w", err)
 	}
 
@@ -324,8 +324,10 @@ func grantOfferBadges(tenantID, contactID bson.ObjectId, badgeNames []string) er
 
 // recordSubscription upserts a Subscription row. For recurring payments the
 // StripeSubscriptionID is the idempotency key. For one-time payments (no
-// subscription id), the (tenant, contact, offer) triple is the idempotency key.
-func recordSubscription(tenantID, contactID, offerID bson.ObjectId, stripeSubscriptionID string) error {
+// subscription id), the (tenant, contact, offer) triple is the idempotency
+// key. StripeSessionID is always saved when present so the post-checkout
+// landing page can look up provisioning state by session id.
+func recordSubscription(tenantID, contactID, offerID bson.ObjectId, stripeSessionID, stripeSubscriptionID string) error {
 	col := db.GetCollection(pkgmodels.SubscriptionCollection)
 	var existing pkgmodels.Subscription
 	filter := bson.M{"tenant_id": tenantID, "contact_id": contactID, "offer_id": offerID}
@@ -337,9 +339,13 @@ func recordSubscription(tenantID, contactID, offerID bson.ObjectId, stripeSubscr
 		if stripeSubscriptionID != "" {
 			update["stripe_subscription_id"] = stripeSubscriptionID
 		}
+		if stripeSessionID != "" {
+			update["stripe_session_id"] = stripeSessionID
+		}
 		return col.Update(bson.M{"_id": existing.Id}, bson.M{"$set": update})
 	}
 	sub := pkgmodels.NewSubscription(tenantID, contactID, offerID)
+	sub.StripeSessionID = stripeSessionID
 	sub.StripeSubscriptionID = stripeSubscriptionID
 	now := time.Now()
 	sub.SoftDeletes.CreatedAt = &now

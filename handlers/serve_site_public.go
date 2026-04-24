@@ -209,9 +209,13 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		return
 	}
 
+	// Default to our Welcome landing page which polls the checkout lookup
+	// endpoint and routes the buyer to set-password (new account) or login
+	// (returning buyer) without needing to check email. Stripe substitutes
+	// {CHECKOUT_SESSION_ID} into the URL it redirects to.
 	successURL := req.SuccessURL
 	if successURL == "" {
-		successURL = "/"
+		successURL = "/portal/welcome?session_id={CHECKOUT_SESSION_ID}"
 	}
 	cancelURL := req.CancelURL
 	if cancelURL == "" {

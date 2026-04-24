@@ -106,6 +106,10 @@ func main() {
 	// Stripe webhook receiver (platform-wide endpoint, dispatched per-tenant via ?tenant_id=).
 	handlers.RegisterStripeWebhookRoute(api)
 
+	// Post-checkout lookup for the /portal/welcome landing page. Public —
+	// resolves tenant from the request Host header.
+	handlers.RegisterCheckoutLookupRoute(r.Group("/api/customer"))
+
 	// Internal routes (no auth — internal network only).
 	internal := r.Group("/internal")
 	routes.RegisterInternalRoutes(internal)
