@@ -209,6 +209,26 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		return
 	}
 
+	// Duplicate-course guard: if the buyer already owns every product in
+	// this offer (via a prior purchase), don't start a second Stripe charge.
+	// The returned redirect sends them to the portal login, where a flash
+	// tells them they already have access.
+	if email := strings.ToLower(strings.TrimSpace(req.Email)); email != "" {
+		if alreadyOwnsAllProductsInOffer(s.TenantID, email, &offer) {
+			scheme := "https"
+			if strings.Contains(domain, "lvh.me") || strings.Contains(domain, "localhost") {
+				scheme = "http"
+			}
+			c.JSON(http.StatusConflict, gin.H{
+				"status":       "already_purchased",
+				"message":      "You already have access to every product in this offer.",
+				"redirect_url": fmt.Sprintf("%s://%s/portal/login?already_purchased=true&email=%s", scheme, domain, url.QueryEscape(email)),
+				"email":        email,
+			})
+			return
+		}
+	}
+
 	// Default to our Welcome landing page which polls the checkout lookup
 	// endpoint and routes the buyer to set-password (new account) or login
 	// (returning buyer) without needing to check email. Stripe substitutes
@@ -252,6 +272,60 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		"amount":       offer.Amount,
 		"currency":     offer.Currency,
 	})
+}
+
+// alreadyOwnsAllProductsInOffer reports whether the contact identified by
+// email already has access (via a granted badge on any prior purchase) to
+// every product included in this offer. Used by checkout-start to prevent a
+// buyer from accidentally paying twice for the same course.
+//
+// Access resolution mirrors handleGetLibraryProducts: the contact's Badges
+// are joined to Offer.GrantedBadges by name, and the union of those offers'
+// IncludedProducts forms the owned-set.
+func alreadyOwnsAllProductsInOffer(tenantID bson.ObjectId, email string, offer *pkgmodels.Offer) bool {
+	if len(offer.IncludedProducts) == 0 {
+		return false
+	}
+	var contact pkgmodels.User
+	err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+		"email":                 pkgmodels.EmailAddress(email),
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&contact)
+	if err != nil {
+		return false
+	}
+	if len(contact.Badges) == 0 {
+		return false
+	}
+	var badgeNames []string
+	for _, badgeID := range contact.Badges {
+		var b pkgmodels.Badge
+		if err := db.GetCollection(pkgmodels.BadgeCollection).FindId(badgeID).One(&b); err == nil {
+			badgeNames = append(badgeNames, b.Name)
+		}
+	}
+	if len(badgeNames) == 0 {
+		return false
+	}
+	var ownedOffers []pkgmodels.Offer
+	_ = db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
+		"tenant_id":             tenantID,
+		"granted_badges":        bson.M{"$in": badgeNames},
+		"timestamps.deleted_at": nil,
+	}).All(&ownedOffers)
+	owned := make(map[bson.ObjectId]bool, len(ownedOffers)*2)
+	for _, o := range ownedOffers {
+		for _, pid := range o.IncludedProducts {
+			owned[pid] = true
+		}
+	}
+	for _, pid := range offer.IncludedProducts {
+		if !owned[pid] {
+			return false
+		}
+	}
+	return true
 }
 
 // createStripeCheckoutSession creates a Stripe Checkout Session via the API.
