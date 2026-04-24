@@ -102,6 +102,9 @@ func main() {
 	// Public form submission and checkout routes (no auth — for published websites).
 	handlers.RegisterPublicFormRoutes(api)
 
+	// Stripe webhook receiver (platform-wide endpoint, dispatched per-tenant via ?tenant_id=).
+	handlers.RegisterStripeWebhookRoute(api)
+
 	// Internal routes (no auth — internal network only).
 	internal := r.Group("/internal")
 	routes.RegisterInternalRoutes(internal)

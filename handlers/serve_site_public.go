@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -163,6 +164,7 @@ func upsertContact(tenantID bson.ObjectId, email, name, phone, message string) (
 type checkoutStartRequest struct {
 	Domain     string `json:"domain" form:"domain"`
 	OfferID    string `json:"offer_id" form:"offer_id"`
+	Email      string `json:"email" form:"email"`
 	SuccessURL string `json:"success_url" form:"success_url"`
 	CancelURL  string `json:"cancel_url" form:"cancel_url"`
 }
@@ -231,7 +233,7 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	}
 
 	// Create a Stripe Checkout Session using the tenant's Stripe key.
-	stripeSessionURL, err := createStripeCheckoutSession(tenant.StripeSecretKey, &offer, successURL, cancelURL, domain)
+	stripeSessionURL, err := createStripeCheckoutSession(tenant.StripeSecretKey, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email))
 	if err != nil {
 		log.Printf("Stripe checkout session creation failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
@@ -249,19 +251,22 @@ func handlePublicCheckoutStart(c *gin.Context) {
 }
 
 // createStripeCheckoutSession creates a Stripe Checkout Session via the API.
-// Uses the tenant's own Stripe secret key.
-func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, successURL, cancelURL, domain string) (string, error) {
-	// Build line items based on offer price ID or amount.
-	lineItemParams := "line_items[0][quantity]=1"
+// Uses the tenant's own Stripe secret key. Metadata (tenant_id, offer_id,
+// domain) is attached to the session and mirrored into payment_intent_data and
+// subscription_data so it survives across Stripe's internal objects and is
+// available to the Stripe webhook handler.
+func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, tenantID bson.ObjectId, successURL, cancelURL, domain, customerEmail string) (string, error) {
+	form := url.Values{}
+	form.Set("mode", "payment")
+	form.Set("line_items[0][quantity]", "1")
 	if offer.StripePriceID != "" {
-		lineItemParams += "&line_items[0][price]=" + offer.StripePriceID
+		form.Set("line_items[0][price]", offer.StripePriceID)
 	} else {
-		lineItemParams += "&line_items[0][price_data][currency]=" + offer.Currency
-		lineItemParams += "&line_items[0][price_data][unit_amount]=" + fmt.Sprintf("%d", offer.Amount)
-		lineItemParams += "&line_items[0][price_data][product_data][name]=" + offer.Title
+		form.Set("line_items[0][price_data][currency]", offer.Currency)
+		form.Set("line_items[0][price_data][unit_amount]", fmt.Sprintf("%d", offer.Amount))
+		form.Set("line_items[0][price_data][product_data][name]", offer.Title)
 	}
 
-	// Build absolute URLs for success and cancel.
 	scheme := "https"
 	if strings.Contains(domain, "lvh.me") || strings.Contains(domain, "localhost") {
 		scheme = "http"
@@ -274,10 +279,24 @@ func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, succe
 	if !strings.HasPrefix(absCancel, "http") {
 		absCancel = scheme + "://" + domain + cancelURL
 	}
+	form.Set("success_url", absSuccess)
+	form.Set("cancel_url", absCancel)
 
-	body := "mode=payment&success_url=" + absSuccess + "&cancel_url=" + absCancel + "&" + lineItemParams
+	if customerEmail != "" {
+		form.Set("customer_email", customerEmail)
+	}
 
-	httpReq, err := http.NewRequest("POST", "https://api.stripe.com/v1/checkout/sessions", strings.NewReader(body))
+	form.Set("metadata[tenant_id]", tenantID.Hex())
+	form.Set("metadata[offer_id]", offer.Id.Hex())
+	form.Set("metadata[domain]", domain)
+	form.Set("payment_intent_data[metadata][tenant_id]", tenantID.Hex())
+	form.Set("payment_intent_data[metadata][offer_id]", offer.Id.Hex())
+	form.Set("payment_intent_data[metadata][domain]", domain)
+	form.Set("subscription_data[metadata][tenant_id]", tenantID.Hex())
+	form.Set("subscription_data[metadata][offer_id]", offer.Id.Hex())
+	form.Set("subscription_data[metadata][domain]", domain)
+
+	httpReq, err := http.NewRequest("POST", "https://api.stripe.com/v1/checkout/sessions", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
