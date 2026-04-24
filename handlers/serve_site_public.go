@@ -286,15 +286,16 @@ func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, tenan
 		form.Set("customer_email", customerEmail)
 	}
 
+	// Session-level metadata is what the webhook reads. Mirror into
+	// payment_intent_data so it survives onto the PaymentIntent too. Stripe
+	// rejects subscription_data unless mode=subscription, so we omit it for
+	// now; add a branch when subscription-mode offers are supported.
 	form.Set("metadata[tenant_id]", tenantID.Hex())
 	form.Set("metadata[offer_id]", offer.Id.Hex())
 	form.Set("metadata[domain]", domain)
 	form.Set("payment_intent_data[metadata][tenant_id]", tenantID.Hex())
 	form.Set("payment_intent_data[metadata][offer_id]", offer.Id.Hex())
 	form.Set("payment_intent_data[metadata][domain]", domain)
-	form.Set("subscription_data[metadata][tenant_id]", tenantID.Hex())
-	form.Set("subscription_data[metadata][offer_id]", offer.Id.Hex())
-	form.Set("subscription_data[metadata][domain]", domain)
 
 	httpReq, err := http.NewRequest("POST", "https://api.stripe.com/v1/checkout/sessions", strings.NewReader(form.Encode()))
 	if err != nil {
