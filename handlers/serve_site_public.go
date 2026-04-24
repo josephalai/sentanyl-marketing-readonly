@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -242,10 +243,29 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		cancelURL = "/"
 	}
 
-	// Resolve the tenant's Stripe keys.
+	// Resolve the tenant's Stripe credentials. Tenants may be configured
+	// either by direct API-key entry (StripeSecretKey) or via Stripe Connect
+	// (StripeConnectAccountID + platform secret). Manual keys take precedence
+	// so a tenant can override without disconnecting.
 	var tenant pkgmodels.Tenant
 	err = db.GetCollection(pkgmodels.TenantCollection).FindId(s.TenantID).One(&tenant)
-	if err != nil || tenant.StripeSecretKey == "" {
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":    "payment processing is not configured for this business",
+			"offer_id": offer.Id.Hex(),
+			"title":    offer.Title,
+			"amount":   offer.Amount,
+			"currency": offer.Currency,
+		})
+		return
+	}
+	stripeKey := tenant.StripeSecretKey
+	stripeAcct := ""
+	if stripeKey == "" && tenant.StripeConnectAccountID != "" {
+		stripeKey = os.Getenv("STRIPE_PLATFORM_SECRET_KEY")
+		stripeAcct = tenant.StripeConnectAccountID
+	}
+	if stripeKey == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error":    "payment processing is not configured for this business",
 			"offer_id": offer.Id.Hex(),
@@ -257,7 +277,7 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	}
 
 	// Create a Stripe Checkout Session using the tenant's Stripe key.
-	stripeSessionURL, err := createStripeCheckoutSession(tenant.StripeSecretKey, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email))
+	stripeSessionURL, err := createStripeCheckoutSession(stripeKey, stripeAcct, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email))
 	if err != nil {
 		log.Printf("Stripe checkout session creation failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
@@ -333,7 +353,7 @@ func alreadyOwnsAllProductsInOffer(tenantID bson.ObjectId, email string, offer *
 // domain) is attached to the session and mirrored into payment_intent_data and
 // subscription_data so it survives across Stripe's internal objects and is
 // available to the Stripe webhook handler.
-func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, tenantID bson.ObjectId, successURL, cancelURL, domain, customerEmail string) (string, error) {
+func createStripeCheckoutSession(stripeKey, stripeAccount string, offer *pkgmodels.Offer, tenantID bson.ObjectId, successURL, cancelURL, domain, customerEmail string) (string, error) {
 	form := url.Values{}
 	form.Set("mode", "payment")
 	form.Set("line_items[0][quantity]", "1")
@@ -381,6 +401,11 @@ func createStripeCheckoutSession(stripeKey string, offer *pkgmodels.Offer, tenan
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.SetBasicAuth(stripeKey, "")
+	if stripeAccount != "" {
+		// Direct charge on a connected account. Stripe routes the charge to
+		// this account and webhooks fire against that account's endpoint.
+		httpReq.Header.Set("Stripe-Account", stripeAccount)
+	}
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {

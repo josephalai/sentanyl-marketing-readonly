@@ -1,6 +1,7 @@
 package site
 
 import (
+	"regexp"
 	"strings"
 	"time"
 
@@ -87,14 +88,20 @@ func SoftDeleteSite(id, tenantID bson.ObjectId) error {
 // FindSiteByDomain finds a published site matching a domain.
 // Supports both attached custom domains and the dev host pattern
 // ({public_id}.site.lvh.me).
+//
+// Hostname lookups are case-insensitive per RFC 1035: browsers lowercase the
+// Host header when constructing the URL, so we match public_id with a
+// case-insensitive regex anchored at both ends.
 func FindSiteByDomain(domain string) (*pkgmodels.Site, error) {
+	domain = strings.ToLower(domain)
+
 	// Try dev host pattern first: {public_id}.site.lvh.me
 	if strings.HasSuffix(domain, ".site.lvh.me") {
 		publicID := strings.TrimSuffix(domain, ".site.lvh.me")
 		if publicID != "" {
 			var site pkgmodels.Site
 			err := db.GetCollection(pkgmodels.SiteCollection).Find(bson.M{
-				"public_id":             publicID,
+				"public_id":             bson.RegEx{Pattern: "^" + regexp.QuoteMeta(publicID) + "$", Options: "i"},
 				"status":                "published",
 				"timestamps.deleted_at": nil,
 			}).One(&site)
@@ -104,10 +111,10 @@ func FindSiteByDomain(domain string) (*pkgmodels.Site, error) {
 		}
 	}
 
-	// Fall back to attached custom domains.
+	// Fall back to attached custom domains (case-insensitive match).
 	var site pkgmodels.Site
 	err := db.GetCollection(pkgmodels.SiteCollection).Find(bson.M{
-		"attached_domains":      domain,
+		"attached_domains":      bson.RegEx{Pattern: "^" + regexp.QuoteMeta(domain) + "$", Options: "i"},
 		"status":                "published",
 		"timestamps.deleted_at": nil,
 	}).One(&site)

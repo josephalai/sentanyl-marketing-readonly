@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
@@ -38,18 +39,27 @@ func handleCheckoutLookup(c *gin.Context) {
 	if forwarded := c.GetHeader("X-Forwarded-Host"); forwarded != "" {
 		hostname = forwarded
 	}
+
+	// Resolve the tenant from the hostname.  Try attached-domain lookup first
+	// (prod path), then the *.site.lvh.me dev pattern via the shared site
+	// resolver — which is the same logic used to serve the website itself.
+	var tenantID bson.ObjectId
 	var tenantDomain pkgmodels.TenantDomain
 	if err := db.GetCollection(pkgmodels.DomainCollection).Find(bson.M{
 		"hostname":              hostname,
 		"timestamps.deleted_at": nil,
-	}).One(&tenantDomain); err != nil {
+	}).One(&tenantDomain); err == nil {
+		tenantID = tenantDomain.TenantID
+	} else if s, err := site.FindSiteByDomain(hostname); err == nil {
+		tenantID = s.TenantID
+	} else {
 		c.JSON(http.StatusNotFound, gin.H{"error": "domain not found"})
 		return
 	}
 
 	var sub pkgmodels.Subscription
 	err := db.GetCollection(pkgmodels.SubscriptionCollection).Find(bson.M{
-		"tenant_id":         tenantDomain.TenantID,
+		"tenant_id":         tenantID,
 		"stripe_session_id": sessionID,
 	}).One(&sub)
 	if err != nil {

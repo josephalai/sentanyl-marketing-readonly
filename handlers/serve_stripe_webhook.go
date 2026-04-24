@@ -214,9 +214,17 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		return fmt.Errorf("record subscription: %w", err)
 	}
 
+	// Enroll the contact in every product the offer includes. Try them all
+	// (a single bad product shouldn't block the rest), but if any fail we
+	// return an error so Stripe retries delivery AND the failure is visible
+	// in the Stripe dashboard's webhook log. The lms-service enroll handler
+	// is idempotent on (tenant, contact, product), so retries are safe.
+	var enrollFailures []string
 	for _, productID := range offer.IncludedProducts {
 		if err := callInternalEnroll(tenantID, contact.Id, productID); err != nil {
-			log.Printf("[stripe webhook] enroll product %s: %v", productID.Hex(), err)
+			log.Printf("[stripe webhook] ENROLL FAILED tenant=%s offer=%s product=%s contact=%s email=%s: %v",
+				tenantID.Hex(), offer.Id.Hex(), productID.Hex(), contact.Id.Hex(), email, err)
+			enrollFailures = append(enrollFailures, fmt.Sprintf("%s: %v", productID.Hex(), err))
 		}
 	}
 
@@ -233,6 +241,10 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		}
 	}
 
+	if len(enrollFailures) > 0 {
+		return fmt.Errorf("enrollment failed for %d of %d products in offer %s: %s",
+			len(enrollFailures), len(offer.IncludedProducts), offer.Id.Hex(), strings.Join(enrollFailures, "; "))
+	}
 	return nil
 }
 
