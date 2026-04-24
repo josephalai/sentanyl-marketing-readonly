@@ -74,6 +74,7 @@ func main() {
 	customerAPI := r.Group("/api/customer")
 	customerAPI.Use(auth.RequireCustomerAuth())
 	routes.RegisterCustomerLibraryRoutes(customerAPI)
+	routes.RegisterCustomerLibraryDetailRoutes(customerAPI)
 
 	// Forms management (tenant-scoped CRUD for PageForm entities).
 	handlers.RegisterFormsRoutes(legacyTenantAPI)
