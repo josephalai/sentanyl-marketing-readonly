@@ -14,8 +14,24 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/i18n"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
+
+// resolveRequestLocale pulls the contact's stored preference (if any) and
+// hands it to the i18n resolver alongside the request. Falls through to "" if
+// no signal is present, which means base-language values are used.
+func resolveRequestLocale(c *gin.Context, tenantID, contactID bson.ObjectId) string {
+	var contact pkgmodels.User
+	pref := ""
+	if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+		"_id":       contactID,
+		"tenant_id": tenantID,
+	}).One(&contact); err == nil {
+		pref = contact.PreferredLocale
+	}
+	return i18n.ResolveLocale(c, pref)
+}
 
 // resolveCustomerContext pulls tenant + contact ids from the JWT claims.
 func resolveCustomerContext(c *gin.Context) (tenantID, contactID bson.ObjectId, ok bool) {
@@ -341,6 +357,56 @@ func applyLessonTranslation(l *pkgmodels.CourseLesson, locale string) (title, co
 	return
 }
 
+// applyProductTranslation overrides course title + description for a locale.
+// Same fallback chain as applyLessonTranslation — "es-MX" → "es" → base.
+func applyProductTranslation(p *pkgmodels.Product, locale string) (title, description string) {
+	title, description = p.Name, p.Description
+	if locale == "" || len(p.Translations) == 0 {
+		return
+	}
+	pick := func(k string) *pkgmodels.ProductTranslation {
+		if t, ok := p.Translations[k]; ok && t != nil {
+			return t
+		}
+		return nil
+	}
+	tr := pick(locale)
+	if tr == nil && strings.Contains(locale, "-") {
+		tr = pick(strings.SplitN(locale, "-", 2)[0])
+	}
+	if tr == nil {
+		return
+	}
+	if tr.Title != "" {
+		title = tr.Title
+	}
+	if tr.Description != "" {
+		description = tr.Description
+	}
+	return
+}
+
+// applyModuleTranslation overrides module title for a locale.
+func applyModuleTranslation(m *pkgmodels.CourseModule, locale string) string {
+	if locale == "" || len(m.Translations) == 0 {
+		return m.Title
+	}
+	pick := func(k string) *pkgmodels.ModuleTranslation {
+		if t, ok := m.Translations[k]; ok && t != nil {
+			return t
+		}
+		return nil
+	}
+	tr := pick(locale)
+	if tr == nil && strings.Contains(locale, "-") {
+		tr = pick(strings.SplitN(locale, "-", 2)[0])
+	}
+	if tr == nil || tr.Title == "" {
+		return m.Title
+	}
+	return tr.Title
+}
+
 func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrollment, locale string) libraryProductDTO {
 	now := time.Now()
 	progress := indexProgress(enrollment)
@@ -353,7 +419,7 @@ func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrol
 	for _, m := range p.CourseModules {
 		dto := libraryModuleDTO{
 			Slug:     m.Slug,
-			Title:    m.Title,
+			Title:    applyModuleTranslation(m, locale),
 			Order:    m.Order,
 			QuizSlug: m.QuizSlug,
 		}
@@ -416,12 +482,13 @@ func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrol
 			priorModuleQuizPassed = passed
 		}
 	}
+	title, description := applyProductTranslation(p, locale)
 	return libraryProductDTO{
 		ID:             p.Id.Hex(),
 		PublicID:       p.PublicId,
-		Name:           p.Name,
-		Title:          p.Name,
-		Description:    p.Description,
+		Name:           title,
+		Title:          title,
+		Description:    description,
 		ProductType:    p.ProductType,
 		ThumbnailURL:   p.ThumbnailURL,
 		Status:         p.Status,
@@ -442,7 +509,7 @@ func handleGetLibraryProductDetail(c *gin.Context) {
 		return
 	}
 	enrollment := findEnrollment(tenantID, contactID, product.Id)
-	c.JSON(http.StatusOK, toLibraryProductDTO(product, enrollment, c.Query("locale")))
+	c.JSON(http.StatusOK, toLibraryProductDTO(product, enrollment, resolveRequestLocale(c, tenantID, contactID)))
 }
 
 // --- Enrollments ---
@@ -775,7 +842,8 @@ func handleGetLibraryQuiz(c *gin.Context) {
 		return
 	}
 	// Strip answer keys before sending to the client.
-	c.JSON(http.StatusOK, sanitizeQuizForCustomer(&quiz))
+	locale := resolveRequestLocale(c, tenantID, contactID)
+	c.JSON(http.StatusOK, sanitizeQuizForCustomer(&quiz, locale))
 }
 
 func customerEnrolledInProduct(tenantID, contactID, productID bson.ObjectId) bool {
@@ -787,14 +855,69 @@ func customerEnrolledInProduct(tenantID, contactID, productID bson.ObjectId) boo
 	return n > 0
 }
 
-func sanitizeQuizForCustomer(q *pkgmodels.LMSQuiz) gin.H {
+// pickQuizTranslation returns the resolved QuizTranslation for the locale,
+// falling back to the language-only tag (es-MX → es) before giving up. Nil
+// means "use base values"; per-field empty strings still fall back to base.
+func pickQuizTranslation(q *pkgmodels.LMSQuiz, locale string) *pkgmodels.QuizTranslation {
+	if locale == "" || len(q.Translations) == 0 {
+		return nil
+	}
+	if t, ok := q.Translations[locale]; ok && t != nil {
+		return t
+	}
+	if i := strings.Index(locale, "-"); i > 0 {
+		if t, ok := q.Translations[locale[:i]]; ok && t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+// translateQuestion applies a per-question override. Options is positional —
+// an empty translated entry falls back to the base option at that index so a
+// partial translation never erases an option.
+func translateQuestion(qu *pkgmodels.LMSQuizQuestion, qt *pkgmodels.QuizTranslation) (title string, options []string) {
+	title = qu.Title
+	options = append([]string(nil), qu.Options...)
+	if qt == nil || len(qt.Questions) == 0 {
+		return
+	}
+	tr, ok := qt.Questions[qu.Slug]
+	if !ok || tr == nil {
+		return
+	}
+	if tr.Title != "" {
+		title = tr.Title
+	}
+	if len(tr.Options) > 0 {
+		merged := make([]string, len(options))
+		copy(merged, options)
+		for i, v := range tr.Options {
+			if i >= len(merged) {
+				merged = append(merged, v)
+			} else if v != "" {
+				merged[i] = v
+			}
+		}
+		options = merged
+	}
+	return
+}
+
+func sanitizeQuizForCustomer(q *pkgmodels.LMSQuiz, locale string) gin.H {
+	qt := pickQuizTranslation(q, locale)
+	title := q.Title
+	if qt != nil && qt.Title != "" {
+		title = qt.Title
+	}
 	questions := make([]gin.H, 0, len(q.Questions))
 	for _, qu := range q.Questions {
+		qTitle, qOptions := translateQuestion(qu, qt)
 		questions = append(questions, gin.H{
 			"slug":    qu.Slug,
 			"type":    qu.Type,
-			"title":   qu.Title,
-			"options": qu.Options,
+			"title":   qTitle,
+			"options": qOptions,
 			"order":   qu.Order,
 		})
 	}
@@ -802,7 +925,7 @@ func sanitizeQuizForCustomer(q *pkgmodels.LMSQuiz) gin.H {
 		"id":             q.Id.Hex(),
 		"public_id":      q.PublicId,
 		"slug":           q.Slug,
-		"title":          q.Title,
+		"title":          title,
 		"module_slug":    q.ModuleSlug,
 		"pass_threshold": q.PassThreshold,
 		"max_attempts":   q.MaxAttempts,

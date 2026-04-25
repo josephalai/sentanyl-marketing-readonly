@@ -698,5 +698,15 @@ func handleGetLibraryProducts(c *gin.Context) {
 		"timestamps.deleted_at": nil,
 	}).All(&products)
 
+	locale := resolveRequestLocale(c, tenantID, contactID)
+	for i := range products {
+		title, description := applyProductTranslation(&products[i], locale)
+		products[i].Name = title
+		products[i].Description = description
+		for j := range products[i].CourseModules {
+			products[i].CourseModules[j].Title = applyModuleTranslation(products[i].CourseModules[j], locale)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"products": products})
 }
