@@ -121,6 +121,10 @@ func handleStripeWebhook(c *gin.Context) {
 		if err := processSubscriptionStateChange(tenantID, evt.Data.Object); err != nil {
 			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
 		}
+	case "charge.refunded", "charge.refund.updated":
+		if err := processChargeRefunded(tenantID, evt.Data.Object); err != nil {
+			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
+		}
 	default:
 		// Acknowledge unhandled events so Stripe stops retrying.
 	}
@@ -488,4 +492,128 @@ func processSubscriptionStateChange(tenantID bson.ObjectId, raw json.RawMessage)
 		bson.M{"tenant_id": tenantID, "stripe_subscription_id": sub.ID},
 		bson.M{"$set": bson.M{"status": newStatus, "timestamps.updated_at": time.Now()}},
 	)
+}
+
+// stripeCharge is the subset of Charge fields we use for refund handling.
+type stripeCharge struct {
+	ID                  string            `json:"id"`
+	Amount              int64             `json:"amount"`
+	AmountRefunded      int64             `json:"amount_refunded"`
+	Refunded            bool              `json:"refunded"`
+	PaymentIntent       string            `json:"payment_intent"`
+	Metadata            map[string]string `json:"metadata"`
+	PaymentIntentMeta   map[string]string `json:"payment_intent_metadata,omitempty"`
+}
+
+// processChargeRefunded handles the Stripe charge.refunded event by revoking
+// any enrollments granted by the original purchase and stripping the offer's
+// granted badges from the contact. Idempotent — already-revoked enrollments
+// stay revoked.
+//
+// Lookup chain: charge.metadata.offer_id (set by checkout) OR the linked
+// payment_intent's metadata; if neither resolves we log + skip rather than
+// guess.
+func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
+	var charge stripeCharge
+	if err := json.Unmarshal(raw, &charge); err != nil {
+		return err
+	}
+
+	offerHex := charge.Metadata["offer_id"]
+	if offerHex == "" {
+		offerHex = charge.PaymentIntentMeta["offer_id"]
+	}
+	contactEmail := strings.ToLower(strings.TrimSpace(charge.Metadata["contact_email"]))
+
+	if offerHex == "" || !bson.IsObjectIdHex(offerHex) {
+		log.Printf("[stripe webhook] refund: no resolvable offer_id on charge %s — skipping", charge.ID)
+		return nil
+	}
+	offerID := bson.ObjectIdHex(offerHex)
+
+	var offer pkgmodels.Offer
+	if err := db.GetCollection(pkgmodels.OfferCollection).FindId(offerID).One(&offer); err != nil {
+		return fmt.Errorf("offer %s lookup failed: %w", offerHex, err)
+	}
+
+	// Find the contact: prefer email metadata; fall back to the most recent
+	// Subscription on this offer if nothing else identifies the buyer.
+	var contact pkgmodels.User
+	contactErr := error(nil)
+	if contactEmail != "" {
+		contactErr = db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+			"tenant_id": tenantID,
+			"email":     pkgmodels.EmailAddress(contactEmail),
+		}).One(&contact)
+	}
+	if contactErr != nil || contactEmail == "" {
+		var sub pkgmodels.Subscription
+		err := db.GetCollection(pkgmodels.SubscriptionCollection).Find(bson.M{
+			"tenant_id":         tenantID,
+			"offer_id":          offerID,
+			"stripe_session_id": bson.M{"$ne": ""},
+		}).Sort("-timestamps.created_at").One(&sub)
+		if err != nil {
+			return fmt.Errorf("could not resolve refund contact for offer %s", offerHex)
+		}
+		if err := db.GetCollection(pkgmodels.UserCollection).FindId(sub.ContactID).One(&contact); err != nil {
+			return fmt.Errorf("contact %s missing", sub.ContactID.Hex())
+		}
+	}
+
+	now := time.Now()
+
+	// Revoke every enrollment for this contact + offer-included products.
+	if len(offer.IncludedProducts) > 0 {
+		if _, err := db.GetCollection(pkgmodels.CourseEnrollmentCollection).UpdateAll(
+			bson.M{
+				"tenant_id":  tenantID,
+				"contact_id": contact.Id,
+				"product_id": bson.M{"$in": offer.IncludedProducts},
+				"revoked_at": nil,
+			},
+			bson.M{"$set": bson.M{
+				"status":                "refunded",
+				"revoked_at":            now,
+				"timestamps.updated_at": now,
+			}},
+		); err != nil {
+			log.Printf("[stripe webhook] refund: revoke enrollments: %v", err)
+		}
+	}
+
+	// Strip granted badges from the contact so the library Re-renders with
+	// no access to the refunded course's content.
+	if len(offer.GrantedBadges) > 0 {
+		var badgeIDs []bson.ObjectId
+		var badges []pkgmodels.Badge
+		_ = db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{
+			"tenant_id": tenantID,
+			"name":      bson.M{"$in": offer.GrantedBadges},
+		}).All(&badges)
+		for _, b := range badges {
+			badgeIDs = append(badgeIDs, b.Id)
+		}
+		if len(badgeIDs) > 0 {
+			_ = db.GetCollection(pkgmodels.UserCollection).Update(
+				bson.M{"_id": contact.Id},
+				bson.M{"$pull": bson.M{"badges": bson.M{"$in": badgeIDs}}},
+			)
+		}
+	}
+
+	// Mark the matching subscription record as refunded.
+	_, _ = db.GetCollection(pkgmodels.SubscriptionCollection).UpdateAll(
+		bson.M{
+			"tenant_id":  tenantID,
+			"contact_id": contact.Id,
+			"offer_id":   offerID,
+			"status":     bson.M{"$ne": "refunded"},
+		},
+		bson.M{"$set": bson.M{"status": "refunded", "timestamps.updated_at": now}},
+	)
+
+	log.Printf("[stripe webhook] refund: revoked offer %s for contact %s (charge %s)",
+		offerHex, contact.Id.Hex(), charge.ID)
+	return nil
 }

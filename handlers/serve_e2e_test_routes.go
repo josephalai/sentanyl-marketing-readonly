@@ -13,12 +13,63 @@ import (
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
+// jsonMarshalImpl exists so tests can swap encoders if they need to. Currently
+// just delegates to encoding/json.Marshal.
+func jsonMarshalImpl(v interface{}) ([]byte, error) { return json.Marshal(v) }
+
 // RegisterE2ETestRoutes mounts test-only endpoints used by the puppeteer
 // harness. All routes are gated by SENTANYL_E2E_MODE=1; in production they
 // reject every request with 403. Paths are relative — caller chooses prefix
 // (e.g. /internal or /api/marketing/test).
 func RegisterE2ETestRoutes(rg *gin.RouterGroup) {
 	rg.POST("/simulate-purchase", handleSimulatePurchase)
+	rg.POST("/simulate-refund", handleSimulateRefund)
+}
+
+// handleSimulateRefund drives the production refund handler with a synthetic
+// stripe charge.refunded payload. This is the same code path the live Stripe
+// webhook uses (processChargeRefunded), just without signature verification —
+// gated by SENTANYL_E2E_MODE=1.
+func handleSimulateRefund(c *gin.Context) {
+	if os.Getenv("SENTANYL_E2E_MODE") != "1" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "e2e mode disabled"})
+		return
+	}
+	var req struct {
+		TenantID string `json:"tenant_id" binding:"required"`
+		OfferID  string `json:"offer_id" binding:"required"`
+		Email    string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !bson.IsObjectIdHex(req.TenantID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant_id"})
+		return
+	}
+	tenantID := bson.ObjectIdHex(req.TenantID)
+
+	charge := stripeCharge{
+		ID: "ch_test_" + bson.NewObjectId().Hex(),
+		Metadata: map[string]string{
+			"offer_id":      req.OfferID,
+			"contact_email": strings.ToLower(strings.TrimSpace(req.Email)),
+		},
+		Refunded: true,
+	}
+	raw, _ := jsonMarshal(charge)
+	if err := processChargeRefunded(tenantID, raw); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "charge_id": charge.ID})
+}
+
+// jsonMarshal is a thin alias so the file doesn't need its own json import.
+// (We already import encoding/json elsewhere in handlers/.)
+func jsonMarshal(v interface{}) ([]byte, error) {
+	return jsonMarshalImpl(v)
 }
 
 // simulatePurchaseRequest mirrors the data Stripe would deliver — without

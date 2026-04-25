@@ -107,9 +107,9 @@ func RegisterCustomerLibraryDetailRoutes(rg *gin.RouterGroup) {
 // --- Product detail ---
 
 // libraryLessonDTO mirrors CourseLesson for the customer library response,
-// adding `available_at` / `is_locked` and stripping playable fields when the
-// lesson hasn't dripped yet (cheap server-side gate; client cannot bypass by
-// hitting the URL directly because video_url is omitted).
+// adding `available_at` / `is_locked` / `lock_reason` and stripping playable
+// fields when the lesson hasn't dripped yet (cheap server-side gate; client
+// cannot bypass by hitting the URL directly because video_url is omitted).
 type libraryLessonDTO struct {
 	Slug             string                 `json:"slug"`
 	Title            string                 `json:"title"`
@@ -126,7 +126,10 @@ type libraryLessonDTO struct {
 	DripMinutes      int                    `json:"drip_minutes,omitempty"`
 	VideoMode        pkgmodels.VideoMode    `json:"video_mode,omitempty"`
 	AvailableAt      string                 `json:"available_at,omitempty"`
+	LiveStartsAt     string                 `json:"live_starts_at,omitempty"`
+	LiveEndsAt       string                 `json:"live_ends_at,omitempty"`
 	IsLocked         bool                   `json:"is_locked"`
+	LockReason       string                 `json:"lock_reason,omitempty"`
 }
 
 type libraryModuleDTO struct {
@@ -153,27 +156,54 @@ type libraryProductDTO struct {
 	TotalDurationS int64              `json:"total_duration_sec,omitempty"`
 }
 
-// findLessonOnProduct walks the product's modules to return the matching lesson
-// (or nil). Used by the progress gate to enforce drip windows server-side.
-func findLessonOnProduct(tenantID, productID bson.ObjectId, moduleSlug, lessonSlug string) *pkgmodels.CourseLesson {
-	var product pkgmodels.Product
+// getProduct loads a product by id, scoped to a tenant. Returns nil on miss.
+func getProduct(tenantID, productID bson.ObjectId) *pkgmodels.Product {
+	var p pkgmodels.Product
 	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
 		"_id":       productID,
 		"tenant_id": tenantID,
-	}).One(&product); err != nil {
+	}).One(&p); err != nil {
 		return nil
 	}
-	for _, m := range product.CourseModules {
-		if moduleSlug != "" && m.Slug != moduleSlug {
-			continue
-		}
+	return &p
+}
+
+// lessonContext finds a lesson on a product and computes the two pieces of
+// gating context the resolveGate predicates need: whether the immediately-
+// preceding lesson (display order) is complete, and whether every prior
+// module's quiz (if any) has been passed.
+func lessonContext(p *pkgmodels.Product, enrollment pkgmodels.CourseEnrollment, moduleSlug, lessonSlug string) (
+	lesson *pkgmodels.CourseLesson,
+	priorLessonComplete bool,
+	priorQuizPassed bool,
+) {
+	priorLessonComplete = true
+	priorQuizPassed = true
+	progress := indexProgress(&enrollment)
+	for _, m := range p.CourseModules {
 		for _, l := range m.Lessons {
-			if l.Slug == lessonSlug {
-				return l
+			if m.Slug == moduleSlug && l.Slug == lessonSlug {
+				lesson = l
+				return
+			}
+			if pp, ok := progress[progressKey{m.Slug, l.Slug}]; ok && pp.Completed {
+				priorLessonComplete = true
+			} else {
+				priorLessonComplete = false
 			}
 		}
+		if m.QuizSlug != "" {
+			passed := false
+			for _, pp := range enrollment.GetProgressOrEmpty() {
+				if pp.ModuleSlug == m.Slug && pp.QuizPassed != nil && *pp.QuizPassed {
+					passed = true
+					break
+				}
+			}
+			priorQuizPassed = passed
+		}
 	}
-	return nil
+	return
 }
 
 // findEnrollment returns the active enrollment for a contact on a product, if
@@ -190,9 +220,136 @@ func findEnrollment(tenantID, contactID, productID bson.ObjectId) *pkgmodels.Cou
 	return &e
 }
 
-func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrollment) libraryProductDTO {
+// dripAnchor returns the time the drip clock starts ticking for this product.
+// "enrollment" (default) uses the contact's EnrolledAt; "fixed_date" uses the
+// product's DripAnchorDate so an entire cohort unlocks together.
+func dripAnchor(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrollment) time.Time {
+	if p != nil && p.DripAnchor == "fixed_date" && p.DripAnchorDate != nil {
+		return *p.DripAnchorDate
+	}
+	if enrollment != nil {
+		return enrollment.EnrolledAt
+	}
+	return time.Time{}
+}
+
+// lessonProgressMap indexes the contact's progress by (module_slug, lesson_slug).
+type progressKey struct{ module, lesson string }
+
+func indexProgress(enrollment *pkgmodels.CourseEnrollment) map[progressKey]*pkgmodels.LessonProgress {
+	out := map[progressKey]*pkgmodels.LessonProgress{}
+	if enrollment == nil {
+		return out
+	}
+	for _, p := range enrollment.Progress {
+		out[progressKey{p.ModuleSlug, p.LessonSlug}] = p
+	}
+	return out
+}
+
+// gateState holds the result of resolving every lock predicate for a single
+// lesson. Reason is the first predicate that failed (precedence: live → drip
+// → sequential → quiz).
+type gateState struct {
+	locked     bool
+	availableAt time.Time
+	reason     string
+}
+
+// resolveGate computes the lock state for a single lesson. priorLessonComplete
+// signals whether the immediately-preceding lesson (display order) has been
+// completed. priorModuleQuizPassed is true when no prior module has a quiz, OR
+// the most-recent prior module's quiz was passed.
+func resolveGate(
+	now time.Time,
+	p *pkgmodels.Product,
+	l *pkgmodels.CourseLesson,
+	enrollment *pkgmodels.CourseEnrollment,
+	priorLessonComplete bool,
+	priorModuleQuizPassed bool,
+) gateState {
+	g := gateState{}
+	// Live event window — applies to everyone, even free lessons.
+	if l.LiveStartsAt != nil && now.Before(*l.LiveStartsAt) {
+		g.locked = true
+		g.availableAt = *l.LiveStartsAt
+		g.reason = "live_not_started"
+		return g
+	}
+	if l.LiveEndsAt != nil && now.After(*l.LiveEndsAt) {
+		g.locked = true
+		g.availableAt = *l.LiveEndsAt
+		g.reason = "live_ended"
+		return g
+	}
+	// Free lessons bypass the remaining gates so previews stay viewable.
+	if l.IsFree {
+		return g
+	}
+	// Drip window relative to the configured anchor.
+	if enrollment != nil {
+		anchor := dripAnchor(p, enrollment)
+		avail := anchor.Add(l.DripDuration())
+		g.availableAt = avail
+		if now.Before(avail) {
+			g.locked = true
+			g.reason = "drip"
+			return g
+		}
+	}
+	// Sequential gating: previous lesson must be completed.
+	if p != nil && p.SequentialGating && !priorLessonComplete {
+		g.locked = true
+		g.reason = "sequential"
+		return g
+	}
+	// Quiz pass gate: any prior module with a quiz must have been passed.
+	if p != nil && p.RequireQuizPass && !priorModuleQuizPassed {
+		g.locked = true
+		g.reason = "quiz_required"
+		return g
+	}
+	return g
+}
+
+// applyLessonTranslation overrides title/content fields if a matching locale
+// (or a "language-only" fallback like "en" for "en-US") is present.
+func applyLessonTranslation(l *pkgmodels.CourseLesson, locale string) (title, contentHTML string) {
+	title, contentHTML = l.Title, l.ContentHTML
+	if locale == "" || len(l.Translations) == 0 {
+		return
+	}
+	pickKey := func(k string) *pkgmodels.LessonTranslation {
+		if t, ok := l.Translations[k]; ok && t != nil {
+			return t
+		}
+		return nil
+	}
+	tr := pickKey(locale)
+	if tr == nil && strings.Contains(locale, "-") {
+		tr = pickKey(strings.SplitN(locale, "-", 2)[0])
+	}
+	if tr == nil {
+		return
+	}
+	if tr.Title != "" {
+		title = tr.Title
+	}
+	if tr.ContentHTML != "" {
+		contentHTML = tr.ContentHTML
+	}
+	return
+}
+
+func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrollment, locale string) libraryProductDTO {
 	now := time.Now()
+	progress := indexProgress(enrollment)
 	mods := make([]libraryModuleDTO, 0, len(p.CourseModules))
+
+	// Track running state for sequential + quiz gates.
+	priorLessonComplete := true   // first lesson has nothing before it
+	priorModuleQuizPassed := true // before any module has a quiz, this is vacuously true
+
 	for _, m := range p.CourseModules {
 		dto := libraryModuleDTO{
 			Slug:     m.Slug,
@@ -201,15 +358,17 @@ func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrol
 			QuizSlug: m.QuizSlug,
 		}
 		for _, l := range m.Lessons {
+			gate := resolveGate(now, p, l, enrollment, priorLessonComplete, priorModuleQuizPassed)
+			title, contentHTML := applyLessonTranslation(l, locale)
 			ldto := libraryLessonDTO{
 				Slug:          l.Slug,
-				Title:         l.Title,
+				Title:         title,
 				Order:         l.Order,
 				VideoURL:      l.VideoURL,
 				MediaPublicId: l.MediaPublicId,
 				Duration:      l.Duration,
 				DurationSec:   l.DurationSec,
-				ContentHTML:   l.ContentHTML,
+				ContentHTML:   contentHTML,
 				IsFree:        l.IsFree,
 				IsDraft:       l.IsDraft,
 				DripDays:      l.DripDays,
@@ -217,19 +376,45 @@ func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrol
 				DripMinutes:   l.DripMinutes,
 				VideoMode:     l.VideoMode,
 			}
-			if enrollment != nil {
-				avail := enrollment.EnrolledAt.Add(l.DripDuration())
-				ldto.AvailableAt = avail.Format(time.RFC3339)
-				if now.Before(avail) && !l.IsFree {
-					ldto.IsLocked = true
-					ldto.VideoURL = ""
-					ldto.MediaPublicId = ""
-					ldto.ContentHTML = ""
-				}
+			if l.LiveStartsAt != nil {
+				ldto.LiveStartsAt = l.LiveStartsAt.Format(time.RFC3339)
+			}
+			if l.LiveEndsAt != nil {
+				ldto.LiveEndsAt = l.LiveEndsAt.Format(time.RFC3339)
+			}
+			if !gate.availableAt.IsZero() {
+				ldto.AvailableAt = gate.availableAt.Format(time.RFC3339)
+			}
+			if gate.locked {
+				ldto.IsLocked = true
+				ldto.LockReason = gate.reason
+				ldto.VideoURL = ""
+				ldto.MediaPublicId = ""
+				ldto.ContentHTML = ""
 			}
 			dto.Lessons = append(dto.Lessons, ldto)
+
+			// Update running state for the NEXT lesson in display order.
+			if pp, ok := progress[progressKey{m.Slug, l.Slug}]; ok && pp.Completed {
+				priorLessonComplete = true
+			} else {
+				priorLessonComplete = false
+			}
 		}
 		mods = append(mods, dto)
+
+		// After finishing a module: if it has a quiz, the next module's quiz
+		// gate depends on whether this module's quiz was passed.
+		if m.QuizSlug != "" {
+			passed := false
+			for _, p := range enrollment.GetProgressOrEmpty() {
+				if p.ModuleSlug == m.Slug && p.QuizPassed != nil && *p.QuizPassed {
+					passed = true
+					break
+				}
+			}
+			priorModuleQuizPassed = passed
+		}
 	}
 	return libraryProductDTO{
 		ID:             p.Id.Hex(),
@@ -257,7 +442,7 @@ func handleGetLibraryProductDetail(c *gin.Context) {
 		return
 	}
 	enrollment := findEnrollment(tenantID, contactID, product.Id)
-	c.JSON(http.StatusOK, toLibraryProductDTO(product, enrollment))
+	c.JSON(http.StatusOK, toLibraryProductDTO(product, enrollment, c.Query("locale")))
 }
 
 // --- Enrollments ---
@@ -334,24 +519,34 @@ func handleUpdateLessonProgress(c *gin.Context) {
 
 	now := time.Now()
 
-	// Drip gate: reject progress on lessons that haven't released yet for this
-	// enrollment. is_free lessons bypass the gate (they're previewable).
-	if lesson := findLessonOnProduct(tenantID, enrollment.ProductID, req.ModuleSlug, req.LessonSlug); lesson != nil {
-		availableAt := enrollment.EnrolledAt.Add(lesson.DripDuration())
-		if !lesson.IsFree && now.Before(availableAt) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error":        "lesson_locked",
-				"available_at": availableAt.Format(time.RFC3339),
-			})
-			return
+	// Resolve the product so we can run the same gate the DTO does. Reject
+	// any progress update for a lesson that's currently locked (drip / live /
+	// sequential / quiz) so a malicious client can't smash through.
+	product := getProduct(tenantID, enrollment.ProductID)
+	if product != nil {
+		lesson, priorComplete, priorQuizPassed := lessonContext(product, enrollment, req.ModuleSlug, req.LessonSlug)
+		if lesson != nil {
+			gate := resolveGate(now, product, lesson, &enrollment, priorComplete, priorQuizPassed)
+			if gate.locked {
+				resp := gin.H{"error": "lesson_locked", "lock_reason": gate.reason}
+				if !gate.availableAt.IsZero() {
+					resp["available_at"] = gate.availableAt.Format(time.RFC3339)
+				}
+				c.JSON(http.StatusConflict, resp)
+				return
+			}
 		}
 	}
 
 	completed := req.WatchPercent >= 95
+	wasCompleted := false
+	previousWatchPercent := 0
 	found := false
 	for i, p := range enrollment.Progress {
 		if p.LessonSlug == req.LessonSlug && p.ModuleSlug == req.ModuleSlug {
 			found = true
+			previousWatchPercent = p.WatchPercent
+			wasCompleted = p.Completed
 			if req.WatchPercent > p.WatchPercent {
 				enrollment.Progress[i].WatchPercent = req.WatchPercent
 			}
@@ -378,6 +573,33 @@ func handleUpdateLessonProgress(c *gin.Context) {
 		}
 		enrollment.Progress = append(enrollment.Progress, lp)
 	}
+	justLessonCompleted := completed && !wasCompleted
+
+	// Evaluate lesson-level badge rules: any rule whose threshold the contact
+	// has just crossed grants its configured badge. Idempotent via OncePerViewer.
+	if product != nil {
+		lesson, _, _ := lessonContext(product, enrollment, req.ModuleSlug, req.LessonSlug)
+		if lesson != nil && len(lesson.BadgeRules) > 0 {
+			evaluateLessonBadgeRules(tenantID, contactID, lesson.BadgeRules, previousWatchPercent, req.WatchPercent, justLessonCompleted)
+		}
+	}
+
+	// Audit: write an immutable LessonCompletion the first time a lesson goes
+	// from incomplete → complete. Best-effort — failure here doesn't fail the
+	// progress write.
+	if justLessonCompleted {
+		_ = db.GetCollection(pkgmodels.LessonCompletionCollection).Insert(&pkgmodels.LessonCompletion{
+			Id:           bson.NewObjectId(),
+			TenantID:     tenantID,
+			ContactID:    contactID,
+			ProductID:    enrollment.ProductID,
+			EnrollmentID: enrollment.Id,
+			ModuleSlug:   req.ModuleSlug,
+			LessonSlug:   req.LessonSlug,
+			WatchPercent: req.WatchPercent,
+			CompletedAt:  now,
+		})
+	}
 
 	overall := computeOverallPercent(tenantID, enrollment.ProductID, enrollment.Progress)
 	enrollment.OverallPercent = overall
@@ -397,10 +619,81 @@ func handleUpdateLessonProgress(c *gin.Context) {
 	}})
 
 	if justCompleted {
-		go issueCertificateAsync(enrollment.Id.Hex(), now)
+		// Only issue a certificate if the course (or, by inheritance, the
+		// tenant default) wants one. Default is enabled.
+		var tenant pkgmodels.Tenant
+		_ = db.GetCollection(pkgmodels.TenantCollection).FindId(tenantID).One(&tenant)
+		if shouldIssueCertificate(&tenant, product) {
+			go issueCertificateAsync(enrollment.Id.Hex(), now)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "overall_percent": enrollment.OverallPercent})
+}
+
+// shouldIssueCertificate resolves the per-course override against the tenant
+// default. Course-level explicit `false` always disables; explicit `true`
+// always enables; nil inherits from the tenant (which itself defaults to true
+// when unset).
+func shouldIssueCertificate(tenant *pkgmodels.Tenant, product *pkgmodels.Product) bool {
+	if product != nil && product.CertificateEnabled != nil {
+		return *product.CertificateEnabled
+	}
+	return tenant.CertificatesEnabledDefault()
+}
+
+// evaluateLessonBadgeRules walks the rules attached to a lesson and grants any
+// badge whose threshold the contact's watch_percent just crossed. Operators
+// supported: ">=", ">", "==" (default >=). Honors OncePerViewer by checking
+// whether the contact already has the badge before granting.
+func evaluateLessonBadgeRules(
+	tenantID, contactID bson.ObjectId,
+	rules []*pkgmodels.MediaBadgeRule,
+	previous, current int,
+	justCompleted bool,
+) {
+	for _, r := range rules {
+		if r == nil || !r.Enabled {
+			continue
+		}
+		shouldFire := false
+		switch r.EventName {
+		case "complete":
+			shouldFire = justCompleted
+		case "progress", "":
+			cmp := strings.TrimSpace(r.Operator)
+			if cmp == "" {
+				cmp = ">="
+			}
+			cross := func(v int) bool {
+				switch cmp {
+				case ">":
+					return v > r.Threshold
+				case "==":
+					return v == r.Threshold
+				default: // ">="
+					return v >= r.Threshold
+				}
+			}
+			// Fire only when this update crosses the threshold (was below, now at/above).
+			shouldFire = !cross(previous) && cross(current)
+		}
+		if !shouldFire || r.BadgePublicId == "" {
+			continue
+		}
+		var badge pkgmodels.Badge
+		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{
+			"tenant_id":             tenantID,
+			"public_id":             r.BadgePublicId,
+			"timestamps.deleted_at": nil,
+		}).One(&badge); err != nil {
+			continue
+		}
+		_ = db.GetCollection(pkgmodels.UserCollection).Update(
+			bson.M{"_id": contactID},
+			bson.M{"$addToSet": bson.M{"badges": badge.Id}},
+		)
+	}
 }
 
 // issueCertificateAsync calls the lms-service /internal/certificates endpoint
