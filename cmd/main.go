@@ -114,6 +114,14 @@ func main() {
 	internal := r.Group("/internal")
 	routes.RegisterInternalRoutes(internal)
 
+	// E2E test-only routes, gated by SENTANYL_E2E_MODE=1 inside each handler.
+	// Mounted on both /internal/* (in-cluster) and /api/marketing/test/* so the
+	// puppeteer harness can reach them through Caddy from the host.
+	handlers.RegisterE2ETestRoutes(internal)
+	e2ePublic := r.Group("/api/marketing/test")
+	handlers.RegisterE2ETestRoutes(e2ePublic)
+	routes.RegisterInternalE2ETestRoutes(e2ePublic)
+
 	// Internal domain validation for Caddy on-demand TLS.
 	// Caddy calls this to verify a hostname before issuing a certificate.
 	handlers.RegisterInternalDomainCheck(internal)

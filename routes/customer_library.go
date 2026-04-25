@@ -1,8 +1,11 @@
 package routes
 
 import (
+	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -103,23 +106,131 @@ func RegisterCustomerLibraryDetailRoutes(rg *gin.RouterGroup) {
 
 // --- Product detail ---
 
+// libraryLessonDTO mirrors CourseLesson for the customer library response,
+// adding `available_at` / `is_locked` and stripping playable fields when the
+// lesson hasn't dripped yet (cheap server-side gate; client cannot bypass by
+// hitting the URL directly because video_url is omitted).
+type libraryLessonDTO struct {
+	Slug             string                 `json:"slug"`
+	Title            string                 `json:"title"`
+	Order            int                    `json:"order"`
+	VideoURL         string                 `json:"video_url,omitempty"`
+	MediaPublicId    string                 `json:"media_public_id,omitempty"`
+	Duration         string                 `json:"duration,omitempty"`
+	DurationSec      int64                  `json:"duration_sec,omitempty"`
+	ContentHTML      string                 `json:"content_html,omitempty"`
+	IsFree           bool                   `json:"is_free,omitempty"`
+	IsDraft          bool                   `json:"is_draft,omitempty"`
+	DripDays         int                    `json:"drip_days,omitempty"`
+	DripHours        int                    `json:"drip_hours,omitempty"`
+	DripMinutes      int                    `json:"drip_minutes,omitempty"`
+	VideoMode        pkgmodels.VideoMode    `json:"video_mode,omitempty"`
+	AvailableAt      string                 `json:"available_at,omitempty"`
+	IsLocked         bool                   `json:"is_locked"`
+}
+
+type libraryModuleDTO struct {
+	Slug     string             `json:"slug"`
+	Title    string             `json:"title"`
+	Order    int                `json:"order"`
+	QuizSlug string             `json:"quiz_slug,omitempty"`
+	Lessons  []libraryLessonDTO `json:"lessons,omitempty"`
+}
+
 // libraryProductDTO maps Product.CourseModules onto the frontend-expected
 // `modules` field so ProductView renders without needing a separate mapper.
 type libraryProductDTO struct {
-	ID              string                     `json:"id"`
-	PublicID        string                     `json:"public_id"`
-	Name            string                     `json:"name,omitempty"`
-	Title           string                     `json:"title,omitempty"`
-	Description     string                     `json:"description,omitempty"`
-	ProductType     string                     `json:"product_type,omitempty"`
-	ThumbnailURL    string                     `json:"thumbnail_url,omitempty"`
-	Status          string                     `json:"status,omitempty"`
-	Modules         []*pkgmodels.CourseModule  `json:"modules,omitempty"`
-	TotalLessons    int                        `json:"total_lessons,omitempty"`
-	TotalDurationS  int64                      `json:"total_duration_sec,omitempty"`
+	ID             string             `json:"id"`
+	PublicID       string             `json:"public_id"`
+	Name           string             `json:"name,omitempty"`
+	Title          string             `json:"title,omitempty"`
+	Description    string             `json:"description,omitempty"`
+	ProductType    string             `json:"product_type,omitempty"`
+	ThumbnailURL   string             `json:"thumbnail_url,omitempty"`
+	Status         string             `json:"status,omitempty"`
+	Modules        []libraryModuleDTO `json:"modules,omitempty"`
+	TotalLessons   int                `json:"total_lessons,omitempty"`
+	TotalDurationS int64              `json:"total_duration_sec,omitempty"`
 }
 
-func toLibraryProductDTO(p *pkgmodels.Product) libraryProductDTO {
+// findLessonOnProduct walks the product's modules to return the matching lesson
+// (or nil). Used by the progress gate to enforce drip windows server-side.
+func findLessonOnProduct(tenantID, productID bson.ObjectId, moduleSlug, lessonSlug string) *pkgmodels.CourseLesson {
+	var product pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"_id":       productID,
+		"tenant_id": tenantID,
+	}).One(&product); err != nil {
+		return nil
+	}
+	for _, m := range product.CourseModules {
+		if moduleSlug != "" && m.Slug != moduleSlug {
+			continue
+		}
+		for _, l := range m.Lessons {
+			if l.Slug == lessonSlug {
+				return l
+			}
+		}
+	}
+	return nil
+}
+
+// findEnrollment returns the active enrollment for a contact on a product, if
+// one exists. Used to compute drip release windows for the customer DTO.
+func findEnrollment(tenantID, contactID, productID bson.ObjectId) *pkgmodels.CourseEnrollment {
+	var e pkgmodels.CourseEnrollment
+	if err := db.GetCollection(pkgmodels.CourseEnrollmentCollection).Find(bson.M{
+		"tenant_id":  tenantID,
+		"contact_id": contactID,
+		"product_id": productID,
+	}).One(&e); err != nil {
+		return nil
+	}
+	return &e
+}
+
+func toLibraryProductDTO(p *pkgmodels.Product, enrollment *pkgmodels.CourseEnrollment) libraryProductDTO {
+	now := time.Now()
+	mods := make([]libraryModuleDTO, 0, len(p.CourseModules))
+	for _, m := range p.CourseModules {
+		dto := libraryModuleDTO{
+			Slug:     m.Slug,
+			Title:    m.Title,
+			Order:    m.Order,
+			QuizSlug: m.QuizSlug,
+		}
+		for _, l := range m.Lessons {
+			ldto := libraryLessonDTO{
+				Slug:          l.Slug,
+				Title:         l.Title,
+				Order:         l.Order,
+				VideoURL:      l.VideoURL,
+				MediaPublicId: l.MediaPublicId,
+				Duration:      l.Duration,
+				DurationSec:   l.DurationSec,
+				ContentHTML:   l.ContentHTML,
+				IsFree:        l.IsFree,
+				IsDraft:       l.IsDraft,
+				DripDays:      l.DripDays,
+				DripHours:     l.DripHours,
+				DripMinutes:   l.DripMinutes,
+				VideoMode:     l.VideoMode,
+			}
+			if enrollment != nil {
+				avail := enrollment.EnrolledAt.Add(l.DripDuration())
+				ldto.AvailableAt = avail.Format(time.RFC3339)
+				if now.Before(avail) && !l.IsFree {
+					ldto.IsLocked = true
+					ldto.VideoURL = ""
+					ldto.MediaPublicId = ""
+					ldto.ContentHTML = ""
+				}
+			}
+			dto.Lessons = append(dto.Lessons, ldto)
+		}
+		mods = append(mods, dto)
+	}
 	return libraryProductDTO{
 		ID:             p.Id.Hex(),
 		PublicID:       p.PublicId,
@@ -129,7 +240,7 @@ func toLibraryProductDTO(p *pkgmodels.Product) libraryProductDTO {
 		ProductType:    p.ProductType,
 		ThumbnailURL:   p.ThumbnailURL,
 		Status:         p.Status,
-		Modules:        p.CourseModules,
+		Modules:        mods,
 		TotalLessons:   p.TotalLessons,
 		TotalDurationS: p.TotalDurationSec,
 	}
@@ -145,7 +256,8 @@ func handleGetLibraryProductDetail(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
 		return
 	}
-	c.JSON(http.StatusOK, toLibraryProductDTO(product))
+	enrollment := findEnrollment(tenantID, contactID, product.Id)
+	c.JSON(http.StatusOK, toLibraryProductDTO(product, enrollment))
 }
 
 // --- Enrollments ---
@@ -221,6 +333,20 @@ func handleUpdateLessonProgress(c *gin.Context) {
 	}
 
 	now := time.Now()
+
+	// Drip gate: reject progress on lessons that haven't released yet for this
+	// enrollment. is_free lessons bypass the gate (they're previewable).
+	if lesson := findLessonOnProduct(tenantID, enrollment.ProductID, req.ModuleSlug, req.LessonSlug); lesson != nil {
+		availableAt := enrollment.EnrolledAt.Add(lesson.DripDuration())
+		if !lesson.IsFree && now.Before(availableAt) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":        "lesson_locked",
+				"available_at": availableAt.Format(time.RFC3339),
+			})
+			return
+		}
+	}
+
 	completed := req.WatchPercent >= 95
 	found := false
 	for i, p := range enrollment.Progress {
@@ -255,9 +381,11 @@ func handleUpdateLessonProgress(c *gin.Context) {
 
 	overall := computeOverallPercent(tenantID, enrollment.ProductID, enrollment.Progress)
 	enrollment.OverallPercent = overall
+	justCompleted := false
 	if overall >= 100 && enrollment.CompletedAt == nil {
 		enrollment.CompletedAt = &now
 		enrollment.Status = "completed"
+		justCompleted = true
 	}
 
 	_ = col.UpdateId(enrollment.Id, bson.M{"$set": bson.M{
@@ -268,7 +396,40 @@ func handleUpdateLessonProgress(c *gin.Context) {
 		"timestamps.updated_at": now,
 	}})
 
+	if justCompleted {
+		go issueCertificateAsync(enrollment.Id.Hex(), now)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "overall_percent": enrollment.OverallPercent})
+}
+
+// issueCertificateAsync calls the lms-service /internal/certificates endpoint
+// to insert a Certificate for the just-completed enrollment. Idempotent on
+// enrollment_id, so retries are safe.
+func issueCertificateAsync(enrollmentIDHex string, completedAt time.Time) {
+	lmsURL := os.Getenv("LMS_SERVICE_URL")
+	if lmsURL == "" {
+		lmsURL = "http://lms-service:8083"
+	}
+	body, _ := json.Marshal(map[string]string{
+		"enrollment_id": enrollmentIDHex,
+		"completed_at":  completedAt.Format(time.RFC3339),
+	})
+	req, err := http.NewRequest("POST", lmsURL+"/internal/certificates", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("issueCertificateAsync: build request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("issueCertificateAsync: post: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		log.Printf("issueCertificateAsync: lms-service returned %d for enrollment %s", resp.StatusCode, enrollmentIDHex)
+	}
 }
 
 // computeOverallPercent counts lessons across the product's CourseModules and
