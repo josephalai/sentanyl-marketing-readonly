@@ -50,7 +50,219 @@ func ServiceResolvePublicPage(domain, path string) (string, error) {
 		return offerHTML, nil
 	}
 
+	// 4. Newsletter homepage / post page. Path forms:
+	//    /newsletter           → homepage with subscribe form + post list
+	//    /newsletter/<slug>    → post detail page
+	if strings.HasPrefix(path, "/newsletter") {
+		nlHTML, err := resolveNewsletterPageByPath(domain, path)
+		if err == nil && nlHTML != "" {
+			return nlHTML, nil
+		}
+	}
+
 	return "", fmt.Errorf("no content found for %s%s", domain, path)
+}
+
+// resolveNewsletterPageByPath renders the public newsletter homepage or a
+// public post page. Anonymous viewers see content above the subscriber-break;
+// the page also embeds the subscribe form for double-opt-in capture.
+func resolveNewsletterPageByPath(domain, path string) (string, error) {
+	s, err := FindSiteByDomain(domain)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the first newsletter product on this tenant. Tenants in v1 ship
+	// one newsletter; multi-newsletter routing layers in later by adding a
+	// /newsletter/<newsletter-slug>/ segment.
+	var product pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"tenant_id":             s.TenantID,
+		"product_type":          pkgmodels.ProductTypeNewsletter,
+		"timestamps.deleted_at": nil,
+	}).One(&product); err != nil {
+		return "", fmt.Errorf("newsletter not found")
+	}
+
+	// Homepage.
+	if path == "/newsletter" || path == "/newsletter/" {
+		var posts []pkgmodels.NewsletterPost
+		_ = db.GetCollection(pkgmodels.NewsletterPostCollection).Find(bson.M{
+			"tenant_id":             s.TenantID,
+			"product_id":            product.Id,
+			"status":                pkgmodels.NewsletterPostStatusPublished,
+			"hide_from_web":         false,
+			"timestamps.deleted_at": nil,
+		}).Sort("-published_at").Limit(50).All(&posts)
+		return renderNewsletterHome(&product, posts), nil
+	}
+
+	// Post detail.
+	slug := strings.TrimPrefix(path, "/newsletter/")
+	slug = strings.TrimSuffix(slug, "/")
+	if slug == "" {
+		return "", fmt.Errorf("missing slug")
+	}
+	var post pkgmodels.NewsletterPost
+	if err := db.GetCollection(pkgmodels.NewsletterPostCollection).Find(bson.M{
+		"tenant_id":             s.TenantID,
+		"product_id":            product.Id,
+		"slug":                  slug,
+		"status":                pkgmodels.NewsletterPostStatusPublished,
+		"hide_from_web":         false,
+		"timestamps.deleted_at": nil,
+	}).One(&post); err != nil {
+		return "", fmt.Errorf("post not found")
+	}
+
+	// Bump impressions opportunistically.
+	_ = db.GetCollection(pkgmodels.NewsletterPostCollection).Update(
+		bson.M{"_id": post.Id},
+		bson.M{"$inc": bson.M{"stats.impressions": 1}},
+	)
+
+	return renderNewsletterPostPage(&product, &post), nil
+}
+
+func renderNewsletterHome(product *pkgmodels.Product, posts []pkgmodels.NewsletterPost) string {
+	cfg := product.Newsletter
+	if cfg == nil {
+		cfg = &pkgmodels.NewsletterConfig{}
+	}
+	var sb strings.Builder
+	sb.WriteString(`<!doctype html><html><head><meta charset="utf-8">`)
+	sb.WriteString(fmt.Sprintf(`<title>%s</title>`, html.EscapeString(product.Name)))
+	sb.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	sb.WriteString(newsletterCSS())
+	sb.WriteString(`</head><body>`)
+	sb.WriteString(`<div class="nl-container">`)
+	sb.WriteString(fmt.Sprintf(`<header class="nl-hero"><h1>%s</h1>`, html.EscapeString(product.Name)))
+	if cfg.Tagline != "" {
+		sb.WriteString(fmt.Sprintf(`<p class="nl-tagline">%s</p>`, html.EscapeString(cfg.Tagline)))
+	}
+	if cfg.Description != "" {
+		sb.WriteString(fmt.Sprintf(`<p>%s</p>`, html.EscapeString(cfg.Description)))
+	}
+	sb.WriteString(newsletterSubscribeFormHTML(product))
+	sb.WriteString(`</header>`)
+
+	sb.WriteString(`<section class="nl-posts"><h2>Latest issues</h2>`)
+	if len(posts) == 0 {
+		sb.WriteString(`<p>No issues yet — subscribe to be the first to read.</p>`)
+	} else {
+		sb.WriteString(`<ul class="nl-list">`)
+		for _, p := range posts {
+			sb.WriteString(`<li class="nl-card">`)
+			sb.WriteString(fmt.Sprintf(`<a href="/newsletter/%s"><h3>%s</h3></a>`, html.EscapeString(p.Slug), html.EscapeString(p.Title)))
+			if p.Subtitle != "" {
+				sb.WriteString(fmt.Sprintf(`<p>%s</p>`, html.EscapeString(p.Subtitle)))
+			}
+			sb.WriteString(`</li>`)
+		}
+		sb.WriteString(`</ul>`)
+	}
+	sb.WriteString(`</section></div></body></html>`)
+	return sb.String()
+}
+
+func renderNewsletterPostPage(product *pkgmodels.Product, post *pkgmodels.NewsletterPost) string {
+	// Anonymous viewer state — public page, so split at subscriber-break.
+	var visibleHTML string
+	subIdx := strings.Index(post.RenderedHTML, "<!--subscriber-break-->")
+	if subIdx >= 0 {
+		visibleHTML = post.RenderedHTML[:subIdx]
+	} else {
+		visibleHTML = post.RenderedHTML
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`<!doctype html><html><head><meta charset="utf-8">`)
+	title := post.SEOTitle
+	if title == "" {
+		title = post.Title
+	}
+	sb.WriteString(fmt.Sprintf(`<title>%s</title>`, html.EscapeString(title)))
+	if post.SEODescription != "" {
+		sb.WriteString(fmt.Sprintf(`<meta name="description" content="%s">`, html.EscapeString(post.SEODescription)))
+	}
+	sb.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	sb.WriteString(newsletterCSS())
+	sb.WriteString(`</head><body><div class="nl-container">`)
+	sb.WriteString(`<nav class="nl-nav"><a href="/newsletter">← Back to newsletter</a></nav>`)
+	sb.WriteString(`<article class="nl-post">`)
+	sb.WriteString(fmt.Sprintf(`<h1>%s</h1>`, html.EscapeString(post.Title)))
+	if post.Subtitle != "" {
+		sb.WriteString(fmt.Sprintf(`<p class="nl-subtitle">%s</p>`, html.EscapeString(post.Subtitle)))
+	}
+	sb.WriteString(`<div class="nl-body">`)
+	sb.WriteString(visibleHTML)
+	sb.WriteString(`</div>`)
+	if subIdx >= 0 {
+		sb.WriteString(`<div class="nl-gate">`)
+		sb.WriteString(`<h3>Subscribe to keep reading</h3>`)
+		sb.WriteString(`<p>The rest of this post is for subscribers. Enter your email to read on.</p>`)
+		sb.WriteString(newsletterSubscribeFormHTML(product))
+		sb.WriteString(`</div>`)
+	}
+	sb.WriteString(`</article></div></body></html>`)
+	return sb.String()
+}
+
+func newsletterSubscribeFormHTML(product *pkgmodels.Product) string {
+	return fmt.Sprintf(`<form class="nl-subscribe" data-newsletter-id="%s" onsubmit="submitNewsletterForm(event,this);return false;">
+  <input type="email" name="email" placeholder="you@example.com" required style="padding:12px;border:1px solid #ccc;border-radius:6px;width:260px;max-width:100%%">
+  <button type="submit" class="nl-cta">Subscribe</button>
+  <div class="nl-msg" data-role="msg" style="margin-top:10px;color:#0a7"></div>
+</form>
+<script>
+function submitNewsletterForm(ev, f){
+  ev.preventDefault();
+  var email = f.email.value.trim();
+  var msg = f.querySelector('[data-role=msg]');
+  msg.textContent = 'Submitting…';
+  fetch('/api/marketing/newsletters/subscribe', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email: email, product_id: f.getAttribute('data-newsletter-id'), domain: location.host})
+  }).then(function(r){ return r.json().then(function(j){ return {status: r.status, body: j}; }); })
+    .then(function(res){
+      var j = res.body;
+      if (res.status === 202 || j.status === 'pending_confirmation') {
+        msg.textContent = 'Check your inbox to confirm your subscription.';
+      } else if (j.status === 'subscribed' || j.status === 'already_subscribed') {
+        msg.textContent = 'Subscribed.';
+      } else {
+        msg.textContent = j.error || 'Subscription failed';
+        msg.style.color = '#c33';
+      }
+    })
+    .catch(function(){ msg.textContent = 'Network error'; msg.style.color = '#c33'; });
+  return false;
+}
+</script>`, product.Id.Hex())
+}
+
+func newsletterCSS() string {
+	return `<style>
+body{font-family:Georgia,serif;color:#111;background:#fafafa;margin:0}
+.nl-container{max-width:720px;margin:0 auto;padding:48px 20px}
+.nl-hero{text-align:center;padding-bottom:32px;border-bottom:1px solid #eee;margin-bottom:32px}
+.nl-hero h1{font-size:2.4rem;margin:0 0 8px}
+.nl-tagline{color:#555;font-size:1.1rem;margin:0 0 16px}
+.nl-cta{padding:12px 24px;background:#111;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer;margin-left:8px}
+.nl-list{list-style:none;padding:0}
+.nl-card{padding:20px 0;border-bottom:1px solid #eee}
+.nl-card a{color:#111;text-decoration:none}
+.nl-card h3{margin:0 0 6px;font-size:1.4rem}
+.nl-nav{margin-bottom:24px}
+.nl-nav a{color:#666;text-decoration:none}
+.nl-post h1{font-size:2.2rem;margin:0 0 8px}
+.nl-subtitle{color:#666;font-size:1.1rem;margin:0 0 24px}
+.nl-body{font-size:1.1rem;line-height:1.7}
+.nl-gate{margin-top:48px;padding:32px;background:#fff;border:2px solid #111;border-radius:12px;text-align:center}
+.nl-gate h3{margin:0 0 8px}
+.newsletter-gate{margin-top:48px;padding:32px;background:#fff;border:2px solid #111;border-radius:12px;text-align:center}
+.newsletter-gate-cta{display:inline-block;padding:12px 24px;background:#111;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;margin-top:12px}
+</style>`
 }
 
 // resolveFunnelPageByDomain tries to find a funnel page by domain and path.

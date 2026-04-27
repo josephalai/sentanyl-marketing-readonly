@@ -3,6 +3,7 @@ package site
 import (
 	"fmt"
 	"html"
+	"os"
 	"strings"
 
 	"gopkg.in/mgo.v2/bson"
@@ -41,6 +42,56 @@ func ServicePreviewPage(pageID, tenantID bson.ObjectId) (string, error) {
 	_ = CreateSitePageVersion(version)
 
 	return html, nil
+}
+
+// RenderPuckBodyOnly renders just the content blocks of a Puck document,
+// without the surrounding <!doctype>/<head>/<body> shell. Newsletter post
+// bodies are nested inside their own page chrome (Title + meta + the gate
+// renderer), so they only want the inner block stream — and the gate
+// splitter relies on the HTML containing the bare `<!--subscriber-break-->`
+// and `<!--paywall-break-->` markers without any html wrapper.
+func RenderPuckBodyOnly(doc map[string]any) string {
+	var sb strings.Builder
+	slice := coerceContentSlice(doc["content"])
+	fmt.Fprintf(os.Stderr, "RenderPuckBodyOnly: slice len=%d (raw type %T)\n", len(slice), doc["content"])
+	for i, item := range slice {
+		comp := coerceMap(item)
+		fmt.Fprintf(os.Stderr, "  item %d type=%T comp=%v\n", i, item, comp != nil)
+		if comp == nil {
+			continue
+		}
+		renderComponent(&sb, comp, "")
+	}
+	return sb.String()
+}
+
+// coerceContentSlice tolerates the various concrete slice types mgo and
+// the JSON binder may produce for a Puck "content" array.
+func coerceContentSlice(v any) []any {
+	switch s := v.(type) {
+	case []any:
+		return s
+	case []map[string]any:
+		out := make([]any, len(s))
+		for i, m := range s {
+			out[i] = m
+		}
+		return out
+	}
+	return nil
+}
+
+// coerceMap tolerates components decoded as map[string]any or bson.M (a
+// named type with the same underlying definition; the type assertion
+// machinery treats them as distinct).
+func coerceMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	if m, ok := v.(bson.M); ok {
+		return map[string]any(m)
+	}
+	return nil
 }
 
 // RenderPuckDocumentToHTML converts a Puck document tree into static HTML.
@@ -149,7 +200,7 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 // renderComponent renders a single Puck component to HTML.
 func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.ObjectId) {
 	compType, _ := comp["type"].(string)
-	props, _ := comp["props"].(map[string]any)
+	props := coerceMap(comp["props"])
 	if props == nil {
 		props = map[string]any{}
 	}
@@ -158,6 +209,19 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 	esc := func(s string) string { return html.EscapeString(s) }
 
 	switch compType {
+	case "NewsletterSubscriberBreak":
+		// Marker the gate splitter looks for. Comments survive HTML parsing
+		// so they remain inert when the post is dropped into the live page.
+		sb.WriteString("<!--subscriber-break-->\n")
+
+	case "NewsletterPaywallBreak":
+		tier, _ := props["tier"].(string)
+		if tier != "" {
+			sb.WriteString(fmt.Sprintf("<!--paywall-break tier=\"%s\"-->\n", esc(tier)))
+		} else {
+			sb.WriteString("<!--paywall-break-->\n")
+		}
+
 	case "HeroSection":
 		heading, _ := props["heading"].(string)
 		subheading, _ := props["subheading"].(string)

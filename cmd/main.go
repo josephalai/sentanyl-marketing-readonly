@@ -13,6 +13,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/config"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
+	"github.com/josephalai/sentanyl/pkg/storage"
 )
 
 func main() {
@@ -41,6 +42,19 @@ func main() {
 	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
 	routes.EnsureEcommerceIndexes()
 
+	// Initialize the GCS storage provider used by digital download deliveries
+	// and the service product resource uploads. If init fails (no ADC in dev),
+	// downloads routes will return 503 with a clear message rather than
+	// silently fail.
+	gcsBucket := envOrDefault("GCS_BUCKET", "sendhero-videos")
+	gcsProject := envOrDefault("GCP_PROJECT_ID", "sendhero")
+	if p, err := storage.NewGCSProvider(gcsProject); err != nil {
+		log.Printf("marketing-service: GCS init failed (downloads will return 503): %v", err)
+	} else {
+		routes.SetDownloadsStorage(p, gcsBucket)
+		defer p.Close()
+	}
+
 	// Set up Gin router.
 	r := gin.Default()
 	r.Use(httputil.CORSMiddleware())
@@ -64,6 +78,7 @@ func main() {
 	legacyTenantAPI.Use(auth.RequireTenantAuth())
 	routes.RegisterEcommerceRoutes(legacyTenantAPI)
 	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
+	routes.RegisterNewsletterTenantRoutes(legacyTenantAPI)
 
 	// Legacy /api/funnel/* path — FunnelTemplatesPage calls /api/funnel/template.
 	legacyFunnelAPI := r.Group("/api/funnel")
@@ -75,12 +90,16 @@ func main() {
 	customerAPI.Use(auth.RequireCustomerAuth())
 	routes.RegisterCustomerLibraryRoutes(customerAPI)
 	routes.RegisterCustomerLibraryDetailRoutes(customerAPI)
+	routes.RegisterNewsletterCustomerRoutes(customerAPI)
 
 	// Forms management (tenant-scoped CRUD for PageForm entities).
 	handlers.RegisterFormsRoutes(legacyTenantAPI)
 
 	// Email AI generation and editing.
 	handlers.RegisterEmailAIRoutes(legacyTenantAPI)
+
+	// Newsletter authoring AI (post generation + editing).
+	handlers.RegisterNewsletterAIRoutes(legacyTenantAPI)
 
 	// Funnel AI — template-based generation.
 	handlers.RegisterFunnelAIRoutes(legacyTenantAPI)
@@ -102,6 +121,9 @@ func main() {
 
 	// Public form submission and checkout routes (no auth — for published websites).
 	handlers.RegisterPublicFormRoutes(api)
+
+	// Public newsletter subscribe / confirm / unsubscribe routes (no auth).
+	routes.RegisterNewsletterPublicRoutes(api)
 
 	// Stripe webhook receiver (platform-wide endpoint, dispatched per-tenant via ?tenant_id=).
 	handlers.RegisterStripeWebhookRoute(api)

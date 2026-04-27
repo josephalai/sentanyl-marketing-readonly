@@ -218,6 +218,14 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		return fmt.Errorf("record subscription: %w", err)
 	}
 
+	// Newsletter side-effect: if this offer is bound to any newsletter tier,
+	// upsert/upgrade the contact's NewsletterSubscription to that tier and
+	// flip status to active. The paywall renderer reads tier_id off these
+	// rows when gating post bodies.
+	if err := upgradeNewsletterSubscriptionForOffer(tenantID, contact.Id, email, offer.Id, session.Subscription); err != nil {
+		log.Printf("[stripe webhook] newsletter tier upgrade: %v", err)
+	}
+
 	// Enroll the contact in every product the offer includes. Try them all
 	// (a single bad product shouldn't block the rest), but if any fail we
 	// return an error so Stripe retries delivery AND the failure is visible
@@ -615,5 +623,69 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 
 	log.Printf("[stripe webhook] refund: revoked offer %s for contact %s (charge %s)",
 		offerHex, contact.Id.Hex(), charge.ID)
+	return nil
+}
+
+// upgradeNewsletterSubscriptionForOffer flips the contact's newsletter
+// subscription to a paid tier when the purchased offer is bound to a
+// NewsletterTier. Idempotent: re-runs upgrade an existing row without
+// duplicating, and is safe to call when the offer is not bound to any
+// newsletter (no-op).
+func upgradeNewsletterSubscriptionForOffer(tenantID, contactID bson.ObjectId, email string, offerID bson.ObjectId, stripeSubscriptionID string) error {
+	// Find every newsletter that has this offer wired to a tier. A single
+	// offer COULD theoretically grant access to several newsletters, so we
+	// upgrade them all.
+	var products []pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"tenant_id":         tenantID,
+		"product_type":      pkgmodels.ProductTypeNewsletter,
+		"newsletter.tiers.offer_id": offerID,
+	}).All(&products); err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, p := range products {
+		if p.Newsletter == nil {
+			continue
+		}
+		// Resolve the tier id within this newsletter.
+		tierIDHex := pkgmodels.NewsletterFreeTierID
+		for _, t := range p.Newsletter.Tiers {
+			if t.OfferID == offerID {
+				tierIDHex = t.Id.Hex()
+				break
+			}
+		}
+
+		col := db.GetCollection(pkgmodels.NewsletterSubscriptionCollection)
+		var existing pkgmodels.NewsletterSubscription
+		findErr := col.Find(bson.M{
+			"tenant_id":  tenantID,
+			"product_id": p.Id,
+			"contact_id": contactID,
+		}).One(&existing)
+		if findErr == nil {
+			_ = col.Update(bson.M{"_id": existing.Id}, bson.M{"$set": bson.M{
+				"status":                 pkgmodels.NewsletterSubscriptionStatusActive,
+				"tier_id":                tierIDHex,
+				"offer_id":               offerID,
+				"stripe_subscription_id": stripeSubscriptionID,
+				"confirmed_at":           now,
+				"opt_in_token":           "",
+			}})
+			continue
+		}
+		// No existing row — paid checkout was the first interaction. Create
+		// it as already-active (paid checkout is implicit consent).
+		newSub := pkgmodels.NewNewsletterSubscription(tenantID, p.Id, contactID, strings.ToLower(strings.TrimSpace(email)), tierIDHex)
+		newSub.Status = pkgmodels.NewsletterSubscriptionStatusActive
+		newSub.OfferID = offerID
+		newSub.StripeSubscriptionID = stripeSubscriptionID
+		newSub.ConfirmedAt = &now
+		newSub.UnsubscribeToken = bson.NewObjectId().Hex()
+		if err := col.Insert(newSub); err != nil {
+			log.Printf("[stripe webhook] newsletter sub insert failed: %v", err)
+		}
+	}
 	return nil
 }
