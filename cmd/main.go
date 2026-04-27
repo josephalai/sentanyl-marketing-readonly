@@ -3,11 +3,13 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/josephalai/sentanyl/marketing-service/handlers"
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/marketing-service/internal/scheduler"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
@@ -46,6 +48,9 @@ func main() {
 	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
 	routes.EnsureEcommerceIndexes()
 
+	// Ensure MongoDB indexes for Inbox Closer AI queues and tenant records.
+	routes.EnsureInboxIndexes()
+
 	// Bootstrap the {{ai}} handlebar resolver. Constructs a process-wide
 	// singleton wired to the configured SiteAIProvider; broadcast send,
 	// public page render, and the customer post API all consume it via
@@ -60,6 +65,12 @@ func main() {
 	// and dispatches drip-mode posts per-subscriber. In-process goroutine
 	// matching the coaching reminder worker pattern.
 	scheduler.Start()
+
+	// Inbox Closer — register the IMAP inbound handler and start polling
+	// all connected IMAP accounts every 2 minutes.
+	routes.RegisterIMAPHandler()
+	imapsync.StartSyncLoop(2 * time.Minute)
+	routes.StartTimerApprovalLoop()
 
 	// Initialize the GCS storage provider used by digital download deliveries
 	// and the service product resource uploads. If init fails (no ADC in dev),
@@ -90,6 +101,7 @@ func main() {
 	tenantAPI := r.Group("/api/marketing/tenant")
 	tenantAPI.Use(auth.RequireTenantAuth())
 	routes.RegisterEcommerceRoutes(tenantAPI)
+	routes.RegisterInboxCloserRoutes(tenantAPI)
 
 	// Legacy /api/tenant/* paths — frontend pages call these directly (pre-refactor paths).
 	// Caddy now routes /api/tenant/products*, /api/tenant/offers*, etc. to this service.
@@ -98,6 +110,7 @@ func main() {
 	routes.RegisterEcommerceRoutes(legacyTenantAPI)
 	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
 	routes.RegisterNewsletterTenantRoutes(legacyTenantAPI)
+	routes.RegisterInboxCloserRoutes(legacyTenantAPI)
 
 	// Legacy /api/funnel/* path — FunnelTemplatesPage calls /api/funnel/template.
 	legacyFunnelAPI := r.Group("/api/funnel")
