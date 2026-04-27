@@ -6,6 +6,8 @@ type SiteAIProvider interface {
 	GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error)
 	// DuplicateSite converts extracted site content into a full Puck site structure.
 	DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error)
+	// GenerateSiteHTML produces high-fidelity HTML for a cloned site page using vision.
+	GenerateSiteHTML(req SiteHTMLRequest) (string, error)
 	// GeneratePage generates a single page's Puck document.
 	GeneratePage(req SitePageRequest) (map[string]any, error)
 	// SuggestPages returns a list of recommended pages based on the tenant's product catalog.
@@ -114,15 +116,16 @@ type EmailGenerationResult struct {
 
 // ExtractedSection holds one structural section parsed from a crawled page.
 type ExtractedSection struct {
-	HeadingLevel int    `json:"heading_level,omitempty"` // 1,2,3
-	Heading      string `json:"heading,omitempty"`
-	Body         string `json:"body,omitempty"`
-	ImageURL     string `json:"image_url,omitempty"`
-	ImageAlt     string `json:"image_alt,omitempty"`
-	CTAText      string `json:"cta_text,omitempty"`
-	CTAUrl       string `json:"cta_url,omitempty"`
-	BgColor      string `json:"bg_color,omitempty"` // "dark", "light", "white", "accent"
-	IsDark       bool   `json:"is_dark,omitempty"`
+	HeadingLevel       int    `json:"heading_level,omitempty"` // 1,2,3
+	Heading            string `json:"heading,omitempty"`
+	HeadingAccentColor string `json:"heading_accent_color,omitempty"` // rgb(...) if part of heading is accent-colored
+	Body               string `json:"body,omitempty"`
+	ImageURL           string `json:"image_url,omitempty"`
+	ImageAlt           string `json:"image_alt,omitempty"`
+	CTAText            string `json:"cta_text,omitempty"`
+	CTAUrl             string `json:"cta_url,omitempty"`
+	BgColor            string `json:"bg_color,omitempty"`
+	IsDark             bool   `json:"is_dark,omitempty"`
 }
 
 // SiteDuplicateRequest is the input for AI site duplication from a crawled URL.
@@ -139,6 +142,23 @@ type SiteDuplicateRequest struct {
 	HeadingFont    string             `json:"heading_font,omitempty"`
 	BodyFont       string             `json:"body_font,omitempty"`
 	BorderRadius   string             `json:"border_radius,omitempty"`
+}
+
+// SiteHTMLRequest is the input for vision-based high-fidelity HTML page generation.
+type SiteHTMLRequest struct {
+	SourceURL      string             `json:"source_url"`
+	PageTitle      string             `json:"page_title"`
+	MetaDesc       string             `json:"meta_desc"`
+	NavLinks       []NavLinkResult    `json:"nav_links"`
+	Sections       []ExtractedSection `json:"sections"`
+	PrimaryColor   string             `json:"primary_color,omitempty"`
+	SecondaryColor string             `json:"secondary_color,omitempty"`
+	AccentColor    string             `json:"accent_color,omitempty"`
+	HeadingFont    string             `json:"heading_font,omitempty"`
+	BodyFont       string             `json:"body_font,omitempty"`
+	ScreenshotB64  string             `json:"screenshot_b64,omitempty"` // JPEG base64
+	PageName       string             `json:"page_name,omitempty"`      // for stub pages
+	StyleHTML      string             `json:"style_html,omitempty"`     // CSS from home page for stubs
 }
 
 // SiteGenerationRequest is the input for generating a full website.

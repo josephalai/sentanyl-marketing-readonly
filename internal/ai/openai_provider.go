@@ -23,6 +23,114 @@ func NewOpenAIProvider(apiKey, model string) *OpenAIProvider {
 	return &OpenAIProvider{APIKey: apiKey, Model: model}
 }
 
+// GenerateSiteHTML produces high-fidelity HTML using GPT-4o vision.
+// When ScreenshotB64 is provided it sends the image so the model can replicate the layout.
+func (p *OpenAIProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
+	prompt := BuildSiteHTMLPrompt(req)
+
+	var resp string
+	var err error
+
+	// Always use text-only generation — vision requests get refused for web cloning tasks.
+	resp, err = p.chatCompletionPlain(prompt,
+		"You are an expert frontend developer. Generate production-quality HTML+CSS from the provided website content and design specifications. Return ONLY the complete HTML document starting with <!DOCTYPE html>. No explanation, no code blocks, no markdown fences — just the HTML.",
+		8192)
+	if err != nil {
+		return "", err
+	}
+
+	// Strip markdown code fences
+	html := strings.TrimSpace(resp)
+	if strings.HasPrefix(html, "```") {
+		if nl := strings.Index(html, "\n"); nl >= 0 {
+			html = strings.TrimSpace(html[nl+1:])
+		}
+		if end := strings.LastIndex(html, "```"); end >= 0 {
+			html = strings.TrimSpace(html[:end])
+		}
+	}
+	// Find the actual HTML start
+	if idx := strings.Index(html, "<!DOCTYPE"); idx >= 0 {
+		html = html[idx:]
+	} else if idx := strings.Index(html, "<html"); idx >= 0 {
+		html = "<!DOCTYPE html>\n" + html[idx:]
+	}
+	if !strings.Contains(html, "<html") {
+		// Log first 200 chars of the unexpected response for debugging
+		preview := resp
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		return "", fmt.Errorf("AI did not return valid HTML (got: %s)", preview)
+	}
+	return html, nil
+}
+
+// chatCompletionVision sends a vision request to GPT-4o with an image.
+func (p *OpenAIProvider) chatCompletionVision(userText, imageB64 string) (string, error) {
+	systemMsg := map[string]string{
+		"role":    "system",
+		"content": "You are an expert web designer. Given a screenshot and content from a website, generate production-quality HTML+CSS that replicates it as closely as possible. Return ONLY the HTML starting with <!DOCTYPE html>.",
+	}
+
+	userContent := []map[string]any{
+		{"type": "text", "text": userText},
+		{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url":    "data:image/jpeg;base64," + imageB64,
+				"detail": "high",
+			},
+		},
+	}
+
+	reqBody := map[string]any{
+		"model":       "gpt-4o",
+		"messages":    []any{systemMsg, map[string]any{"role": "user", "content": userContent}},
+		"max_tokens":  4096,
+		"temperature": 0.3,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("OpenAI vision request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", err
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OpenAI returned %d: %s", httpResp.StatusCode, string(respBytes[:min(500, len(respBytes))]))
+	}
+
+	var apiResp struct {
+		Choices []struct {
+			Message struct{ Content string `json:"content"` } `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil || len(apiResp.Choices) == 0 {
+		return "", fmt.Errorf("no choices in vision response")
+	}
+	return apiResp.Choices[0].Message.Content, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func (p *OpenAIProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error) {
 	prompt := BuildSiteDuplicatePrompt(req)
 	resp, err := p.chatCompletion(prompt, siteDuplicateSystemPrompt)

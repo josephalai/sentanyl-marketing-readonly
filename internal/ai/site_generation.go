@@ -362,3 +362,99 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	sb.WriteString("\n\nGenerate the complete Puck site JSON. Include the home page and stub pages for each navigation item.")
 	return sb.String()
 }
+
+// BuildSiteHTMLPrompt constructs the prompt for vision-based HTML page generation.
+func BuildSiteHTMLPrompt(req SiteHTMLRequest) string {
+	var sb strings.Builder
+
+	if req.PageName != "" && req.StyleHTML != "" {
+		// Stub page prompt
+		sb.WriteString(fmt.Sprintf("Generate a complete HTML page for the \"%s\" page of %s.\n", req.PageName, req.SourceURL))
+		sb.WriteString("Match the same header, navigation, footer, colors, and typography as the home page.\n")
+		sb.WriteString("The main content area should show a clean section with the page title and a brief placeholder paragraph.\n\n")
+		sb.WriteString("Reuse this CSS from the home page (copy the :root, body, nav, footer styles exactly):\n")
+		sb.WriteString(req.StyleHTML)
+		sb.WriteString("\n\nReturn ONLY valid complete HTML starting with <!DOCTYPE html>. No explanation.")
+		return sb.String()
+	}
+
+	sb.WriteString(fmt.Sprintf("Implement this website design specification as a standalone HTML page.\n\n"))
+
+	if req.PageTitle != "" {
+		sb.WriteString(fmt.Sprintf("Page title: %s\n", req.PageTitle))
+	}
+	if req.MetaDesc != "" {
+		sb.WriteString(fmt.Sprintf("Description: %s\n", req.MetaDesc))
+	}
+
+	sb.WriteString(fmt.Sprintf(`
+Design tokens (use these exactly):
+- Primary color: %s
+- Secondary color (dark backgrounds): %s
+- Accent color (highlights, CTAs): %s
+- Heading font: %s
+- Body font: %s
+
+`, req.PrimaryColor, req.SecondaryColor, req.AccentColor, req.HeadingFont, req.BodyFont))
+
+	if len(req.NavLinks) > 0 {
+		sb.WriteString("Navigation links:\n")
+		for _, l := range req.NavLinks {
+			sb.WriteString(fmt.Sprintf("  - %s\n", l.Label))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Page sections to reproduce (IN ORDER, all of them):\n\n")
+	for i, s := range req.Sections {
+		sb.WriteString(fmt.Sprintf("--- Section %d", i+1))
+		if s.IsDark {
+			sb.WriteString(" [DARK BG: use secondary color background, white text]")
+		}
+		if s.HeadingAccentColor != "" {
+			sb.WriteString(fmt.Sprintf(" [ACCENT TEXT COLOR: %s on part of the heading]", s.HeadingAccentColor))
+		}
+		sb.WriteString(" ---\n")
+		if s.Heading != "" {
+			if s.HeadingAccentColor != "" {
+				sb.WriteString(fmt.Sprintf("Heading (with accent-colored words): %s\n", s.Heading))
+			} else {
+				sb.WriteString(fmt.Sprintf("Heading: %s\n", s.Heading))
+			}
+		}
+		if s.Body != "" {
+			body := s.Body
+			if len(body) > 500 {
+				body = body[:500]
+			}
+			sb.WriteString(fmt.Sprintf("Body: %s\n", body))
+		}
+		if s.ImageURL != "" {
+			sb.WriteString(fmt.Sprintf("Image URL: %s\n", s.ImageURL))
+		}
+		if s.CTAText != "" {
+			sb.WriteString(fmt.Sprintf("CTA button: \"%s\" → %s\n", s.CTAText, s.CTAUrl))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(`
+CRITICAL REQUIREMENTS — follow all of these exactly:
+1. Navigation: DARK background (use secondary color), white text, logo/site name on left, nav links on right
+2. Hero section: TWO-COLUMN layout (use CSS flexbox or grid) — image on one side, heading+form on the other
+3. If any section has a newsletter/email signup, include an actual <input type="email"> + <button> form
+4. Dark sections: full-width dark background (secondary color), white/light text, centered content
+5. Accent color (` + req.AccentColor + `) for CTA buttons, highlighted words, and key headings
+6. Include ALL images with the exact URLs provided — use them in <img src="..."> tags
+7. Footer: dark background, light text, copyright and nav links
+8. Multi-column layouts for text+image sections (flexbox row with 50/50 or 60/40 split)
+9. Full responsive CSS (max-width: 1200px containers, mobile breakpoints)
+10. Typography: '` + req.HeadingFont + `' for headings, '` + req.BodyFont + `' for body text
+11. Include Google Fonts import if needed
+12. All CSS inline in <style> tag — no external stylesheets
+13. Generate COMPLETE HTML — do not cut off or truncate
+
+Return ONLY valid HTML starting with <!DOCTYPE html>. No markdown fences, no explanation.`)
+
+	return sb.String()
+}

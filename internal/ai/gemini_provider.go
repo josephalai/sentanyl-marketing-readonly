@@ -23,6 +23,22 @@ func NewGeminiProvider(apiKey, model string) *GeminiProvider {
 	return &GeminiProvider{APIKey: apiKey, Model: model}
 }
 
+func (p *GeminiProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
+	prompt := BuildSiteHTMLPrompt(req)
+	resp, err := p.generateContentPlain(prompt, 4096)
+	if err != nil {
+		return "", err
+	}
+	html := strings.TrimSpace(resp)
+	if idx := strings.Index(html, "<!DOCTYPE"); idx > 0 {
+		html = html[idx:]
+	}
+	if !strings.Contains(html, "<!DOCTYPE") {
+		return "", fmt.Errorf("AI did not return valid HTML")
+	}
+	return html, nil
+}
+
 func (p *GeminiProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error) {
 	prompt := BuildSiteDuplicatePrompt(req)
 	resp, err := p.generateContent(siteDuplicateSystemPrompt + "\n\n" + prompt)

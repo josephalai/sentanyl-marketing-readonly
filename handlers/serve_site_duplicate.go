@@ -136,6 +136,34 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 		return
 	}
 
+	// Generate high-fidelity HTML for the home page using GPT-4o vision.
+	homeHTML := ""
+	homeStyleCSS := "" // extracted for stub pages
+	htmlReq := ai.SiteHTMLRequest{
+		SourceURL:      req.URL,
+		PageTitle:      extracted.PageTitle,
+		MetaDesc:       extracted.MetaDesc,
+		NavLinks:       extracted.NavLinks,
+		Sections:       extracted.Sections,
+		PrimaryColor:   extracted.PrimaryColor,
+		SecondaryColor: extracted.SecondaryColor,
+		AccentColor:    extracted.AccentColor,
+		HeadingFont:    extracted.HeadingFont,
+		BodyFont:       extracted.BodyFont,
+		ScreenshotB64:  extracted.ScreenshotB64,
+	}
+	if hHTML, err := provider.GenerateSiteHTML(htmlReq); err != nil {
+		log.Printf("HTML generation failed (non-fatal): %v", err)
+	} else {
+		homeHTML = hHTML
+		// Extract the <style> block for stub pages
+		if start := strings.Index(homeHTML, "<style>"); start >= 0 {
+			if end := strings.Index(homeHTML[start:], "</style>"); end >= 0 {
+				homeStyleCSS = homeHTML[start : start+end+8]
+			}
+		}
+	}
+
 	var createdPages []site.SitePage
 	for _, pageResult := range result.Pages {
 		pg := site.NewSitePage(pageResult.Name, pageResult.Slug, newSite.Id, tenantID)
@@ -147,6 +175,16 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 			}
 		}
 		pg.DraftDocument = pageResult.PuckRoot
+
+		// Assign high-fidelity HTML:
+		// Home page → AI-generated vision-based HTML
+		// Stub pages → simple branded placeholder (no extra AI call)
+		if pg.IsHome && homeHTML != "" {
+			pg.PublishedHTML = homeHTML
+		} else if !pg.IsHome && homeStyleCSS != "" {
+			pg.PublishedHTML = buildStyledStubHTML(pageResult.Name, pageResult.Slug, extracted, homeStyleCSS)
+		}
+
 		if err := site.CreateSitePage(pg); err != nil {
 			log.Printf("failed to create duplicated page %s: %v", pageResult.Name, err)
 			continue
@@ -186,6 +224,7 @@ type crawledSite struct {
 	AccentColor    string
 	HeadingFont    string
 	BodyFont       string
+	ScreenshotB64  string // JPEG base64 from Playwright
 }
 
 // crawlViaSandboxOrDirect uses the Docker sandbox when available, falls back to direct.
@@ -204,12 +243,13 @@ func crawlViaSandboxOrDirect(targetURL string) (*crawledSite, error) {
 
 // sandboxResponse mirrors the JSON returned by site-sandbox/server.js.
 type sandboxResponse struct {
-	Title       string           `json:"title"`
-	MetaDesc    string           `json:"metaDesc"`
-	NavLinks    []sandboxNavLink `json:"navLinks"`
-	Colors      []string         `json:"colors"`
-	Fonts       []string         `json:"fonts"`
-	Sections    []sandboxSection `json:"sections"`
+	Title          string           `json:"title"`
+	MetaDesc       string           `json:"metaDesc"`
+	NavLinks       []sandboxNavLink `json:"navLinks"`
+	Colors         []string         `json:"colors"`
+	Fonts          []string         `json:"fonts"`
+	Sections       []sandboxSection `json:"sections"`
+	ScreenshotB64  string           `json:"screenshotBase64"`
 }
 
 type sandboxNavLink struct {
@@ -218,15 +258,16 @@ type sandboxNavLink struct {
 }
 
 type sandboxSection struct {
-	Heading      string `json:"heading"`
-	HeadingLevel int    `json:"headingLevel"`
-	Body         string `json:"body"`
-	ImageURL     string `json:"imageURL"`
-	ImageAlt     string `json:"imageAlt"`
-	CTAText      string `json:"ctaText"`
-	CTAUrl       string `json:"ctaUrl"`
-	IsDark       bool   `json:"isDark"`
-	BgColor      string `json:"bgColor"`
+	Heading            string `json:"heading"`
+	HeadingLevel       int    `json:"headingLevel"`
+	HeadingAccentColor string `json:"headingAccentColor"`
+	Body               string `json:"body"`
+	ImageURL           string `json:"imageURL"`
+	ImageAlt           string `json:"imageAlt"`
+	CTAText            string `json:"ctaText"`
+	CTAUrl             string `json:"ctaUrl"`
+	IsDark             bool   `json:"isDark"`
+	BgColor            string `json:"bgColor"`
 }
 
 // crawlViaSandbox calls the site-sandbox Docker service.
@@ -262,17 +303,19 @@ func crawlViaSandbox(sandboxBaseURL, targetURL string) (*crawledSite, error) {
 	}
 	for _, s := range sr.Sections {
 		result.Sections = append(result.Sections, ai.ExtractedSection{
-			Heading:      s.Heading,
-			HeadingLevel: s.HeadingLevel,
-			Body:         s.Body,
-			ImageURL:     s.ImageURL,
-			ImageAlt:     s.ImageAlt,
-			CTAText:      s.CTAText,
-			CTAUrl:       s.CTAUrl,
-			IsDark:       s.IsDark,
-			BgColor:      s.BgColor,
+			Heading:            s.Heading,
+			HeadingLevel:       s.HeadingLevel,
+			HeadingAccentColor: s.HeadingAccentColor,
+			Body:               s.Body,
+			ImageURL:           s.ImageURL,
+			ImageAlt:           s.ImageAlt,
+			CTAText:            s.CTAText,
+			CTAUrl:             s.CTAUrl,
+			IsDark:             s.IsDark,
+			BgColor:            s.BgColor,
 		})
 	}
+	// Assign colors: primary/secondary from darks, accent from heading accent color or vivid color
 	if len(sr.Colors) > 0 {
 		result.PrimaryColor = sr.Colors[0]
 	}
@@ -282,6 +325,15 @@ func crawlViaSandbox(sandboxBaseURL, targetURL string) (*crawledSite, error) {
 	if len(sr.Colors) > 2 {
 		result.AccentColor = sr.Colors[2]
 	}
+	// Override accent with any color found on accent-colored heading spans — most authoritative signal
+	for _, s := range sr.Sections {
+		if s.HeadingAccentColor != "" {
+			if hex := rgbStringToHex(s.HeadingAccentColor); hex != "" {
+				result.AccentColor = hex
+				break
+			}
+		}
+	}
 	if len(sr.Fonts) > 0 {
 		result.HeadingFont = cleanFont(sr.Fonts[0])
 		result.BodyFont = result.HeadingFont
@@ -289,6 +341,7 @@ func crawlViaSandbox(sandboxBaseURL, targetURL string) (*crawledSite, error) {
 	if len(sr.Fonts) > 1 {
 		result.BodyFont = cleanFont(sr.Fonts[1])
 	}
+	result.ScreenshotB64 = sr.ScreenshotB64
 	return result, nil
 }
 
@@ -606,9 +659,63 @@ func resolveAbsURL(base *url.URL, href string) string {
 	return base.ResolveReference(ref).String()
 }
 
+// rgbStringToHex converts "rgb(101, 212, 110)" to "#65d46e"
+func rgbStringToHex(rgb string) string {
+	re := regexp.MustCompile(`rgba?\((\d+),\s*(\d+),\s*(\d+)`)
+	m := re.FindStringSubmatch(rgb)
+	if len(m) < 4 {
+		return ""
+	}
+	toInt := func(s string) int {
+		n := 0
+		for _, c := range s {
+			n = n*10 + int(c-'0')
+		}
+		return n
+	}
+	r, g, b := toInt(m[1]), toInt(m[2]), toInt(m[3])
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
+}
+
+// buildStyledStubHTML generates a branded placeholder page reusing the home page's CSS.
+func buildStyledStubHTML(pageName, slug string, extracted *crawledSite, styleBlock string) string {
+	var nav strings.Builder
+	for _, l := range extracted.NavLinks {
+		nav.WriteString(fmt.Sprintf("<li><a href=\"%s\">%s</a></li>", l.URL, l.Label))
+	}
+
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>%s</title>
+%s
+<style>
+.stub-hero { padding: 100px 40px; text-align: center; }
+.stub-hero h1 { font-size: 3rem; margin-bottom: 1rem; font-family: var(--font-heading, inherit); }
+.stub-hero p { font-size: 1.2rem; color: #666; max-width: 600px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<nav class="nav">
+  <a class="nav-brand" href="/">%s</a>
+  <ul class="nav-links">%s</ul>
+</nav>
+<div class="stub-hero">
+  <h1>%s</h1>
+  <p>Content for this page is coming soon.</p>
+</div>
+<footer class="footer">
+  <p>%s</p>
+</footer>
+</body>
+</html>`, pageName, styleBlock, extracted.PageTitle, nav.String(), pageName, extracted.PageTitle)
 }

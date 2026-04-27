@@ -3,7 +3,6 @@ package site
 import (
 	"fmt"
 	"html"
-	"os"
 	"strings"
 
 	"gopkg.in/mgo.v2/bson"
@@ -13,13 +12,23 @@ import (
 )
 
 // ServicePreviewPage generates preview HTML from the current draft document.
+// If the page has a PublishedHTML (set by site duplication), returns that directly
+// for maximum fidelity without going through the Puck renderer.
 func ServicePreviewPage(pageID, tenantID bson.ObjectId) (string, error) {
 	page, err := GetSitePageByID(pageID, tenantID)
 	if err != nil {
 		return "", fmt.Errorf("page not found: %w", err)
 	}
+
+	// High-fidelity HTML from duplication — serve directly.
+	if page.PublishedHTML != "" {
+		return page.PublishedHTML, nil
+	}
+
+	// Stub or empty page — return a minimal placeholder rather than erroring.
 	if page.DraftDocument == nil {
-		return "", fmt.Errorf("no draft document to preview")
+		site, _ := GetSiteByID(page.SiteID, tenantID)
+		return renderStubPage(page, site), nil
 	}
 
 	// Fetch the parent site for navigation/SEO context.
@@ -53,10 +62,8 @@ func ServicePreviewPage(pageID, tenantID bson.ObjectId) (string, error) {
 func RenderPuckBodyOnly(doc map[string]any) string {
 	var sb strings.Builder
 	slice := coerceContentSlice(doc["content"])
-	fmt.Fprintf(os.Stderr, "RenderPuckBodyOnly: slice len=%d (raw type %T)\n", len(slice), doc["content"])
-	for i, item := range slice {
+	for _, item := range slice {
 		comp := coerceMap(item)
-		fmt.Fprintf(os.Stderr, "  item %d type=%T comp=%v\n", i, item, comp != nil)
 		if comp == nil {
 			continue
 		}
@@ -768,6 +775,36 @@ func parseObjectIDs(s string) []bson.ObjectId {
 		}
 	}
 	return ids
+}
+
+// renderStubPage renders a minimal branded placeholder for pages with no content.
+func renderStubPage(page *SitePage, site *pkgmodels.Site) string {
+	title := page.Name
+	if title == "" {
+		title = "Page"
+	}
+	siteName := ""
+	if site != nil {
+		siteName = site.Name
+	}
+	var sb strings.Builder
+	sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
+	sb.WriteString("<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
+	sb.WriteString(fmt.Sprintf("<title>%s</title>\n", html.EscapeString(title)))
+	sb.WriteString("<style>\n")
+	sb.WriteString(buildGlobalStyleVars(site))
+	sb.WriteString("* { margin:0; padding:0; box-sizing:border-box; }\n")
+	sb.WriteString("body { font-family: var(--font-body, sans-serif); color: #1a1a1a; }\n")
+	sb.WriteString(".nav { background: var(--color-secondary, #141414); color: white; padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; }\n")
+	sb.WriteString(".nav-brand { font-weight:700; color:white; text-decoration:none; }\n")
+	sb.WriteString(".stub { text-align:center; padding:120px 20px; }\n")
+	sb.WriteString(".stub h1 { font-size:2.5rem; margin-bottom:1rem; font-family: var(--font-heading, inherit); }\n")
+	sb.WriteString(".stub p { color:#666; font-size:1.1rem; }\n")
+	sb.WriteString("</style>\n</head>\n<body>\n")
+	sb.WriteString(fmt.Sprintf("<nav class=\"nav\"><span class=\"nav-brand\">%s</span></nav>\n", html.EscapeString(siteName)))
+	sb.WriteString(fmt.Sprintf("<div class=\"stub\"><h1>%s</h1><p>Content coming soon.</p></div>\n", html.EscapeString(title)))
+	sb.WriteString("</body>\n</html>")
+	return sb.String()
 }
 
 // buildGlobalStyleVars generates a :root CSS block from the site's GlobalStyle.
