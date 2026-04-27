@@ -138,16 +138,39 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 	sb.WriteString(buildGlobalStyleVars(site))
 	sb.WriteString("* { margin: 0; padding: 0; box-sizing: border-box; }\n")
 	sb.WriteString("body { font-family: var(--font-body, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif); line-height: 1.6; color: #1a1a1a; }\n")
-	sb.WriteString("img { max-width: 100%; height: auto; }\n")
+	sb.WriteString("img { max-width: 100%; height: auto; display: block; }\n")
 	sb.WriteString(".section { padding: 60px 20px; max-width: 1200px; margin: 0 auto; }\n")
-	sb.WriteString(".hero { text-align: center; padding: 80px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }\n")
-	sb.WriteString(".hero h1 { font-size: 2.5rem; margin-bottom: 1rem; }\n")
-	sb.WriteString(".hero p { font-size: 1.2rem; opacity: 0.9; }\n")
-	sb.WriteString(".cta-button { display: inline-block; padding: 12px 32px; background: #4f46e5; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; margin-top: 1rem; }\n")
-	sb.WriteString(".nav { background: #fff; border-bottom: 1px solid #e5e7eb; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; }\n")
+	// Hero uses primary gradient by default
+	sb.WriteString(".hero { text-align: center; padding: 80px 20px; background: var(--color-secondary, #141414); color: white; }\n")
+	sb.WriteString(".hero h1 { font-size: 2.8rem; margin-bottom: 1rem; font-family: var(--font-heading, inherit); }\n")
+	sb.WriteString(".hero p { font-size: 1.2rem; opacity: 0.9; max-width: 600px; margin: 0 auto 1.5rem; }\n")
+	sb.WriteString(".cta-button { display: inline-block; padding: 14px 36px; background: var(--color-accent, #65d46e); color: #000; text-decoration: none; border-radius: var(--border-radius, 4px); font-weight: 700; margin-top: 1rem; }\n")
+	// Nav
+	sb.WriteString(".nav { background: var(--color-secondary, #141414); color: white; padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }\n")
+	sb.WriteString(".nav-brand { font-weight: 700; font-size: 1.1rem; color: white; text-decoration: none; }\n")
 	sb.WriteString(".nav-links { display: flex; gap: 24px; list-style: none; }\n")
-	sb.WriteString(".nav-links a { color: #374151; text-decoration: none; font-weight: 500; }\n")
-	sb.WriteString(".footer { background: #1f2937; color: #d1d5db; padding: 40px 20px; text-align: center; }\n")
+	sb.WriteString(".nav-links a { color: rgba(255,255,255,0.85); text-decoration: none; font-size: 0.9rem; font-weight: 500; }\n")
+	sb.WriteString(".nav-links a:hover { color: white; }\n")
+	// Dark sections: CTA with dark background
+	sb.WriteString(".cta-section-dark { background: var(--color-secondary, #141414); color: white; padding: 80px 20px; text-align: center; }\n")
+	sb.WriteString(".cta-section-dark h2 { font-size: 2.5rem; margin-bottom: 1rem; font-family: var(--font-heading, inherit); }\n")
+	sb.WriteString(".cta-section-dark p { font-size: 1.1rem; opacity: 0.85; max-width: 700px; margin: 0 auto 2rem; }\n")
+	sb.WriteString(".cta-section-dark .cta-button { background: var(--color-accent, #65d46e); color: #000; }\n")
+	// Light CTA sections
+	sb.WriteString(".cta-section { padding: 60px 20px; text-align: center; background: #f4f4f4; }\n")
+	sb.WriteString(".cta-section h2 { font-size: 2rem; margin-bottom: 1rem; }\n")
+	// Lead form
+	sb.WriteString(".lead-form { display: flex; gap: 12px; justify-content: center; margin-top: 1.5rem; flex-wrap: wrap; }\n")
+	sb.WriteString(".lead-form input { padding: 12px 20px; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; min-width: 260px; }\n")
+	sb.WriteString(".lead-form button { padding: 12px 32px; background: var(--color-accent, #65d46e); color: #000; border: none; border-radius: 4px; font-weight: 700; cursor: pointer; font-size: 1rem; }\n")
+	// Image sections
+	sb.WriteString(".img-section { width: 100%; max-height: 600px; overflow: hidden; }\n")
+	sb.WriteString(".img-section img { width: 100%; object-fit: cover; }\n")
+	// Content sections
+	sb.WriteString(".content-section { padding: 60px 20px; max-width: 800px; margin: 0 auto; }\n")
+	sb.WriteString(".content-section h2 { font-size: 2rem; margin-bottom: 1rem; font-family: var(--font-heading, inherit); }\n")
+	sb.WriteString(".footer { background: var(--color-secondary, #141414); color: #9ca3af; padding: 32px 20px; text-align: center; font-size: 0.9rem; }\n")
+	sb.WriteString(".footer a { color: #9ca3af; margin: 0 8px; text-decoration: none; }\n")
 	sb.WriteString(".columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }\n")
 	sb.WriteString(".card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; }\n")
 	sb.WriteString(".faq-item { border-bottom: 1px solid #e5e7eb; padding: 16px 0; }\n")
@@ -226,14 +249,25 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 	case "HeroSection":
 		heading, _ := props["heading"].(string)
 		subheading, _ := props["subheading"].(string)
+		description, _ := props["description"].(string)
 		ctaText, _ := props["ctaText"].(string)
 		ctaURL, _ := props["ctaUrl"].(string)
+		imageURL, _ := props["imageUrl"].(string)
+		if imageURL == "" {
+			imageURL, _ = props["backgroundImage"].(string)
+		}
 		sb.WriteString("<section class=\"hero\">\n")
+		if imageURL != "" {
+			sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"\" style=\"max-height:400px;object-fit:cover;border-radius:8px;margin-bottom:24px\">\n", esc(imageURL)))
+		}
 		if heading != "" {
 			sb.WriteString(fmt.Sprintf("<h1>%s</h1>\n", esc(heading)))
 		}
 		if subheading != "" {
 			sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(subheading)))
+		}
+		if description != "" {
+			sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(description)))
 		}
 		if ctaText != "" {
 			if ctaURL == "" {
@@ -252,15 +286,21 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 	case "ImageSection":
 		src, _ := props["src"].(string)
 		alt, _ := props["alt"].(string)
+		caption, _ := props["caption"].(string)
 		// Support Sentanyl asset pipeline: if assetId is provided, resolve asset URL.
 		if assetID, ok := props["assetId"].(string); ok && assetID != "" && bson.IsObjectIdHex(assetID) {
 			if assetURL := resolveAssetURL(assetID); assetURL != "" {
 				src = assetURL
 			}
 		}
-		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
-		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", esc(src), esc(alt)))
-		sb.WriteString("</section>\n")
+		if src != "" {
+			sb.WriteString("<section class=\"img-section\">\n")
+			sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\" style=\"width:100%%;max-height:500px;object-fit:cover\">\n", esc(src), esc(alt)))
+			if caption != "" {
+				sb.WriteString(fmt.Sprintf("<p style=\"text-align:center;font-size:0.85rem;color:#666;padding:8px 20px\">%s</p>\n", esc(caption)))
+			}
+			sb.WriteString("</section>\n")
+		}
 
 	case "VideoSection", "SentanylVideoPlayer":
 		videoURL, _ := props["videoUrl"].(string)
@@ -280,11 +320,21 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 
 	case "CTASection":
 		heading, _ := props["heading"].(string)
+		description, _ := props["description"].(string)
 		buttonText, _ := props["buttonText"].(string)
 		buttonURL, _ := props["buttonUrl"].(string)
-		sb.WriteString("<section class=\"section\" style=\"text-align:center;background:#f3f4f6;padding:60px 20px\">\n")
+		theme, _ := props["theme"].(string)
+		isDark := theme == "dark"
+		sectionClass := "cta-section"
+		if isDark {
+			sectionClass = "cta-section-dark"
+		}
+		sb.WriteString(fmt.Sprintf("<section class=\"%s\">\n<div class=\"section\">\n", sectionClass))
 		if heading != "" {
 			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+		}
+		if description != "" {
+			sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(description)))
 		}
 		if buttonText != "" {
 			if buttonURL == "" {
@@ -292,7 +342,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 			}
 			sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", esc(buttonURL), esc(buttonText)))
 		}
-		sb.WriteString("</section>\n")
+		sb.WriteString("</div></section>\n")
 
 	case "TestimonialsSection", "SentanylTestimonials":
 		sb.WriteString("<section class=\"section\">\n<h2>Testimonials</h2>\n")

@@ -4,6 +4,8 @@ package ai
 type SiteAIProvider interface {
 	// GenerateSite generates a full website structure with pages and content.
 	GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error)
+	// DuplicateSite converts extracted site content into a full Puck site structure.
+	DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error)
 	// GeneratePage generates a single page's Puck document.
 	GeneratePage(req SitePageRequest) (map[string]any, error)
 	// SuggestPages returns a list of recommended pages based on the tenant's product catalog.
@@ -108,6 +110,35 @@ type EmailGenerationResult struct {
 	Subject string `json:"subject"`
 	Body    string `json:"body"` // HTML body
 	Summary string `json:"summary,omitempty"`
+}
+
+// ExtractedSection holds one structural section parsed from a crawled page.
+type ExtractedSection struct {
+	HeadingLevel int    `json:"heading_level,omitempty"` // 1,2,3
+	Heading      string `json:"heading,omitempty"`
+	Body         string `json:"body,omitempty"`
+	ImageURL     string `json:"image_url,omitempty"`
+	ImageAlt     string `json:"image_alt,omitempty"`
+	CTAText      string `json:"cta_text,omitempty"`
+	CTAUrl       string `json:"cta_url,omitempty"`
+	BgColor      string `json:"bg_color,omitempty"` // "dark", "light", "white", "accent"
+	IsDark       bool   `json:"is_dark,omitempty"`
+}
+
+// SiteDuplicateRequest is the input for AI site duplication from a crawled URL.
+type SiteDuplicateRequest struct {
+	SourceURL      string             `json:"source_url"`
+	SiteName       string             `json:"site_name"`
+	NavLinks       []NavLinkResult    `json:"nav_links"`
+	PageTitle      string             `json:"page_title"`
+	MetaDesc       string             `json:"meta_desc"`
+	Sections       []ExtractedSection `json:"sections"`
+	PrimaryColor   string             `json:"primary_color,omitempty"`
+	SecondaryColor string             `json:"secondary_color,omitempty"`
+	AccentColor    string             `json:"accent_color,omitempty"`
+	HeadingFont    string             `json:"heading_font,omitempty"`
+	BodyFont       string             `json:"body_font,omitempty"`
+	BorderRadius   string             `json:"border_radius,omitempty"`
 }
 
 // SiteGenerationRequest is the input for generating a full website.

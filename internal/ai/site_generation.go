@@ -273,3 +273,92 @@ Rules:
 - border_radius: most common border-radius value (e.g. "8px", "4px", "0px")
 - button_style: "pill" if border-radius > 20px, "rounded" if 4-20px, "sharp" if 0-3px
 - confidence_score: 0-100 how confident you are in the extraction`
+
+const siteDuplicateSystemPrompt = `You are an expert website-to-Puck converter. Your job is to take extracted content and structure from a real website and reproduce it as faithfully as possible using Puck editor components.
+
+IMPORTANT JSON RULES:
+- "theme" MUST be a plain string: one of "modern", "minimal", "dark", "light" (never an object)
+- All string fields must be plain strings, not objects
+- Return ONLY valid JSON, no markdown fences, no explanation text before or after
+
+CRITICAL RULES:
+1. Use ONLY the content provided (headings, body text, image URLs, CTA text). Never invent content.
+2. Preserve image URLs exactly as provided — use them in ImageSection props.
+3. Match the visual structure: dark sections become dark-background CTASection or HeroSection; light sections become RichTextSection or CTASection.
+4. Include ALL nav links in the site navigation.
+5. Generate at least 5-8 components for the home page — do not make it sparse.
+6. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array.
+
+For dark-background sections: use CTASection with the prop "theme": "dark". This makes the section render with a dark background and white text.
+For image+text sections: use ImageSection (with the actual image URL in "src") followed by RichTextSection.
+For newsletter/email capture forms: use SentanylLeadForm.
+For testimonials/reviews: use TestimonialsSection.
+For FAQ: use FAQSection.
+For the hero/headline section: use HeroSection with the "heading", "subheading", and "ctaText" props.
+For a dark hero: use HeroSection (it renders with dark background by default).
+Always include the "description" prop in CTASection with the body text from that section.
+
+` + componentSchemaReference
+
+// BuildSiteDuplicatePrompt constructs the AI prompt for site duplication.
+func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Duplicate this website as a Puck site: %s\n", req.SourceURL))
+	sb.WriteString(fmt.Sprintf("Site Name: %s\n", req.SiteName))
+	sb.WriteString(fmt.Sprintf("Page Title: %s\n", req.PageTitle))
+	if req.MetaDesc != "" {
+		sb.WriteString(fmt.Sprintf("Meta Description: %s\n", req.MetaDesc))
+	}
+
+	if len(req.NavLinks) > 0 {
+		sb.WriteString("\n## Navigation Links:\n")
+		for _, l := range req.NavLinks {
+			sb.WriteString(fmt.Sprintf("- %s → %s\n", l.Label, l.URL))
+		}
+	}
+
+	if req.PrimaryColor != "" {
+		sb.WriteString(fmt.Sprintf("\n## Design Tokens:\n"))
+		sb.WriteString(fmt.Sprintf("Primary color: %s\n", req.PrimaryColor))
+		if req.SecondaryColor != "" {
+			sb.WriteString(fmt.Sprintf("Secondary color: %s\n", req.SecondaryColor))
+		}
+		if req.AccentColor != "" {
+			sb.WriteString(fmt.Sprintf("Accent color: %s\n", req.AccentColor))
+		}
+		if req.HeadingFont != "" {
+			sb.WriteString(fmt.Sprintf("Heading font: %s\n", req.HeadingFont))
+		}
+		if req.BodyFont != "" {
+			sb.WriteString(fmt.Sprintf("Body font: %s\n", req.BodyFont))
+		}
+	}
+
+	sb.WriteString("\n## Page Sections (reproduce all of these in order):\n")
+	for i, section := range req.Sections {
+		sb.WriteString(fmt.Sprintf("\n### Section %d", i+1))
+		if section.IsDark {
+			sb.WriteString(` [DARK BACKGROUND — use CTASection with "theme": "dark" prop]`)
+		}
+		sb.WriteString("\n")
+		if section.Heading != "" {
+			sb.WriteString(fmt.Sprintf("Heading (H%d): %s\n", section.HeadingLevel, section.Heading))
+		}
+		if section.Body != "" {
+			body := section.Body
+			if len(body) > 400 {
+				body = body[:400] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("Body text: %s\n", body))
+		}
+		if section.ImageURL != "" {
+			sb.WriteString(fmt.Sprintf("Image: %s (alt: %s)\n", section.ImageURL, section.ImageAlt))
+		}
+		if section.CTAText != "" {
+			sb.WriteString(fmt.Sprintf("CTA button: \"%s\" → %s\n", section.CTAText, section.CTAUrl))
+		}
+	}
+
+	sb.WriteString("\n\nGenerate the complete Puck site JSON. Include the home page and stub pages for each navigation item.")
+	return sb.String()
+}

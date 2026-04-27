@@ -23,6 +23,15 @@ func NewGeminiProvider(apiKey, model string) *GeminiProvider {
 	return &GeminiProvider{APIKey: apiKey, Model: model}
 }
 
+func (p *GeminiProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error) {
+	prompt := BuildSiteDuplicatePrompt(req)
+	resp, err := p.generateContent(siteDuplicateSystemPrompt + "\n\n" + prompt)
+	if err != nil {
+		return nil, err
+	}
+	return parseSiteGenerationResult(resp)
+}
+
 func (p *GeminiProvider) GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error) {
 	prompt := buildSiteGenerationPrompt(req)
 	fullPrompt := siteGenerationSystemPrompt + "\n\n" + prompt

@@ -23,17 +23,199 @@ func NewOpenAIProvider(apiKey, model string) *OpenAIProvider {
 	return &OpenAIProvider{APIKey: apiKey, Model: model}
 }
 
+func (p *OpenAIProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error) {
+	prompt := BuildSiteDuplicatePrompt(req)
+	resp, err := p.chatCompletion(prompt, siteDuplicateSystemPrompt)
+	if err != nil {
+		return nil, err
+	}
+	return parseSiteGenerationResult(resp)
+}
+
+// parseSiteGenerationResult parses a SiteGenerationResult tolerating field name variants from different LLMs.
+// The AI may return: "path" vs "slug", "content" array vs "puck_root" object,
+// flat navigation array vs {header_links, footer_links}, "title" vs "meta_title" in SEO.
+func parseSiteGenerationResult(resp string) (*SiteGenerationResult, error) {
+	// First try direct unmarshal
+	var result SiteGenerationResult
+	if err := json.Unmarshal([]byte(resp), &result); err == nil && len(result.Pages) > 0 {
+		// Check if pages actually have content
+		if result.Pages[0].PuckRoot != nil {
+			return &result, nil
+		}
+	}
+
+	// Flexible parse: use raw map to handle field name variants.
+	// Reset result (direct unmarshal may have populated partial data).
+	result = SiteGenerationResult{}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(resp), &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
+
+	// site_name
+	if v, ok := raw["site_name"]; ok {
+		_ = json.Unmarshal(v, &result.SiteName)
+	}
+
+	// theme — may be string or object
+	if v, ok := raw["theme"]; ok {
+		if err := json.Unmarshal(v, &result.Theme); err != nil {
+			var themeObj map[string]string
+			if json.Unmarshal(v, &themeObj) == nil {
+				for _, key := range []string{"name", "style", "value", "type"} {
+					if val, ok := themeObj[key]; ok {
+						result.Theme = val
+						break
+					}
+				}
+			}
+		}
+		if result.Theme == "" {
+			result.Theme = "dark"
+		}
+	}
+
+	// navigation — may be {header_links,footer_links} OR a flat array of {label,url}
+	if v, ok := raw["navigation"]; ok {
+		if err := json.Unmarshal(v, &result.Navigation); err != nil {
+			// Try flat array form
+			var navArray []NavLinkResult
+			if json.Unmarshal(v, &navArray) == nil && len(navArray) > 0 {
+				result.Navigation = &NavigationResult{HeaderLinks: navArray}
+			}
+		}
+	}
+
+	// seo — may use "title" vs "meta_title"
+	if v, ok := raw["seo"]; ok {
+		var seoRaw map[string]string
+		if json.Unmarshal(v, &seoRaw) == nil {
+			result.SEO = &SEOResult{}
+			if t, ok := seoRaw["meta_title"]; ok {
+				result.SEO.MetaTitle = t
+			} else if t, ok := seoRaw["title"]; ok {
+				result.SEO.MetaTitle = t
+			}
+			if d, ok := seoRaw["meta_description"]; ok {
+				result.SEO.MetaDescription = d
+			} else if d, ok := seoRaw["description"]; ok {
+				result.SEO.MetaDescription = d
+			}
+		}
+	}
+
+	// pages — normalize each page
+	if v, ok := raw["pages"]; ok {
+		var pagesRaw []map[string]json.RawMessage
+		if json.Unmarshal(v, &pagesRaw) == nil {
+			for _, p := range pagesRaw {
+				page := normalizePage(p)
+				if page != nil {
+					result.Pages = append(result.Pages, *page)
+				}
+			}
+		}
+	}
+
+	if len(result.Pages) == 0 {
+		return nil, fmt.Errorf("AI returned no pages")
+	}
+	return &result, nil
+}
+
+// normalizePage converts a raw page map to PageGenerationResult handling field name variants.
+func normalizePage(p map[string]json.RawMessage) *PageGenerationResult {
+	page := &PageGenerationResult{}
+
+	if v, ok := p["name"]; ok {
+		_ = json.Unmarshal(v, &page.Name)
+	}
+
+	// slug may be "slug" or "path"
+	if v, ok := p["slug"]; ok {
+		_ = json.Unmarshal(v, &page.Slug)
+	} else if v, ok := p["path"]; ok {
+		_ = json.Unmarshal(v, &page.Slug)
+	} else if v, ok := p["url"]; ok {
+		_ = json.Unmarshal(v, &page.Slug)
+	}
+
+	if v, ok := p["is_home"]; ok {
+		_ = json.Unmarshal(v, &page.IsHome)
+	}
+
+	// seo
+	if v, ok := p["seo"]; ok {
+		var seoRaw map[string]string
+		if json.Unmarshal(v, &seoRaw) == nil {
+			page.SEO = &SEOResult{}
+			if t, ok := seoRaw["meta_title"]; ok {
+				page.SEO.MetaTitle = t
+			} else if t, ok := seoRaw["title"]; ok {
+				page.SEO.MetaTitle = t
+			}
+			if d, ok := seoRaw["meta_description"]; ok {
+				page.SEO.MetaDescription = d
+			} else if d, ok := seoRaw["description"]; ok {
+				page.SEO.MetaDescription = d
+			}
+		}
+	}
+
+	// puck_root may be the canonical {"content": [], "root": {}} or just a "content" array directly
+	if v, ok := p["puck_root"]; ok {
+		_ = json.Unmarshal(v, &page.PuckRoot)
+	} else if v, ok := p["content"]; ok {
+		// The AI returned a flat content array — wrap it in the Puck document structure
+		var content []any
+		if json.Unmarshal(v, &content) == nil {
+			page.PuckRoot = map[string]any{
+				"content": content,
+				"root":    map[string]any{"props": map[string]any{}},
+			}
+		}
+	} else if v, ok := p["document"]; ok {
+		_ = json.Unmarshal(v, &page.PuckRoot)
+	}
+
+	// Ensure slug starts with /
+	if page.Slug != "" && !strings.HasPrefix(page.Slug, "/") && !strings.HasPrefix(page.Slug, "http") {
+		page.Slug = "/" + page.Slug
+	}
+	if page.Slug == "" {
+		if page.IsHome {
+			page.Slug = "/"
+		} else if page.Name != "" {
+			page.Slug = "/" + strings.ToLower(strings.ReplaceAll(page.Name, " ", "-"))
+		}
+	}
+
+	// Derive name from slug if missing
+	if page.Name == "" {
+		if page.Slug == "/" || page.IsHome {
+			page.Name = "Home"
+			page.IsHome = true
+		} else {
+			slug := strings.TrimPrefix(page.Slug, "/")
+			slug = strings.ReplaceAll(slug, "-", " ")
+			slug = strings.ReplaceAll(slug, "_", " ")
+			if len(slug) > 0 {
+				page.Name = strings.ToUpper(slug[:1]) + slug[1:]
+			}
+		}
+	}
+
+	return page
+}
+
 func (p *OpenAIProvider) GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error) {
 	prompt := buildSiteGenerationPrompt(req)
 	resp, err := p.chatCompletion(prompt, siteGenerationSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
-	var result SiteGenerationResult
-	if err := json.Unmarshal([]byte(resp), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse AI response: %w", err)
-	}
-	return &result, nil
+	return parseSiteGenerationResult(resp)
 }
 
 func (p *OpenAIProvider) GeneratePage(req SitePageRequest) (map[string]any, error) {

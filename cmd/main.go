@@ -146,6 +146,7 @@ func main() {
 	handlers.RegisterSiteAIRoutes(legacyTenantAPI)
 	handlers.RegisterSitePublishRoutes(legacyTenantAPI)
 	handlers.RegisterSiteResourceRoutes(legacyTenantAPI)
+	handlers.RegisterSiteDuplicateRoutes(legacyTenantAPI)
 
 	// Public website delivery route (no auth — serves published HTML snapshots).
 	// Caddy routes designated website hosts to this endpoint.
