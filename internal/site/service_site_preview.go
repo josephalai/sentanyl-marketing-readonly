@@ -135,8 +135,9 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 		}
 	}
 	sb.WriteString("<style>\n")
+	sb.WriteString(buildGlobalStyleVars(site))
 	sb.WriteString("* { margin: 0; padding: 0; box-sizing: border-box; }\n")
-	sb.WriteString("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1a1a1a; }\n")
+	sb.WriteString("body { font-family: var(--font-body, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif); line-height: 1.6; color: #1a1a1a; }\n")
 	sb.WriteString("img { max-width: 100%; height: auto; }\n")
 	sb.WriteString(".section { padding: 60px 20px; max-width: 1200px; margin: 0 auto; }\n")
 	sb.WriteString(".hero { text-align: center; padding: 80px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }\n")
@@ -717,4 +718,47 @@ func parseObjectIDs(s string) []bson.ObjectId {
 		}
 	}
 	return ids
+}
+
+// buildGlobalStyleVars generates a :root CSS block from the site's GlobalStyle.
+// Falls back to sensible defaults when a field is empty.
+func buildGlobalStyleVars(s *pkgmodels.Site) string {
+	primary := "#4f46e5"
+	secondary := "#7c3aed"
+	accent := "#f59e0b"
+	headingFont := "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+	bodyFont := "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+	borderRadius := "8px"
+
+	if s != nil && s.GlobalStyle != nil {
+		gs := s.GlobalStyle
+		if gs.PrimaryColor != "" {
+			primary = gs.PrimaryColor
+		}
+		if gs.SecondaryColor != "" {
+			secondary = gs.SecondaryColor
+		}
+		if gs.AccentColor != "" {
+			accent = gs.AccentColor
+		}
+		if gs.HeadingFont != "" {
+			headingFont = gs.HeadingFont
+		}
+		if gs.BodyFont != "" {
+			bodyFont = gs.BodyFont
+		}
+		if gs.BorderRadius != "" {
+			borderRadius = gs.BorderRadius
+		}
+	}
+
+	return fmt.Sprintf(`:root {
+  --color-primary: %s;
+  --color-secondary: %s;
+  --color-accent: %s;
+  --font-heading: %s;
+  --font-body: %s;
+  --border-radius: %s;
+}
+`, primary, secondary, accent, headingFont, bodyFont, borderRadius)
 }

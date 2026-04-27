@@ -96,6 +96,7 @@ Every component in the "content" array must have "type" and "props". The "props"
 `
 
 const siteGenerationSystemPrompt = `You are a website builder AI. Generate a complete website structure as JSON.
+If a "Business Context" section appears in the user message, use ONLY the products, prices, and descriptions listed there. Never invent product names, prices, or business data.
 
 The response must be valid JSON with this exact structure:
 {
@@ -136,6 +137,7 @@ The response must be valid JSON with this exact structure:
 ` + componentSchemaReference
 
 const pageGenerationSystemPrompt = `You are a website page builder AI. Generate a single page's Puck document as JSON.
+If a "Business Context" section appears in the user message, use ONLY the products, prices, and descriptions listed there. Never invent product names, prices, or business data.
 
 The response must be valid JSON with this exact structure:
 {
@@ -196,5 +198,78 @@ func buildSiteGenerationPrompt(req SiteGenerationRequest) string {
 	if len(req.IncludePages) > 0 {
 		sb.WriteString(fmt.Sprintf("Must include pages: %s\n", strings.Join(req.IncludePages, ", ")))
 	}
+	appendContextBlocks(&sb, req.BusinessContext, req.BrandProfile, req.ContextChunks)
 	return sb.String()
 }
+
+// buildPageGenerationPrompt builds a user prompt for single-page generation with context.
+func buildPageGenerationPrompt(req SitePageRequest) string {
+	var sb strings.Builder
+	sb.WriteString(req.Prompt)
+	appendContextBlocks(&sb, req.BusinessContext, req.BrandProfile, req.ContextChunks)
+	return sb.String()
+}
+
+// buildEditPagePrompt builds the prompt for editing an existing page.
+func buildEditPagePrompt(req PageEditRequest, docJSON string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Edit instruction: %s\n\nCurrent document:\n%s", req.Instruction, docJSON))
+	appendContextBlocks(&sb, req.BusinessContext, req.BrandProfile, req.ContextChunks)
+	return sb.String()
+}
+
+// appendContextBlocks appends business context, brand profile, and context chunk blocks to a prompt builder.
+func appendContextBlocks(sb *strings.Builder, businessContext, brandProfile string, chunks []string) {
+	if businessContext != "" {
+		sb.WriteString("\n\n## Business Context — USE ONLY THIS DATA (do not invent product names, prices, or descriptions):\n")
+		sb.WriteString(businessContext)
+	}
+	if brandProfile != "" {
+		sb.WriteString("\n\n## Brand Voice:\n")
+		sb.WriteString(brandProfile)
+	}
+	if len(chunks) > 0 {
+		sb.WriteString("\n\n## Additional Reference Material:\n")
+		for _, chunk := range chunks {
+			sb.WriteString(chunk)
+			sb.WriteString("\n---\n")
+		}
+	}
+}
+
+const suggestPagesSystemPrompt = `You are a website strategy AI. Given a business's product catalog, suggest the ideal website pages.
+Return a JSON array only, no other text:
+[{"name":"Page Name","slug":"/slug","page_type":"home|sales_page|course_catalog|coaching_page|landing_page|about|contact|blog","reason":"Why this page matters","blocks":["HeroSection","SentanylCourseGrid"]}]
+Include only pages that make sense for the products listed. Suggest 4-8 pages max.`
+
+// buildSuggestPagesPrompt builds the prompt for page suggestions.
+func buildSuggestPagesPrompt(productSummary string) string {
+	return fmt.Sprintf("Suggest website pages for this business:\n\n%s", productSummary)
+}
+
+const generateFromProductsSystemPrompt = `You are a website page builder AI. Generate a high-converting page using ONLY the real product data provided.
+Do NOT invent product names, prices, or features — use exactly what's provided.
+The response must be valid JSON with this exact structure:
+{
+  "content": [{"type": "ComponentType", "props": {"id": "unique-id", ...}}],
+  "root": {"props": {}}
+}
+` + componentSchemaReference
+
+// BuildGenerateFromProductsPrompt builds the prompt for product-based page generation.
+func BuildGenerateFromProductsPrompt(productDetails, pageType string) string {
+	return fmt.Sprintf("Generate a %s page for the following products:\n\n%s\n\nUse the exact product names, descriptions, and prices listed above.", pageType, productDetails)
+}
+
+const stealStyleSystemPrompt = `You are a design token extractor. Analyze the provided CSS and extract a design system.
+Return JSON only:
+{"primary_color":"#hex","secondary_color":"#hex","accent_color":"#hex","heading_font":"Font Family, fallbacks","body_font":"Font Family, fallbacks","border_radius":"Npx","button_style":"rounded|sharp|pill","confidence_score":85}
+Rules:
+- primary_color: dominant brand/button/link color
+- secondary_color: supporting color used for accents or headers
+- accent_color: highlight or call-to-action color if distinct
+- heading_font: font-family value used for headings (h1-h3)
+- body_font: font-family value used for body text / paragraphs
+- border_radius: most common border-radius value (e.g. "8px", "4px", "0px")
+- button_style: "pill" if border-radius > 20px, "rounded" if 4-20px, "sharp" if 0-3px
+- confidence_score: 0-100 how confident you are in the extraction`

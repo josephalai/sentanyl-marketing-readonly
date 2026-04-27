@@ -36,7 +36,8 @@ func (p *OpenAIProvider) GenerateSite(req SiteGenerationRequest) (*SiteGeneratio
 	return &result, nil
 }
 
-func (p *OpenAIProvider) GeneratePage(prompt string) (map[string]any, error) {
+func (p *OpenAIProvider) GeneratePage(req SitePageRequest) (map[string]any, error) {
+	prompt := buildPageGenerationPrompt(req)
 	resp, err := p.chatCompletion(prompt, pageGenerationSystemPrompt)
 	if err != nil {
 		return nil, err
@@ -50,7 +51,7 @@ func (p *OpenAIProvider) GeneratePage(prompt string) (map[string]any, error) {
 
 func (p *OpenAIProvider) EditPage(req PageEditRequest) (*PageEditResult, error) {
 	docJSON, _ := json.Marshal(req.CurrentDocument)
-	prompt := fmt.Sprintf("Edit instruction: %s\n\nCurrent document:\n%s", req.Instruction, string(docJSON))
+	prompt := buildEditPagePrompt(req, string(docJSON))
 	resp, err := p.chatCompletion(prompt, pageEditSystemPrompt)
 	if err != nil {
 		return nil, err
@@ -60,6 +61,27 @@ func (p *OpenAIProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 		return nil, fmt.Errorf("failed to parse AI edit response: %w", err)
 	}
 	return &result, nil
+}
+
+func (p *OpenAIProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggestion, error) {
+	prompt := buildSuggestPagesPrompt(req.ProductSummary)
+	resp, err := p.chatCompletion(prompt, suggestPagesSystemPrompt)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(resp)
+	if !strings.HasPrefix(trimmed, "[") {
+		if idx := strings.Index(trimmed, "["); idx >= 0 {
+			if end := strings.LastIndex(trimmed, "]"); end > idx {
+				trimmed = trimmed[idx : end+1]
+			}
+		}
+	}
+	var result []PageSuggestion
+	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse page suggestions: %w", err)
+	}
+	return result, nil
 }
 
 func (p *OpenAIProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {

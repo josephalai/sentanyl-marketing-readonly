@@ -8,6 +8,8 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/db"
+	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
 // RegisterSiteRoutes registers all website builder API routes.
@@ -19,6 +21,8 @@ func RegisterSiteRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.DELETE("/sites/:siteId", handleDeleteSite)
 	tenantAPI.POST("/sites/:siteId/domains/:domainId/attach", handleAttachDomain)
 	tenantAPI.GET("/sites/components/registry", handleComponentRegistry)
+	tenantAPI.GET("/sites/:siteId/style", handleGetSiteStyle)
+	tenantAPI.PUT("/sites/:siteId/style", handleUpdateSiteStyle)
 }
 
 func handleCreateSite(c *gin.Context) {
@@ -149,4 +153,66 @@ func handleAttachDomain(c *gin.Context) {
 func handleComponentRegistry(c *gin.Context) {
 	defs := site.GetAllComponentDefs()
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "components": defs})
+}
+
+func handleGetSiteStyle(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	siteID := c.Param("siteId")
+	if !bson.IsObjectIdHex(siteID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+		return
+	}
+	var s pkgmodels.Site
+	if err := db.GetCollection(pkgmodels.SiteCollection).FindId(bson.ObjectIdHex(siteID)).One(&s); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
+		return
+	}
+	if s.TenantID != tenantID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+	style := s.GlobalStyle
+	if style == nil {
+		style = &pkgmodels.GlobalStyle{}
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "style": style})
+}
+
+func handleUpdateSiteStyle(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	siteID := c.Param("siteId")
+	if !bson.IsObjectIdHex(siteID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+		return
+	}
+	var s pkgmodels.Site
+	if err := db.GetCollection(pkgmodels.SiteCollection).FindId(bson.ObjectIdHex(siteID)).One(&s); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
+		return
+	}
+	if s.TenantID != tenantID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+	var gs pkgmodels.GlobalStyle
+	if err := c.ShouldBindJSON(&gs); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid style"})
+		return
+	}
+	if err := db.GetCollection(pkgmodels.SiteCollection).UpdateId(
+		bson.ObjectIdHex(siteID),
+		bson.M{"$set": bson.M{"global_style": gs}},
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update style"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "style": gs})
 }

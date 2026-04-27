@@ -77,7 +77,7 @@ func handleNewsletterAIGenerate(c *gin.Context) {
 	if perr != nil || provider == nil {
 		log.Printf("newsletter AI: no provider configured, returning stub draft (%v)", perr)
 		doc = stubPuckDoc(req)
-	} else if d, err := provider.GeneratePage(puckPrompt); err != nil {
+	} else if d, err := provider.GeneratePage(ai.SitePageRequest{Prompt: puckPrompt}); err != nil {
 		log.Printf("newsletter AI generation failed, returning stub: %v", err)
 		doc = stubPuckDoc(req)
 	} else {

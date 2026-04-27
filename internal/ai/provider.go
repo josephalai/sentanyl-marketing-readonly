@@ -5,7 +5,9 @@ type SiteAIProvider interface {
 	// GenerateSite generates a full website structure with pages and content.
 	GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error)
 	// GeneratePage generates a single page's Puck document.
-	GeneratePage(prompt string) (map[string]any, error)
+	GeneratePage(req SitePageRequest) (map[string]any, error)
+	// SuggestPages returns a list of recommended pages based on the tenant's product catalog.
+	SuggestPages(req SitePageSuggestRequest) ([]PageSuggestion, error)
 	// EditPage returns a set of patch operations to apply to the current document.
 	EditPage(req PageEditRequest) (*PageEditResult, error)
 	// GenerateEmail generates subject + HTML body for an email.
@@ -110,12 +112,37 @@ type EmailGenerationResult struct {
 
 // SiteGenerationRequest is the input for generating a full website.
 type SiteGenerationRequest struct {
-	BusinessName string   `json:"business_name"`
-	BusinessType string   `json:"business_type"`
-	Description  string   `json:"description"`
-	Theme        string   `json:"theme,omitempty"`
-	PageCount    int      `json:"page_count,omitempty"`
-	IncludePages []string `json:"include_pages,omitempty"`
+	BusinessName    string   `json:"business_name"`
+	BusinessType    string   `json:"business_type"`
+	Description     string   `json:"description"`
+	Theme           string   `json:"theme,omitempty"`
+	PageCount       int      `json:"page_count,omitempty"`
+	IncludePages    []string `json:"include_pages,omitempty"`
+	BusinessContext string   `json:"business_context,omitempty"`
+	BrandProfile    string   `json:"brand_profile,omitempty"`
+	ContextChunks   []string `json:"context_chunks,omitempty"`
+}
+
+// SitePageRequest is the input for single-page generation with business context.
+type SitePageRequest struct {
+	Prompt          string   `json:"prompt"`
+	BusinessContext string   `json:"business_context,omitempty"`
+	BrandProfile    string   `json:"brand_profile,omitempty"`
+	ContextChunks   []string `json:"context_chunks,omitempty"`
+}
+
+// SitePageSuggestRequest is the input for page suggestions based on product catalog.
+type SitePageSuggestRequest struct {
+	ProductSummary string `json:"product_summary"`
+}
+
+// PageSuggestion is a single suggested page from the AI.
+type PageSuggestion struct {
+	Name               string   `json:"name"`
+	Slug               string   `json:"slug"`
+	PageType           string   `json:"page_type"`
+	Reason             string   `json:"reason"`
+	RecommendedBlocks  []string `json:"blocks,omitempty"`
 }
 
 // SiteGenerationResult is the output of AI website generation.
@@ -158,6 +185,9 @@ type PageGenerationResult struct {
 type PageEditRequest struct {
 	Instruction     string         `json:"instruction"`
 	CurrentDocument map[string]any `json:"current_document"`
+	BusinessContext string         `json:"business_context,omitempty"`
+	BrandProfile    string         `json:"brand_profile,omitempty"`
+	ContextChunks   []string       `json:"context_chunks,omitempty"`
 }
 
 // PageEditResult is the output of AI page editing — returns the full modified document.

@@ -37,7 +37,8 @@ func (p *GeminiProvider) GenerateSite(req SiteGenerationRequest) (*SiteGeneratio
 	return &result, nil
 }
 
-func (p *GeminiProvider) GeneratePage(prompt string) (map[string]any, error) {
+func (p *GeminiProvider) GeneratePage(req SitePageRequest) (map[string]any, error) {
+	prompt := buildPageGenerationPrompt(req)
 	fullPrompt := pageGenerationSystemPrompt + "\n\n" + prompt
 	resp, err := p.generateContent(fullPrompt)
 	if err != nil {
@@ -52,8 +53,9 @@ func (p *GeminiProvider) GeneratePage(prompt string) (map[string]any, error) {
 
 func (p *GeminiProvider) EditPage(req PageEditRequest) (*PageEditResult, error) {
 	docJSON, _ := json.Marshal(req.CurrentDocument)
-	prompt := pageEditSystemPrompt + "\n\nEdit instruction: " + req.Instruction + "\n\nCurrent document:\n" + string(docJSON)
-	resp, err := p.generateContent(prompt)
+	prompt := buildEditPagePrompt(req, string(docJSON))
+	fullPrompt := pageEditSystemPrompt + "\n\n" + prompt
+	resp, err := p.generateContent(fullPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +64,27 @@ func (p *GeminiProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 		return nil, fmt.Errorf("failed to parse AI edit response: %w", err)
 	}
 	return &result, nil
+}
+
+func (p *GeminiProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggestion, error) {
+	prompt := buildSuggestPagesPrompt(req.ProductSummary)
+	resp, err := p.generateContent(suggestPagesSystemPrompt + "\n\n" + prompt)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(resp)
+	if !strings.HasPrefix(trimmed, "[") {
+		if idx := strings.Index(trimmed, "["); idx >= 0 {
+			if end := strings.LastIndex(trimmed, "]"); end > idx {
+				trimmed = trimmed[idx : end+1]
+			}
+		}
+	}
+	var result []PageSuggestion
+	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse page suggestions: %w", err)
+	}
+	return result, nil
 }
 
 func (p *GeminiProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {
