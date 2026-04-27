@@ -39,6 +39,12 @@ func RegisterEcommerceRoutes(rg *gin.RouterGroup) {
 	rg.PUT("/products/:id", handleTenantUpdateProduct)
 	rg.DELETE("/products/:id", handleTenantDeleteProduct)
 
+	// Digital Download asset management — file uploads, attach/detach, settings.
+	RegisterDigitalDownloadTenantRoutes(rg)
+
+	// Service Product fulfillment — clients, instances, notes, resources.
+	RegisterServiceTenantRoutes(rg)
+
 	// Offer CRUD
 	rg.POST("/offers", handleCreateOffer)
 	rg.GET("/offers", handleListOffers)
@@ -59,6 +65,8 @@ func RegisterEcommerceRoutes(rg *gin.RouterGroup) {
 // RegisterCustomerLibraryRoutes registers customer-facing routes.
 func RegisterCustomerLibraryRoutes(rg *gin.RouterGroup) {
 	rg.GET("/library/products", handleGetLibraryProducts)
+	RegisterDigitalDownloadCustomerRoutes(rg)
+	RegisterServiceCustomerRoutes(rg)
 }
 
 // --- Product CRUD (tenant-scoped) ---
@@ -144,12 +152,14 @@ func handleTenantUpdateProduct(c *gin.Context) {
 	}
 
 	var req struct {
-		Name         string           `json:"name"`
-		Description  string           `json:"description"`
-		ProductType  string           `json:"product_type"`
-		ThumbnailURL string           `json:"thumbnail_url"`
-		Status       string           `json:"status"`
-		Modules      []*pkgmodels.Module `json:"modules"`
+		Name         string                          `json:"name"`
+		Description  string                          `json:"description"`
+		ProductType  string                          `json:"product_type"`
+		ThumbnailURL string                          `json:"thumbnail_url"`
+		Status       string                          `json:"status"`
+		Modules      []*pkgmodels.Module             `json:"modules"`
+		Service      *pkgmodels.ServiceConfig        `json:"service"`
+		Downloads    *pkgmodels.DigitalDownloadConfig `json:"downloads"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -174,6 +184,22 @@ func handleTenantUpdateProduct(c *gin.Context) {
 	}
 	if req.Modules != nil {
 		update["modules"] = req.Modules
+	}
+	if req.Service != nil {
+		// Auto-assign ObjectIds to instance templates that arrive without one.
+		// Tenant UI sends bare {order,title,description,...} for new rows; the
+		// bson driver rejects zero-valued ObjectIds, so we mint them here. The
+		// id is what the LMS enroll provisioner stores on each ServiceInstance,
+		// so a stable id matters even before publish.
+		for _, t := range req.Service.InstanceTemplates {
+			if !t.Id.Valid() {
+				t.Id = bson.NewObjectId()
+			}
+		}
+		update["service"] = req.Service
+	}
+	if req.Downloads != nil {
+		update["downloads"] = req.Downloads
 	}
 
 	if len(update) == 0 {
