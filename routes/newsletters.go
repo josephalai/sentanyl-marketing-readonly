@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
@@ -162,15 +163,17 @@ func handleGetNewsletter(c *gin.Context) {
 }
 
 type updateNewsletterReq struct {
-	HeroImageURL        *string `json:"hero_image_url"`
-	Tagline             *string `json:"tagline"`
-	Description         *string `json:"description"`
-	PublishCadence      *string `json:"publish_cadence"`
-	DoubleOptInEnabled  *bool   `json:"double_opt_in_enabled"`
-	FromName            *string `json:"from_name"`
-	FromEmail           *string `json:"from_email"`
-	ReplyToEmail        *string `json:"reply_to_email"`
-	DefaultPostAudience *string `json:"default_post_audience"`
+	HeroImageURL          *string  `json:"hero_image_url"`
+	Tagline               *string  `json:"tagline"`
+	Description           *string  `json:"description"`
+	PublishCadence        *string  `json:"publish_cadence"`
+	DoubleOptInEnabled    *bool    `json:"double_opt_in_enabled"`
+	FromName              *string  `json:"from_name"`
+	FromEmail             *string  `json:"from_email"`
+	ReplyToEmail          *string  `json:"reply_to_email"`
+	DefaultPostAudience   *string  `json:"default_post_audience"`
+	DefaultAITTLSeconds   *int64   `json:"default_ai_ttl_seconds"`
+	DefaultContextPackIDs []string `json:"default_context_pack_ids"`
 }
 
 func handleUpdateNewsletter(c *gin.Context) {
@@ -216,6 +219,37 @@ func handleUpdateNewsletter(c *gin.Context) {
 	}
 	if req.DefaultPostAudience != nil {
 		cfg.DefaultPostAudience = *req.DefaultPostAudience
+	}
+	if req.DefaultAITTLSeconds != nil {
+		cfg.DefaultAITTLSeconds = *req.DefaultAITTLSeconds
+	}
+	if req.DefaultContextPackIDs != nil {
+		// Resolve client-supplied public ids or hex to ObjectIds for the
+		// stored config. Anything that doesn't resolve is silently dropped.
+		ids := make([]bson.ObjectId, 0, len(req.DefaultContextPackIDs))
+		for _, raw := range req.DefaultContextPackIDs {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			var pack pkgmodels.ContextPack
+			if bson.IsObjectIdHex(raw) {
+				if err := db.GetCollection(pkgmodels.ContextPackCollection).Find(bson.M{
+					"_id":       bson.ObjectIdHex(raw),
+					"tenant_id": tenantID,
+				}).One(&pack); err == nil {
+					ids = append(ids, pack.Id)
+					continue
+				}
+			}
+			if err := db.GetCollection(pkgmodels.ContextPackCollection).Find(bson.M{
+				"public_id": raw,
+				"tenant_id": tenantID,
+			}).One(&pack); err == nil {
+				ids = append(ids, pack.Id)
+			}
+		}
+		cfg.DefaultContextPackIDs = ids
 	}
 	// Always ensure the free tier exists at index 0 — paid tiers add behind it.
 	cfg.Tiers = ensureFreeTier(cfg.Tiers)
@@ -622,14 +656,28 @@ func handlePublishNewsletterPost(c *gin.Context) {
 		}
 	}
 
-	// Render Puck doc → HTML using the body-only renderer (no <html>/<head>
-	// shell — newsletter posts are wrapped by renderNewsletterPostPage at
-	// serve time, and the gate splitter expects the bare break markers in
-	// the body stream).
+	sent, err := PublishPostNow(p, post, scheduled, scheduledAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":      post.Status,
+		"scheduled":   scheduled,
+		"emails_sent": sent,
+	})
+}
+
+// PublishPostNow renders the post body, flips status, and runs the
+// broadcast fan-out. Shared between the HTTP publish handler and the
+// scheduler worker so absolute-mode scheduled posts auto-publish at their
+// time without the tenant clicking anything. Drip-mode posts skip the
+// flip — they go to status=published manually, then the dispatch worker
+// fans out per-subscriber over time.
+func PublishPostNow(p *pkgmodels.Product, post *pkgmodels.NewsletterPost, scheduled bool, scheduledAt time.Time) (int, error) {
 	bodyDoc := map[string]any(post.BodyDoc)
-	log.Printf("newsletter publish: rendering bodyDoc with %d top-level keys, content-type=%T", len(bodyDoc), bodyDoc["content"])
 	html := site.RenderPuckBodyOnly(bodyDoc)
-	log.Printf("newsletter publish: rendered html len=%d", len(html))
 	post.RenderedHTML = html
 
 	if scheduled {
@@ -644,7 +692,7 @@ func handlePublishNewsletterPost(c *gin.Context) {
 	}
 
 	if err := db.GetCollection(pkgmodels.NewsletterPostCollection).Update(
-		bson.M{"_id": post.Id, "tenant_id": tenantID},
+		bson.M{"_id": post.Id, "tenant_id": post.TenantID},
 		bson.M{"$set": bson.M{
 			"status":        post.Status,
 			"scheduled_at":  post.ScheduledAt,
@@ -652,22 +700,14 @@ func handlePublishNewsletterPost(c *gin.Context) {
 			"rendered_html": post.RenderedHTML,
 		}},
 	); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to publish"})
-		return
+		return 0, fmt.Errorf("failed to publish: %w", err)
 	}
 
-	// Fan out to subscribers — synchronously inserts one Email row per
-	// recipient (instant or scheduled). The existing scheduler picks them up.
 	sent, ferr := broadcastNewsletterPost(p, post, scheduled, scheduledAt)
 	if ferr != nil {
 		log.Printf("newsletter: broadcast had errors: %v", ferr)
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":      post.Status,
-		"scheduled":   scheduled,
-		"emails_sent": sent,
-	})
+	return sent, nil
 }
 
 func handleUnpublishNewsletterPost(c *gin.Context) {
@@ -890,7 +930,20 @@ func handleCustomerGetNewsletterPost(c *gin.Context) {
 	}
 
 	viewer := buildViewerStateForContact(tenantID, p.Id, contactID)
-	splitR := render.SplitNewsletterPost(post.RenderedHTML, viewer)
+
+	// Resolve {{ai}} handlebars before applying the gate split. Same
+	// resolver, same cache the broadcast and public page use — this
+	// reader sees the cached value for the current TTL window.
+	resolvedHTML := post.RenderedHTML
+	if resolver := ai.Resolver(); resolver != nil && p.Newsletter != nil {
+		resolvedHTML = resolver.Resolve(post.RenderedHTML, render.ResolveOptions{
+			TenantID:             tenantID,
+			PostContextPackIDs:   post.ContextPackIDs,
+			NewsletterDefaults:   p.Newsletter.DefaultContextPackIDs,
+			NewsletterTTLSeconds: p.Newsletter.DefaultAITTLSeconds,
+		})
+	}
+	splitR := render.SplitNewsletterPost(resolvedHTML, viewer)
 
 	// Bump impressions opportunistically.
 	_ = db.GetCollection(pkgmodels.NewsletterPostCollection).Update(

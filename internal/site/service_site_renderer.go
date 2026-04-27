@@ -7,8 +7,10 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/render"
 )
 
 // ServiceResolvePublicPage resolves a public page request by domain and path.
@@ -166,13 +168,26 @@ func renderNewsletterHome(product *pkgmodels.Product, posts []pkgmodels.Newslett
 }
 
 func renderNewsletterPostPage(product *pkgmodels.Product, post *pkgmodels.NewsletterPost) string {
+	// Resolve {{ai}} handlebars before slicing so anonymous viewers see
+	// the same time-bucketed content as subscribers (and as the email).
+	rendered := post.RenderedHTML
+	if resolver := ai.Resolver(); resolver != nil && product.Newsletter != nil {
+		opts := render.ResolveOptions{
+			TenantID:             product.TenantID,
+			PostContextPackIDs:   post.ContextPackIDs,
+			NewsletterDefaults:   product.Newsletter.DefaultContextPackIDs,
+			NewsletterTTLSeconds: product.Newsletter.DefaultAITTLSeconds,
+		}
+		rendered = resolver.Resolve(rendered, opts)
+	}
+
 	// Anonymous viewer state — public page, so split at subscriber-break.
 	var visibleHTML string
-	subIdx := strings.Index(post.RenderedHTML, "<!--subscriber-break-->")
+	subIdx := strings.Index(rendered, "<!--subscriber-break-->")
 	if subIdx >= 0 {
-		visibleHTML = post.RenderedHTML[:subIdx]
+		visibleHTML = rendered[:subIdx]
 	} else {
-		visibleHTML = post.RenderedHTML
+		visibleHTML = rendered
 	}
 
 	var sb strings.Builder

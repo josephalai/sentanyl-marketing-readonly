@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
@@ -72,18 +73,38 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		from = "no-reply@sentanyl.local"
 	}
 
+	// Resolve {{ai}} handlebars in subject + preview + body BEFORE the
+	// gate split + per-recipient send loop. The resolver caches per
+	// (tenant, prompt, time-bucket), so the first hit talks to the LLM
+	// and every subsequent recipient in this broadcast gets the same
+	// value — exactly the user's requirement: "the content of the
+	// Newsletter changes every {timeframe} but is sent to everyone
+	// within that timeframe."
+	resolvedHTML := post.RenderedHTML
+	if resolver := ai.Resolver(); resolver != nil {
+		opts := render.ResolveOptions{
+			TenantID:             p.TenantID,
+			PostContextPackIDs:   post.ContextPackIDs,
+			NewsletterDefaults:   cfg.DefaultContextPackIDs,
+			NewsletterTTLSeconds: cfg.DefaultAITTLSeconds,
+		}
+		subject = resolver.Resolve(subject, opts)
+		post.EmailPreviewText = resolver.Resolve(post.EmailPreviewText, opts)
+		resolvedHTML = resolver.Resolve(post.RenderedHTML, opts)
+	}
+
 	// Slice rendered HTML at the subscriber-break so the email body is the
 	// public-safe portion. Subscribers click through to the post page for
 	// the gated remainder. Free-tier vs paid-tier email differentiation is
 	// out of scope for v1; everyone gets the same email body.
-	splitR := render.SplitNewsletterPost(post.RenderedHTML, render.ViewerState{
+	splitR := render.SplitNewsletterPost(resolvedHTML, render.ViewerState{
 		// Pretend "subscribed_free" so the subscriber break clears; the paywall
 		// break still hides paid content from the email body.
 		SubscribedFree: true,
 	})
 	bodyHTML := splitR.VisibleHTML
 	if bodyHTML == "" {
-		bodyHTML = post.RenderedHTML
+		bodyHTML = resolvedHTML
 	}
 	// Rewrite outbound links through the click-tracker. Per-recipient
 	// substitution of {{SUB_PUBLIC_ID}} happens later in personalizeEmail so

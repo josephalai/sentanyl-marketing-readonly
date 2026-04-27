@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // GeminiProvider implements SiteAIProvider using Google's Gemini API.
@@ -89,6 +90,39 @@ func (p *GeminiProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult
 	return &result, nil
 }
 
+func (p *GeminiProvider) GenerateText(req GenerateTextRequest) (string, error) {
+	prompt := aiTextSystemPrompt + "\n\n" + buildAITextPrompt(req)
+	resp, err := p.generateContentPlain(prompt, req.MaxTokens)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp), nil
+}
+
+func (p *GeminiProvider) GenerateNewsletterSeriesOutline(req SeriesOutlineRequest) (*SeriesOutlineResponse, error) {
+	resp, err := p.generateContent(seriesOutlineSystemPrompt + "\n\n" + buildSeriesOutlinePrompt(req))
+	if err != nil {
+		return nil, err
+	}
+	var result SeriesOutlineResponse
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse series outline response: %w", err)
+	}
+	return &result, nil
+}
+
+func (p *GeminiProvider) GenerateNewsletterPostFromBrief(req PostFromBriefRequest) (map[string]any, error) {
+	resp, err := p.generateContent(postFromBriefSystemPrompt + "\n\n" + buildPostFromBriefPrompt(req))
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse post-from-brief response: %w", err)
+	}
+	return result, nil
+}
+
 func (p *GeminiProvider) generateContent(prompt string) (string, error) {
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", p.Model, p.APIKey)
 
@@ -148,5 +182,64 @@ func (p *GeminiProvider) generateContent(prompt string) (string, error) {
 		return "", fmt.Errorf("no content in Gemini response")
 	}
 
+	return apiResp.Candidates[0].Content.Parts[0].Text, nil
+}
+
+// generateContentPlain is the same Gemini call without forcing JSON
+// response_mime_type, used by GenerateText so the model can emit bare prose.
+func (p *GeminiProvider) generateContentPlain(prompt string, maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = 220
+	}
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", p.Model, p.APIKey)
+	reqBody := map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]string{
+					{"text": prompt},
+				},
+			},
+		},
+		"generationConfig": map[string]any{
+			"temperature":     0.7,
+			"maxOutputTokens": maxTokens,
+		},
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("Gemini API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Gemini API returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var apiResp struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	if len(apiResp.Candidates) == 0 || len(apiResp.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("no content in Gemini response")
+	}
 	return apiResp.Candidates[0].Content.Parts[0].Text, nil
 }

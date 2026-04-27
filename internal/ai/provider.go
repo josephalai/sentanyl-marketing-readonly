@@ -12,6 +12,77 @@ type SiteAIProvider interface {
 	GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error)
 	// EditEmail rewrites an existing email subject/body given an instruction.
 	EditEmail(req EmailEditRequest) (*EmailGenerationResult, error)
+
+	// GenerateText resolves a single inline {{ai}} handlebar. Output is
+	// plain text (no HTML, no surrounding quotes), capped to MaxTokens or
+	// ~80 words. ReferenceText is the concatenated chunks of any context
+	// packs the handlebar inherited; the system prompt instructs the model
+	// to draw any factual claims or quotes exclusively from it.
+	GenerateText(req GenerateTextRequest) (string, error)
+
+	// GenerateNewsletterSeriesOutline plans a multi-issue newsletter series.
+	// Mirrors the LMS course-outline call: one LLM hit returns a structured
+	// series_title + N issue titles + briefs + key_points anchored to the
+	// shared reference material. The caller then fans out per-issue content
+	// generation in parallel.
+	GenerateNewsletterSeriesOutline(req SeriesOutlineRequest) (*SeriesOutlineResponse, error)
+
+	// GenerateNewsletterPostFromBrief produces one post's Puck doc given the
+	// outline-stage brief. Same provider call shape as GeneratePage but
+	// pre-loads the issue title, brief, key points, and shared reference
+	// text so every post in the series stays grounded in the same source.
+	GenerateNewsletterPostFromBrief(req PostFromBriefRequest) (map[string]any, error)
+}
+
+// GenerateTextRequest carries the inputs the handlebar resolver passes to
+// the provider on a cache miss.
+type GenerateTextRequest struct {
+	Prompt        string `json:"prompt"`
+	ReferenceText string `json:"reference_text,omitempty"` // concatenated context-pack chunks
+	BrandProfile  string `json:"brand_profile,omitempty"`
+	MaxTokens     int    `json:"max_tokens,omitempty"`
+}
+
+// SeriesOutlineRequest is the input for newsletter series outline generation.
+// All fields except Topic are advisory; the provider should respect Tone +
+// Audience + Outcome but is free to set issue order and key_points.
+type SeriesOutlineRequest struct {
+	Topic         string `json:"topic"`
+	Audience      string `json:"audience,omitempty"`
+	Outcome       string `json:"outcome,omitempty"`
+	Tone          string `json:"tone,omitempty"`
+	IssueCount    int    `json:"issue_count"`
+	ReferenceText string `json:"reference_text,omitempty"`
+	BrandProfile  string `json:"brand_profile,omitempty"`
+}
+
+// SeriesOutlineResponse is the structured plan the provider returns. Each
+// IssueOutline becomes a NewsletterPost; the caller paginates them across
+// the requested cadence (or drip offsets).
+type SeriesOutlineResponse struct {
+	SeriesTitle string          `json:"series_title"`
+	Description string          `json:"description"`
+	Issues      []IssueOutline  `json:"issues"`
+}
+
+type IssueOutline struct {
+	Order     int      `json:"order"`
+	Title     string   `json:"title"`
+	Brief     string   `json:"brief"`
+	KeyPoints []string `json:"key_points"`
+}
+
+// PostFromBriefRequest is the per-issue follow-up generation. Receives one
+// IssueOutline plus the same shared grounding as the outline call.
+type PostFromBriefRequest struct {
+	SeriesTitle   string   `json:"series_title"`
+	IssueTitle    string   `json:"issue_title"`
+	IssueBrief    string   `json:"issue_brief"`
+	KeyPoints     []string `json:"key_points,omitempty"`
+	Tone          string   `json:"tone,omitempty"`
+	Audience      string   `json:"audience,omitempty"`
+	ReferenceText string   `json:"reference_text,omitempty"`
+	BrandProfile  string   `json:"brand_profile,omitempty"`
 }
 
 // EmailGenerationRequest is the input for AI email generation.

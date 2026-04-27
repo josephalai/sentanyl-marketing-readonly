@@ -7,12 +7,16 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/josephalai/sentanyl/marketing-service/handlers"
+	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/marketing-service/internal/scheduler"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/config"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
+	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/render"
 	"github.com/josephalai/sentanyl/pkg/storage"
 )
 
@@ -41,6 +45,21 @@ func main() {
 
 	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
 	routes.EnsureEcommerceIndexes()
+
+	// Bootstrap the {{ai}} handlebar resolver. Constructs a process-wide
+	// singleton wired to the configured SiteAIProvider; broadcast send,
+	// public page render, and the customer post API all consume it via
+	// ai.Resolver(). Nil-safe end-to-end — when no LLM provider is wired
+	// the resolver still emits "[ai unavailable]" placeholders so render
+	// paths never panic.
+	provider, _ := ai.GetConfiguredProvider()
+	textProvider := ai.NewResolverAdapter(provider)
+	ai.SetResolver(render.NewAIResolver(textProvider, pkgmodels.NewsletterDefaultAITTLSeconds))
+
+	// Newsletter scheduler — auto-publishes scheduled posts at their time
+	// and dispatches drip-mode posts per-subscriber. In-process goroutine
+	// matching the coaching reminder worker pattern.
+	scheduler.Start()
 
 	// Initialize the GCS storage provider used by digital download deliveries
 	// and the service product resource uploads. If init fails (no ADC in dev),
