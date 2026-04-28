@@ -152,6 +152,10 @@ func main() {
 	// Caddy routes designated website hosts to this endpoint.
 	handlers.RegisterPublicSiteRoutes(api)
 
+	// Browser-viewable site routes — /view/sites/:publicId[/slug]
+	// No auth, public_id only, serves raw HTML directly in the browser.
+	handlers.RegisterSiteViewRoutes(r)
+
 	// Public form submission and checkout routes (no auth — for published websites).
 	handlers.RegisterPublicFormRoutes(api)
 

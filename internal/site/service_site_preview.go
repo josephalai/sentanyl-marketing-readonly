@@ -777,6 +777,11 @@ func parseObjectIDs(s string) []bson.ObjectId {
 	return ids
 }
 
+// RenderStubPage renders a minimal branded placeholder for pages with no content.
+func RenderStubPage(page *SitePage, s *pkgmodels.Site) string {
+	return renderStubPage(page, s)
+}
+
 // renderStubPage renders a minimal branded placeholder for pages with no content.
 func renderStubPage(page *SitePage, site *pkgmodels.Site) string {
 	title := page.Name
