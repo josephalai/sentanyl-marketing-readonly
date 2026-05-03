@@ -518,27 +518,107 @@ IMPORTANT JSON RULES:
 CRITICAL RULES:
 1. Use ONLY the content provided (headings, body text, image URLs, CTA text). Never invent content.
 2. Preserve image URLs exactly — pass them through as imageSrc/imageUrl/src on the matching component.
-3. Match the visual rhythm of the source: where the source uses dark bands, set tone="inverse" on those sections. Where the source uses light/grey bands, set tone="muted".
+3. **Bands carry tone.** The user prompt groups source sections into bands and gives you the tone for each band. Every block you emit for sections inside a band MUST set props.tone to that band's tone value. This is the single most important rule for visual fidelity.
 4. Include ALL nav links in the site navigation.
 5. Generate at least 7-10 top-level components for the home page using a varied mix.
-6. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array.
+6. Do NOT wrap blocks in Section/Container/Stack/Grid — the editor will silently flatten them. Use per-block tone instead.
+7. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array.
 
 Mapping guide for source patterns:
-- A first big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set.
-- A first big heading + tagline + button on a dark photo → HeroSection variant="image", backgroundImage set, tone="inverse".
-- A row of customer/partner logos → LogoCloud.
-- A 2/3/4-grid of icon + title + body → FeatureGrid (extract icons or use sensible emoji).
-- A side-by-side text + screenshot/illustration → MediaSection (alternate layout left/right when there are multiple in a row).
-- A row of metrics → Stats.
-- Pricing tables → Pricing (mark the most popular tier featured: true).
-- Customer quotes → TestimonialsSection variant="cards" (or "quote" for one big featured quote).
-- FAQ → FAQSection (variant="cols" if 6+ items).
+- First band with one big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set.
+- First band with heading + tagline + button on a dark photo → HeroSection variant="image", backgroundImage set, tone="inverse".
+- A band of customer/partner logos → LogoCloud.
+- A band of 3-4 parallel icon+title+body sections → ONE FeatureGrid block with items[].
+- A band with a single image+text section → ONE MediaSection (alternate layout left/right between consecutive MediaSections).
+- A band of 3-4 metric/number callouts → ONE Stats block.
+- A band of pricing tiers → ONE Pricing block (mark the most popular tier featured: true).
+- A band of customer quotes → ONE TestimonialsSection variant="cards" (or "quote" for a single big featured quote).
+- A band of FAQ items → ONE FAQSection (variant="cols" if 6+ items).
 - Newsletter/email signup → SentanylLeadForm.
-- Final conversion band → CTASection variant="banner".
+- Closing band with a heading + button → ONE CTASection variant="banner".
 
 ` + componentSchemaReference
 
+// sectionBand groups consecutive ExtractedSections that share a background
+// tone. The clone pipeline emits one band header per group so the LLM can
+// stamp matching `tone` props on every block within the band, preserving
+// the source's visual rhythm.
+type sectionBand struct {
+	Tone     string             // "inverse" | "muted" | "default"
+	BgColor  string             // representative source color, for the LLM's reference
+	Sections []ExtractedSection // sections in source order
+	StartIdx int                // index of first section in the original slice
+}
+
+// toneFromSection maps the sandbox-extracted bg into the design-system tone.
+// IsDark wins; otherwise we treat near-white as default and any light tint
+// as muted. Heuristics intentionally err on the side of "default" when
+// unsure — the page still looks fine with a default-tone band.
+func toneFromSection(s ExtractedSection) string {
+	if s.IsDark {
+		return "inverse"
+	}
+	bg := strings.TrimPrefix(strings.TrimSpace(s.BgColor), "#")
+	if len(bg) == 6 {
+		r := hexByte(bg[0:2])
+		g := hexByte(bg[2:4])
+		b := hexByte(bg[4:6])
+		avg := (int(r) + int(g) + int(b)) / 3
+		switch {
+		case avg < 80:
+			return "inverse"
+		case avg < 250:
+			// Anything visibly off-white counts as a muted band. Pure
+			// white (#ffffff, avg 255) and near-white (#fefefe, avg 254)
+			// stay default so we don't paint a band where there isn't one.
+			return "muted"
+		}
+	}
+	return "default"
+}
+
+func hexByte(s string) byte {
+	var n byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			n = n*16 + (c - '0')
+		case c >= 'a' && c <= 'f':
+			n = n*16 + (c - 'a' + 10)
+		case c >= 'A' && c <= 'F':
+			n = n*16 + (c - 'A' + 10)
+		}
+	}
+	return n
+}
+
+// groupSectionsByBand walks sections in source order and groups consecutive
+// sections with the same tone into bands. A page with hero (dark), three
+// feature sections (light), and a final CTA (dark) becomes 3 bands.
+func groupSectionsByBand(sections []ExtractedSection) []sectionBand {
+	if len(sections) == 0 {
+		return nil
+	}
+	var bands []sectionBand
+	cur := sectionBand{Tone: toneFromSection(sections[0]), BgColor: sections[0].BgColor, Sections: []ExtractedSection{sections[0]}, StartIdx: 0}
+	for i := 1; i < len(sections); i++ {
+		t := toneFromSection(sections[i])
+		if t == cur.Tone {
+			cur.Sections = append(cur.Sections, sections[i])
+		} else {
+			bands = append(bands, cur)
+			cur = sectionBand{Tone: t, BgColor: sections[i].BgColor, Sections: []ExtractedSection{sections[i]}, StartIdx: i}
+		}
+	}
+	bands = append(bands, cur)
+	return bands
+}
+
 // BuildSiteDuplicatePrompt constructs the AI prompt for site duplication.
+// Sections are pre-grouped into bands so the LLM can emit blocks that
+// share `tone` within a band — this is what preserves the source's
+// visual rhythm in the cloned site.
 func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Duplicate this website as a Puck site: %s\n", req.SourceURL))
@@ -556,7 +636,7 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	}
 
 	if req.PrimaryColor != "" {
-		sb.WriteString(fmt.Sprintf("\n## Design Tokens:\n"))
+		sb.WriteString("\n## Design Tokens:\n")
 		sb.WriteString(fmt.Sprintf("Primary color: %s\n", req.PrimaryColor))
 		if req.SecondaryColor != "" {
 			sb.WriteString(fmt.Sprintf("Secondary color: %s\n", req.SecondaryColor))
@@ -572,32 +652,64 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 		}
 	}
 
-	sb.WriteString("\n## Page Sections (reproduce all of these in order):\n")
-	for i, section := range req.Sections {
-		sb.WriteString(fmt.Sprintf("\n### Section %d", i+1))
-		if section.IsDark {
-			sb.WriteString(` [DARK BACKGROUND — use CTASection with "theme": "dark" prop]`)
+	bands := groupSectionsByBand(req.Sections)
+	sb.WriteString("\n## Page Bands (reproduce in source order)\n")
+	sb.WriteString("Each band below is a continuous run of source sections that share a background. EVERY block you emit for sections inside a band MUST set the same `tone` shown for the band. This keeps the cloned page's visual rhythm matching the source.\n")
+
+	for bIdx, band := range bands {
+		bgHint := band.BgColor
+		if bgHint == "" {
+			bgHint = "—"
 		}
-		sb.WriteString("\n")
-		if section.Heading != "" {
-			sb.WriteString(fmt.Sprintf("Heading (H%d): %s\n", section.HeadingLevel, section.Heading))
-		}
-		if section.Body != "" {
-			body := section.Body
-			if len(body) > 400 {
-				body = body[:400] + "..."
+		sb.WriteString(fmt.Sprintf("\n### Band %d — tone: %s (source bg: %s)\n", bIdx+1, band.Tone, bgHint))
+
+		// Mapping nudges based on band shape.
+		multiImage := 0
+		anyCTA := false
+		for _, s := range band.Sections {
+			if s.ImageURL != "" {
+				multiImage++
 			}
-			sb.WriteString(fmt.Sprintf("Body text: %s\n", body))
+			if s.CTAText != "" {
+				anyCTA = true
+			}
 		}
-		if section.ImageURL != "" {
-			sb.WriteString(fmt.Sprintf("Image: %s (alt: %s)\n", section.ImageURL, section.ImageAlt))
+		switch {
+		case len(band.Sections) >= 3 && multiImage >= len(band.Sections)-1:
+			sb.WriteString("Hint: this band has multiple parallel image+text sections — consider one FeatureGrid block (icon, title, body items) OR a Stats block if the items are numbers/labels.\n")
+		case len(band.Sections) == 1 && multiImage == 1:
+			sb.WriteString("Hint: single image+text section — emit one MediaSection block (alternate layout left/right between consecutive MediaSections elsewhere).\n")
+		case len(band.Sections) >= 4 && multiImage == 0:
+			sb.WriteString("Hint: this band is text-heavy with no images — consider FAQSection, TestimonialsSection, or a single RichTextSection.\n")
+		case bIdx == 0:
+			sb.WriteString("Hint: first band — usually emit one HeroSection (variant=split if image present, image if dark+image, gradient or centered otherwise).\n")
+		case bIdx == len(bands)-1 && anyCTA:
+			sb.WriteString("Hint: closing band with a CTA — emit one CTASection variant=banner.\n")
 		}
-		if section.CTAText != "" {
-			sb.WriteString(fmt.Sprintf("CTA button: \"%s\" → %s\n", section.CTAText, section.CTAUrl))
+
+		for _, section := range band.Sections {
+			sb.WriteString(fmt.Sprintf("- Section %d", section.HeadingLevel))
+			if section.Heading != "" {
+				sb.WriteString(fmt.Sprintf(": Heading: %q", section.Heading))
+			}
+			sb.WriteString("\n")
+			if section.Body != "" {
+				body := section.Body
+				if len(body) > 400 {
+					body = body[:400] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("    Body: %s\n", body))
+			}
+			if section.ImageURL != "" {
+				sb.WriteString(fmt.Sprintf("    Image: %s (alt: %s)\n", section.ImageURL, section.ImageAlt))
+			}
+			if section.CTAText != "" {
+				sb.WriteString(fmt.Sprintf("    CTA: %q → %s\n", section.CTAText, section.CTAUrl))
+			}
 		}
 	}
 
-	sb.WriteString("\n\nGenerate the complete Puck site JSON. Include the home page and stub pages for each navigation item.")
+	sb.WriteString("\n\nGenerate the complete Puck site JSON. Include the home page and stub pages for each navigation item. Remember: every block in a band carries that band's `tone` value (default | muted | inverse).")
 	return sb.String()
 }
 
