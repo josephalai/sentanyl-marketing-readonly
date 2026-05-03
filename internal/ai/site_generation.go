@@ -1,45 +1,244 @@
 package ai
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
 
+// parsePageSuggestions accepts the raw LLM response for SuggestPages and
+// returns a normalized []PageSuggestion. Tolerates four common LLM regressions:
+//  1. proper [{name, slug, ...}] objects (the spec)
+//  2. [{Name, Slug, ...}] with capitalized keys
+//  3. ["Home", "About", ...] bare strings (we synthesize slug + page_type)
+//  4. trailing prose around the JSON array
+//
+// Returning a partial-but-useful result is much better than 500ing — the
+// frontend just shows whichever names came back.
+func parsePageSuggestions(raw string) ([]PageSuggestion, error) {
+	trimmed := strings.TrimSpace(raw)
+	// Strip ```json fences if present.
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimSpace(trimmed)
+	// Carve out the JSON array if it's surrounded by other text.
+	if idx := strings.Index(trimmed, "["); idx >= 0 {
+		if end := strings.LastIndex(trimmed, "]"); end > idx {
+			trimmed = trimmed[idx : end+1]
+		}
+	}
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty page suggestions response")
+	}
+
+	// Try the canonical []PageSuggestion shape first.
+	var canonical []PageSuggestion
+	if err := json.Unmarshal([]byte(trimmed), &canonical); err == nil && len(canonical) > 0 {
+		return canonical, nil
+	}
+
+	// Fallback 1: bare []string of page names.
+	var names []string
+	if err := json.Unmarshal([]byte(trimmed), &names); err == nil && len(names) > 0 {
+		out := make([]PageSuggestion, 0, len(names))
+		for _, n := range names {
+			out = append(out, suggestionFromName(n))
+		}
+		return out, nil
+	}
+
+	// Fallback 2: array of arbitrary objects with possibly-capitalized keys.
+	var loose []map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &loose); err == nil && len(loose) > 0 {
+		out := make([]PageSuggestion, 0, len(loose))
+		for _, m := range loose {
+			out = append(out, suggestionFromMap(m))
+		}
+		return out, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse page suggestions: not a recognized shape: %.200s", trimmed)
+}
+
+// suggestionFromName turns a bare page name into a PageSuggestion with an
+// inferred slug + page_type. The pageType heuristic is keyword-based — good
+// enough to keep the UI useful when the LLM regresses to flat strings.
+func suggestionFromName(name string) PageSuggestion {
+	clean := strings.TrimSpace(name)
+	slug := slugFromName(clean)
+	return PageSuggestion{
+		Name:     clean,
+		Slug:     slug,
+		PageType: inferPageType(clean),
+		Reason:   "",
+	}
+}
+
+// suggestionFromMap pulls fields from an arbitrary LLM object, tolerating
+// "Name"/"name", "Slug"/"slug", etc., and any unknown keys.
+func suggestionFromMap(m map[string]any) PageSuggestion {
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := m[k]; ok {
+				if s, ok := v.(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	name := pick("name", "Name", "title", "Title", "page", "Page")
+	slug := pick("slug", "Slug", "path", "Path", "url", "URL")
+	if slug == "" && name != "" {
+		slug = slugFromName(name)
+	}
+	pageType := pick("page_type", "pageType", "PageType", "type", "Type")
+	if pageType == "" {
+		pageType = inferPageType(name)
+	}
+	reason := pick("reason", "Reason", "description", "Description", "why", "Why")
+
+	var blocks []string
+	switch v := m["blocks"].(type) {
+	case []any:
+		for _, b := range v {
+			if s, ok := b.(string); ok {
+				blocks = append(blocks, s)
+			}
+		}
+	case []string:
+		blocks = v
+	}
+
+	return PageSuggestion{
+		Name:              name,
+		Slug:              slug,
+		PageType:          pageType,
+		Reason:            reason,
+		RecommendedBlocks: blocks,
+	}
+}
+
+// slugFromName lowercases a name, swaps non-alphanumerics for hyphens, and
+// returns "/<slug>" — matching the URL convention in the rest of the system.
+// Empty / "home" / "/" all collapse to "/".
+func slugFromName(name string) string {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" || lower == "home" || lower == "/" {
+		return "/"
+	}
+	var b strings.Builder
+	prevDash := false
+	for _, r := range lower {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		case r == ' ' || r == '-' || r == '_' || r == '/':
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	out := strings.TrimRight(b.String(), "-")
+	if out == "" {
+		return "/"
+	}
+	return "/" + out
+}
+
+// inferPageType keyword-matches a page name to the closest PageType so the
+// UI can render an appropriate icon/template hint. Falls through to
+// "landing_page" — the safest default.
+func inferPageType(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "home") || n == "" || n == "/":
+		return "home"
+	case strings.Contains(n, "course"):
+		return "course_catalog"
+	case strings.Contains(n, "coach"):
+		return "coaching_page"
+	case strings.Contains(n, "about"):
+		return "about"
+	case strings.Contains(n, "contact"):
+		return "contact"
+	case strings.Contains(n, "blog") || strings.Contains(n, "article") || strings.Contains(n, "news"):
+		return "blog"
+	case strings.Contains(n, "sale") || strings.Contains(n, "buy") || strings.Contains(n, "checkout") || strings.Contains(n, "offer"):
+		return "sales_page"
+	}
+	return "landing_page"
+}
+
 const componentSchemaReference = `
 ## Component Types and Required Props
 
-Every component in the "content" array must have "type" and "props". The "props" object MUST include a unique "id" string (e.g. "hero-1", "text-2"). Use ONLY the prop names listed below — other names will be silently ignored.
+Every component in the "content" array must have "type" and "props". The "props" object MUST include a unique "id" string (e.g. "hero-1", "feature-2"). Use ONLY the prop names listed below — other names are silently ignored.
 
-### Layout / Content Components
+Almost every block accepts these shared style props (omit to use defaults):
+  • tone — "default" | "muted" | "inverse" | "branded" | "accent" — picks the section background/foreground color band
+  • paddingY — "sm" | "md" | "lg" | "xl" — vertical breathing room
+  • eyebrow (string) — small uppercase label rendered above the heading
 
-**HeroSection** — Full-width hero banner with gradient background
-  props: id, heading (string), subheading (string), ctaText (string), ctaUrl (string)
+### Layout: keep it FLAT
 
-**RichTextSection** — Free-form HTML content block. IMPORTANT: the "content" prop must be an HTML string, NOT plain text.
-  props: id, content (HTML string, e.g. "<h2>About Us</h2><p>We help businesses grow...</p><ul><li>Benefit one</li></ul>")
+DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks directly at the top level. Each content block already accepts ` + "`tone`" + ` ("default" | "muted" | "inverse" | "branded" | "accent") and ` + "`paddingY`" + ` ("sm" | "md" | "lg" | "xl") props — set those on the block itself to control the band background and spacing. Wrapping blocks in a Section is silently flattened on save and breaks editor selection. Use FeatureGrid for multi-column feature lists, Pricing for tier comparisons, Stats for metric callouts, MediaSection for image+text rows.
 
-**ImageSection** — Image with optional caption
-  props: id, src (image URL string), alt (string), caption (string)
+### Hero & CTA — visual anchors
 
-**VideoSection** — Embedded video player
-  props: id, videoUrl (string), autoplay ("true" or "false")
+**HeroSection** — The page-opening band. Pick a variant — do NOT default to centered for every page.
+  props: id, variant ("centered"|"split"|"gradient"|"image"), eyebrow, heading, subheading, description, ctaText, ctaUrl, secondaryCtaText, secondaryCtaUrl, imageUrl (used for "split"), backgroundImage (used for "image"), tone, paddingY
+  Notes: "split" puts an image on one side and the headline+CTA on the other. "image" uses a full-bleed background photo with overlay. "gradient" is a centered headline on a brand gradient. Use "split" whenever a representative product/screenshot image is available.
 
-**CTASection** — Call-to-action banner with button
-  props: id, heading (string), description (string), buttonText (string), buttonUrl (string)
+**CTASection** — Mid-page or end-of-page conversion band.
+  props: id, variant ("centered"|"split"|"banner"), heading, description, buttonText, buttonUrl, secondaryButtonText, secondaryButtonUrl, tone, paddingY
+  "banner" renders as a rounded card on a brand background — great as the page closer. "split" puts text and the button on opposite sides.
 
-**TestimonialsSection** — Customer testimonial quotes. IMPORTANT: the "items" prop must be an array of objects, each with "quote" and "author" strings. Without items, the section renders empty.
-  props: id, heading (string), items (array of {"quote": "...", "author": "..."})
-  Example: {"type": "TestimonialsSection", "props": {"id": "testimonials-1", "heading": "What People Say", "items": [{"quote": "This changed my life!", "author": "Jane D."}, {"quote": "Incredible results.", "author": "Mike S."}]}}
+### Content blocks — pick varied ones, do NOT just stack RichTextSection
 
-**FAQSection** — Frequently asked questions. IMPORTANT: the "items" prop must be an array of objects, each with "question" and "answer" strings. Without items, the section renders empty.
-  props: id, heading (string), items (array of {"question": "...", "answer": "..."})
-  Example: {"type": "FAQSection", "props": {"id": "faq-1", "heading": "FAQ", "items": [{"question": "How does it work?", "answer": "Simply sign up and..."}]}}
+**FeatureGrid** — 2/3/4-column grid of feature cards with optional icons. Use to break out value props or how-it-works steps.
+  props: id, heading, subheading, eyebrow, columns (2|3|4), cardStyle ("default"|"quiet"|"ghost"), tone, paddingY, items (array of {icon, title, body})
+  Example: {"type":"FeatureGrid","props":{"id":"fg-1","heading":"Built for momentum","subheading":"Three reasons teams move faster.","columns":3,"items":[{"icon":"⚡","title":"Real-time sync","body":"Updates flow to every device in under a second."},{"icon":"🛡","title":"Enterprise security","body":"SOC 2 + SSO + audit logs out of the box."},{"icon":"🚀","title":"Deploy anywhere","body":"One-click rollouts to AWS, GCP, or your own cluster."}]}}
 
-**Spacer** — Vertical whitespace
-  props: id, height (string, e.g. "40px", "80px")
+**MediaSection** — Side-by-side image + heading + body + CTA. Alternate "left" and "right" between consecutive sections to create rhythm.
+  props: id, layout ("left"|"right"), eyebrow, heading, body, ctaText, ctaUrl, imageSrc, imageAlt, tone, paddingY
 
-**Button** — Standalone button link
-  props: id, label (string), href (string), variant ("primary" or "secondary" or "outline")
+**Pricing** — Pricing-tier comparison.
+  props: id, heading, subheading, tone, paddingY, tiers (array of {name, price, cadence, description, featured (bool), features (array of strings), ctaText, ctaUrl})
+  Mark exactly one tier as featured: true.
+
+**Stats** — Metric callouts (great after Hero or before CTA for social proof).
+  props: id, heading, tone (defaults to "muted"), paddingY, items (array of {value, label})
+  Example items: [{"value":"10,000+","label":"Active customers"},{"value":"99.99%","label":"Uptime SLA"},{"value":"<50ms","label":"P95 latency"}]
+
+**LogoCloud** — Customer/partner logo strip. Use under Hero for credibility.
+  props: id, heading (e.g. "Trusted by teams at"), tone, logos (array of {src, alt} OR {name} for plaintext)
+
+**TestimonialsSection** — Social proof quotes. Pick a variant.
+  props: id, variant ("cards"|"quote"|"marquee"), heading, eyebrow, tone, paddingY, items (array of {quote, author, role})
+  "quote" is one big centered hero quote. "cards" is a 2-3 column grid. Always include role on each author when known.
+
+**FAQSection** — Frequently asked questions.
+  props: id, variant ("list"|"cols"), heading, tone, paddingY, items (array of {question, answer})
+  Use "cols" (2-column) when there are 6+ FAQ items.
+
+**RichTextSection** — Free-form HTML content. Use sparingly for prose-heavy pages (about, blog excerpts). Prefer FeatureGrid/MediaSection for marketing content.
+  props: id, content (HTML string with multiple paragraphs/headings/lists), tone, paddingY
+
+**ImageSection** — Standalone wide image with optional caption.
+  props: id, src, alt, caption, tone, paddingY
+
+**VideoSection** — Embedded video player.
+  props: id, videoUrl, autoplay ("true"|"false")
+
+**Spacer** — Vertical whitespace. Use rarely — prefer paddingY on the surrounding section.
+  props: id, height (string, e.g. "40px")
+
+**Button** — Standalone button. Avoid in the main content flow — Hero/CTA/MediaSection already include buttons.
+  props: id, label, href, variant ("primary"|"secondary"|"outline")
 
 ### Platform Components (use only when contextually relevant)
 
@@ -88,11 +287,41 @@ Every component in the "content" array must have "type" and "props". The "props"
 **SentanylFunnelCTA** — Funnel call-to-action section
   props: id, heading (string), description (string), buttonText (string), buttonUrl (string)
 
+## Layout & Visual Rhythm Rules — read carefully
+
+A page is NOT a vertical stack of identical-looking sections. Treat each page as a designed sequence of bands.
+
+1. **Vary tone across sections.** Alternate between "default", "muted", and "inverse" tones. Never put two consecutive "default" sections next to each other unless one is a Hero and the other has obvious visual contrast.
+2. **Use varied components.** A typical landing page should include AT LEAST 5 of these distinct types: HeroSection, FeatureGrid, MediaSection, Stats or LogoCloud, TestimonialsSection, Pricing, FAQSection, CTASection. Do NOT repeat the same component type more than twice.
+3. **Use Hero variants intentionally.** Pick "split" if a product image makes sense, "image" for full-bleed photo backgrounds, "gradient" for typography-led launches, "centered" only when no imagery is available.
+4. **Alternate MediaSection layouts.** When you use multiple MediaSection blocks, flip layout between "left" and "right" so the page zig-zags.
+5. **Anchor with CTA.** End every page with a CTASection (variant="banner" is a strong default).
+6. **Set tone on the block itself.** Do NOT wrap blocks in Section/Container/Stack/Grid — those are silently flattened. If consecutive blocks should share a band color, set the same tone value on each.
+7. **Prefer FeatureGrid/MediaSection over RichTextSection** for marketing content. RichTextSection is for blog-like prose, not feature lists.
+
 ## Content Quality Rules
-- Generate SUBSTANTIAL, realistic content for every component — never leave props empty or with generic placeholder text like "Lorem ipsum".
-- RichTextSection content should have multiple paragraphs, headings, and/or lists with real, relevant copy.
-- TestimonialsSection and FAQSection MUST include at least 3 items each with detailed, realistic content.
+- Generate SUBSTANTIAL, realistic content for every component — never leave props empty or use placeholder text like "Lorem ipsum".
+- TestimonialsSection MUST include at least 3 items, each with quote, author, and role.
+- FAQSection MUST include at least 4 items with detailed answers.
+- FeatureGrid MUST have at least 3 items per grid.
+- Pricing MUST have 2-4 tiers with full feature lists; one tier marked featured: true.
+- Stats items should use real-feeling numbers (e.g. "12,400+", "99.99%", "<50ms"), never round placeholders.
 - Write conversion-optimized, professional copy tailored to the business/topic described.
+
+## One-Shot Worked Example (DO follow this rhythm)
+
+A SaaS home page should look something like:
+[
+  {"type":"HeroSection","props":{"id":"hero","variant":"split","eyebrow":"NEW","heading":"Ship customer feedback in hours, not weeks","subheading":"Pulse turns every support reply into a tracked, actionable signal — without changing your stack.","ctaText":"Start free","ctaUrl":"/signup","secondaryCtaText":"Watch demo","secondaryCtaUrl":"/demo","imageUrl":"https://example.com/dashboard.png"}},
+  {"type":"LogoCloud","props":{"id":"logos","heading":"Trusted by product teams at","tone":"default","logos":[{"name":"Linear"},{"name":"Vercel"},{"name":"Figma"},{"name":"Loom"},{"name":"Notion"}]}},
+  {"type":"FeatureGrid","props":{"id":"features","tone":"muted","heading":"Why teams pick Pulse","subheading":"Three reasons we win the bake-off.","columns":3,"items":[{"icon":"⚡","title":"Inbox to roadmap in one click","body":"Tag a Zendesk reply, see it in your sprint."},{"icon":"🧭","title":"Trends, not anecdotes","body":"AI clusters tickets so you fix the cause once."},{"icon":"🔒","title":"Enterprise-ready","body":"SOC 2, SSO, audit logs from day one."}]}},
+  {"type":"MediaSection","props":{"id":"media-1","layout":"right","heading":"Your support data, finally connected","body":"Pulse plugs into Zendesk, Intercom, and HubSpot in five minutes. No CSVs, no consultants, no migrations.","ctaText":"See integrations","ctaUrl":"/integrations","imageSrc":"https://example.com/integrations.png"}},
+  {"type":"Stats","props":{"id":"stats","tone":"inverse","items":[{"value":"73%","label":"Faster triage"},{"value":"12k+","label":"Tickets analyzed daily"},{"value":"4.9/5","label":"Customer rating"}]}},
+  {"type":"TestimonialsSection","props":{"id":"quotes","variant":"cards","heading":"Loved by the people who answer the tickets","items":[{"quote":"Pulse gave us back two hours every Monday.","author":"Maya Chen","role":"Head of CX, Linear"},{"quote":"The first tool that actually closes the loop.","author":"Daniel Park","role":"PM, Vercel"},{"quote":"We replaced three spreadsheets with one dashboard.","author":"Priya Shah","role":"Support Lead, Figma"}]}},
+  {"type":"Pricing","props":{"id":"pricing","heading":"Simple pricing","subheading":"Start free, upgrade when you outgrow the basics.","tiers":[{"name":"Starter","price":"$0","cadence":"/mo","description":"For solo founders.","features":["1 inbox","100 tickets/mo","Basic clustering"],"ctaText":"Start free","ctaUrl":"/signup"},{"name":"Team","price":"$49","cadence":"/mo","description":"For growing CX teams.","featured":true,"features":["Unlimited inboxes","Roadmap sync","SSO + audit logs","Priority support"],"ctaText":"Start trial","ctaUrl":"/signup?plan=team"},{"name":"Scale","price":"Custom","description":"For established orgs.","features":["Custom data residency","Dedicated CSM","Annual contract"],"ctaText":"Contact sales","ctaUrl":"/contact"}]}},
+  {"type":"FAQSection","props":{"id":"faq","variant":"cols","heading":"Frequently asked","items":[{"question":"How long does setup take?","answer":"Most teams are live in under 15 minutes — connect your inbox and you're done."},{"question":"Do you store ticket content?","answer":"Yes, encrypted at rest with per-tenant keys. We never share data across customers."},{"question":"Can I cancel anytime?","answer":"Yes, cancel from settings — no contracts, no exit fees."},{"question":"Is there a free plan?","answer":"Yes — the Starter plan is free forever for up to 100 tickets/month."}]}},
+  {"type":"CTASection","props":{"id":"final-cta","variant":"banner","heading":"Stop guessing. Start shipping.","description":"Plug Pulse in this week and turn next week's tickets into next quarter's roadmap.","buttonText":"Start free","buttonUrl":"/signup","secondaryButtonText":"Talk to sales","secondaryButtonUrl":"/contact"}}
+]
 `
 
 const siteGenerationSystemPrompt = `You are a website builder AI. Generate a complete website structure as JSON.
@@ -150,7 +379,12 @@ The response must be valid JSON with this exact structure:
   "root": {"props": {}}
 }
 
-Generate a page with at least 4-6 components. Every component must have fully populated props with substantial content.
+REQUIRED:
+- 7-10 top-level components on the home page (5-7 on inner pages).
+- Use AT LEAST 5 distinct component types per page.
+- Vary section "tone" — alternate default / muted / inverse so the page has visual rhythm.
+- Always close with a CTASection.
+- Avoid using RichTextSection more than once per page.
 ` + componentSchemaReference
 
 const pageEditSystemPrompt = `You are a website page editor AI. Given the current Puck document and an edit instruction, return the complete modified document.
@@ -274,7 +508,7 @@ Rules:
 - button_style: "pill" if border-radius > 20px, "rounded" if 4-20px, "sharp" if 0-3px
 - confidence_score: 0-100 how confident you are in the extraction`
 
-const siteDuplicateSystemPrompt = `You are an expert website-to-Puck converter. Your job is to take extracted content and structure from a real website and reproduce it as faithfully as possible using Puck editor components.
+const siteDuplicateSystemPrompt = `You are an expert website-to-Puck converter. Take the extracted content and structure of a real website and reproduce it as faithfully as possible using the Puck component vocabulary.
 
 IMPORTANT JSON RULES:
 - "theme" MUST be a plain string: one of "modern", "minimal", "dark", "light" (never an object)
@@ -283,20 +517,24 @@ IMPORTANT JSON RULES:
 
 CRITICAL RULES:
 1. Use ONLY the content provided (headings, body text, image URLs, CTA text). Never invent content.
-2. Preserve image URLs exactly as provided — use them in ImageSection props.
-3. Match the visual structure: dark sections become dark-background CTASection or HeroSection; light sections become RichTextSection or CTASection.
+2. Preserve image URLs exactly — pass them through as imageSrc/imageUrl/src on the matching component.
+3. Match the visual rhythm of the source: where the source uses dark bands, set tone="inverse" on those sections. Where the source uses light/grey bands, set tone="muted".
 4. Include ALL nav links in the site navigation.
-5. Generate at least 5-8 components for the home page — do not make it sparse.
+5. Generate at least 7-10 top-level components for the home page using a varied mix.
 6. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array.
 
-For dark-background sections: use CTASection with the prop "theme": "dark". This makes the section render with a dark background and white text.
-For image+text sections: use ImageSection (with the actual image URL in "src") followed by RichTextSection.
-For newsletter/email capture forms: use SentanylLeadForm.
-For testimonials/reviews: use TestimonialsSection.
-For FAQ: use FAQSection.
-For the hero/headline section: use HeroSection with the "heading", "subheading", and "ctaText" props.
-For a dark hero: use HeroSection (it renders with dark background by default).
-Always include the "description" prop in CTASection with the body text from that section.
+Mapping guide for source patterns:
+- A first big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set.
+- A first big heading + tagline + button on a dark photo → HeroSection variant="image", backgroundImage set, tone="inverse".
+- A row of customer/partner logos → LogoCloud.
+- A 2/3/4-grid of icon + title + body → FeatureGrid (extract icons or use sensible emoji).
+- A side-by-side text + screenshot/illustration → MediaSection (alternate layout left/right when there are multiple in a row).
+- A row of metrics → Stats.
+- Pricing tables → Pricing (mark the most popular tier featured: true).
+- Customer quotes → TestimonialsSection variant="cards" (or "quote" for one big featured quote).
+- FAQ → FAQSection (variant="cols" if 6+ items).
+- Newsletter/email signup → SentanylLeadForm.
+- Final conversion band → CTASection variant="banner".
 
 ` + componentSchemaReference
 

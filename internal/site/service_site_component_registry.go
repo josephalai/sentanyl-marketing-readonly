@@ -257,6 +257,124 @@ func buildComponentRegistry() []ComponentDef {
 			},
 		},
 
+		// ——————— Newsletter gate markers (Puck editor inline blocks) ———————
+		{
+			Type: "NewsletterSubscriberBreak", Label: "— Subscriber break —",
+			Category:     CategoryContent,
+			Fields:       []ComponentField{},
+			DefaultProps: map[string]any{},
+		},
+		{
+			Type: "NewsletterPaywallBreak", Label: "— Paywall break —",
+			Category: CategoryContent,
+			Fields: []ComponentField{
+				{Name: "tier", Label: "Required tier id (blank = any paid)", Type: FieldTypeText},
+			},
+			DefaultProps: map[string]any{"tier": ""},
+		},
+
+		// ——————— Layout primitives (design-system overhaul) ———————
+		{
+			Type: "Section", Label: "Section (band)", Category: CategoryLayout,
+			Fields: []ComponentField{
+				{Name: "tone", Label: "Tone", Type: FieldTypeSelect, Options: []string{"default", "muted", "inverse", "branded", "accent"}, DefaultValue: "default"},
+				{Name: "paddingY", Label: "Vertical padding", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg", "xl"}, DefaultValue: "md"},
+				{Name: "maxWidth", Label: "Max width", Type: FieldTypeSelect, Options: []string{"narrow", "normal", "wide", "full"}, DefaultValue: "normal"},
+				{Name: "backgroundImage", Label: "Background image URL", Type: FieldTypeURL},
+				{Name: "content", Label: "Children", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"tone": "default", "paddingY": "md", "maxWidth": "normal", "content": []any{}},
+		},
+		{
+			Type: "Container", Label: "Container", Category: CategoryLayout,
+			Fields: []ComponentField{
+				{Name: "maxWidth", Label: "Max width", Type: FieldTypeSelect, Options: []string{"narrow", "normal", "wide", "full"}, DefaultValue: "normal"},
+				{Name: "content", Label: "Children", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"maxWidth": "normal", "content": []any{}},
+		},
+		{
+			Type: "Stack", Label: "Stack (vertical column)", Category: CategoryLayout,
+			Fields: []ComponentField{
+				{Name: "gap", Label: "Gap", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg", "xl"}, DefaultValue: "md"},
+				{Name: "align", Label: "Alignment", Type: FieldTypeSelect, Options: []string{"start", "center", "end"}, DefaultValue: "start"},
+				{Name: "content", Label: "Children", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"gap": "md", "align": "start", "content": []any{}},
+		},
+		{
+			Type: "Grid", Label: "Grid (columns)", Category: CategoryLayout,
+			Fields: []ComponentField{
+				{Name: "cols", Label: "Columns", Type: FieldTypeNumber, DefaultValue: 3},
+				{Name: "gap", Label: "Gap", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg"}, DefaultValue: "md"},
+				{Name: "content", Label: "Children", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"cols": 3, "gap": "md", "content": []any{}},
+		},
+
+		// ——————— New content blocks ———————
+		{
+			Type: "MediaSection", Label: "Media + Text", Category: CategoryContent,
+			Fields: []ComponentField{
+				{Name: "layout", Label: "Image side", Type: FieldTypeSelect, Options: []string{"left", "right"}, DefaultValue: "right"},
+				{Name: "eyebrow", Label: "Eyebrow", Type: FieldTypeText},
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "body", Label: "Body", Type: FieldTypeTextarea},
+				{Name: "imageSrc", Label: "Image URL", Type: FieldTypeURL},
+				{Name: "imageAlt", Label: "Image alt", Type: FieldTypeText},
+				{Name: "ctaText", Label: "CTA Text", Type: FieldTypeText},
+				{Name: "ctaUrl", Label: "CTA URL", Type: FieldTypeURL},
+				{Name: "tone", Label: "Tone", Type: FieldTypeSelect, Options: []string{"default", "muted", "inverse"}, DefaultValue: "default"},
+				{Name: "paddingY", Label: "Vertical padding", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg", "xl"}, DefaultValue: "lg"},
+			},
+			DefaultProps: map[string]any{"layout": "right", "tone": "default", "paddingY": "lg"},
+		},
+		{
+			Type: "FeatureGrid", Label: "Feature Grid", Category: CategoryContent,
+			Fields: []ComponentField{
+				{Name: "eyebrow", Label: "Eyebrow", Type: FieldTypeText},
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "subheading", Label: "Subheading", Type: FieldTypeTextarea},
+				{Name: "columns", Label: "Columns", Type: FieldTypeNumber, DefaultValue: 3},
+				{Name: "items", Label: "Items", Type: FieldTypeArray},
+				{Name: "tone", Label: "Tone", Type: FieldTypeSelect, Options: []string{"default", "muted", "inverse"}, DefaultValue: "default"},
+				{Name: "paddingY", Label: "Vertical padding", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg", "xl"}, DefaultValue: "lg"},
+				{Name: "cardStyle", Label: "Card style", Type: FieldTypeSelect, Options: []string{"default", "quiet", "ghost"}, DefaultValue: "default"},
+			},
+			DefaultProps: map[string]any{"columns": 3, "tone": "default", "paddingY": "lg", "items": []any{}},
+		},
+		{
+			Type: "Pricing", Label: "Pricing", Category: CategoryContent,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "subheading", Label: "Subheading", Type: FieldTypeTextarea},
+				{Name: "tone", Label: "Tone", Type: FieldTypeSelect, Options: []string{"default", "muted", "inverse"}, DefaultValue: "default"},
+				{Name: "paddingY", Label: "Vertical padding", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg", "xl"}, DefaultValue: "lg"},
+				{Name: "tiers", Label: "Tiers", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"tone": "default", "paddingY": "lg", "tiers": []any{}},
+		},
+		{
+			Type: "Stats", Label: "Stats", Category: CategoryContent,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "tone", Label: "Tone", Type: FieldTypeSelect, Options: []string{"default", "muted", "inverse", "branded"}, DefaultValue: "muted"},
+				{Name: "paddingY", Label: "Vertical padding", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg", "xl"}, DefaultValue: "md"},
+				{Name: "items", Label: "Items", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"tone": "muted", "paddingY": "md", "items": []any{}},
+		},
+		{
+			Type: "LogoCloud", Label: "Logo Cloud", Category: CategoryContent,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "tone", Label: "Tone", Type: FieldTypeSelect, Options: []string{"default", "muted", "inverse"}, DefaultValue: "muted"},
+				{Name: "paddingY", Label: "Vertical padding", Type: FieldTypeSelect, Options: []string{"sm", "md", "lg"}, DefaultValue: "sm"},
+				{Name: "logos", Label: "Logos", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{"tone": "muted", "paddingY": "sm", "logos": []any{}},
+		},
+
 		// ——————— Sentanyl-Aware Components ———————
 		{
 			Type:     "SentanylLeadForm",

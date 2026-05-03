@@ -359,19 +359,7 @@ func (p *OpenAIProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggest
 	if err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(resp)
-	if !strings.HasPrefix(trimmed, "[") {
-		if idx := strings.Index(trimmed, "["); idx >= 0 {
-			if end := strings.LastIndex(trimmed, "]"); end > idx {
-				trimmed = trimmed[idx : end+1]
-			}
-		}
-	}
-	var result []PageSuggestion
-	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse page suggestions: %w", err)
-	}
-	return result, nil
+	return parsePageSuggestions(resp)
 }
 
 func (p *OpenAIProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {
