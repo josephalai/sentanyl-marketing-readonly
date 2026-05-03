@@ -90,6 +90,27 @@ func TestGroupSectionsByBand(t *testing.T) {
 	}
 }
 
+func TestNavLinkToSlugProducesLocalPages(t *testing.T) {
+	cases := []struct {
+		url, label, want string
+	}{
+		{"https://mikedillard.com/about-mike-dillard/", "About", "/about"},
+		{"https://www.youtube.com/user/Dillard00", "Subscribe", "/subscribe"},
+		{"https://example.com/x", "Log in", "/log-in"},
+		{"/blog", "Blog", "/blog"},
+		{"#", "Pricing", "/pricing"},
+		{"", "Contact Us", "/contact-us"},
+		{"/", "Home", "/"},
+		{"https://twitter.com/x", "", "/x"}, // empty label → URL path
+		{"#", "", ""},                       // both empty
+	}
+	for _, c := range cases {
+		if got := navLinkToSlug(c.url, c.label); got != c.want {
+			t.Errorf("navLinkToSlug(%q, %q) = %q, want %q", c.url, c.label, got, c.want)
+		}
+	}
+}
+
 func TestParsePageSuggestionsTolerantShapes(t *testing.T) {
 	out, err := parsePageSuggestions(`[{"name":"Home","slug":"/","page_type":"home","reason":"r","blocks":["HeroSection"]}]`)
 	if err != nil || len(out) != 1 || out[0].Name != "Home" || out[0].PageType != "home" {

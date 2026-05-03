@@ -730,35 +730,47 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	return sb.String()
 }
 
-// navLinkToSlug derives a URL-safe slug from a nav link's URL or label.
-// Keeps absolute paths if they look like a path; otherwise slugifies the
-// label. Skips external links and empty paths so we don't generate a page
-// for "https://twitter.com/..." just because the source linked to it.
+// navLinkToSlug derives a URL-safe slug from a nav link's URL and/or label.
+// We ALWAYS create a local page for nav items — the source's nav reflects
+// the user's expected information architecture, and a clean slug derived
+// from the label gives the cloned site the same shape (the user can
+// delete pages they don't want). For external links to social/CDN hosts
+// (youtube, twitter, instagram) we still synthesize a local page using
+// the label so the cloned site has e.g. "/subscribe" matching the source's
+// "Subscribe" nav button.
 func navLinkToSlug(rawURL, label string) string {
+	if trimmed := strings.TrimSpace(label); trimmed != "" {
+		if s := slugFromName(trimmed); s != "" {
+			return s
+		}
+	}
+	// Empty label — fall back to the URL path.
 	u := strings.TrimSpace(rawURL)
 	if u == "" || u == "#" {
-		return slugFromName(label)
-	}
-	// Treat absolute http(s) urls as external unless same-host. Without
-	// host context here we just look at scheme — anything with a scheme is
-	// external.
-	if strings.Contains(u, "://") {
 		return ""
 	}
-	if strings.HasPrefix(u, "/") {
-		clean := strings.SplitN(u, "?", 2)[0]
-		clean = strings.SplitN(clean, "#", 2)[0]
-		if clean == "/" || clean == "" {
-			return ""
+	// Strip protocol+host to get a path-ish thing.
+	if i := strings.Index(u, "://"); i >= 0 {
+		rest := u[i+3:]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			u = rest[j:]
+		} else {
+			u = ""
 		}
-		// Normalize trailing slash
-		clean = strings.TrimRight(clean, "/")
-		if clean == "" {
-			return ""
-		}
-		return clean
 	}
-	return slugFromName(label)
+	if u == "" {
+		return ""
+	}
+	clean := strings.SplitN(u, "?", 2)[0]
+	clean = strings.SplitN(clean, "#", 2)[0]
+	clean = strings.TrimRight(clean, "/")
+	if clean == "" || clean == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(clean, "/") {
+		clean = "/" + clean
+	}
+	return clean
 }
 
 // pageContentHint returns a one-line hint that tells the LLM what blocks

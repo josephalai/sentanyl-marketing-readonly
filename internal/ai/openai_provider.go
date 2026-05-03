@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -137,7 +138,43 @@ func (p *OpenAIProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGeneratio
 	if err != nil {
 		return nil, err
 	}
-	return parseSiteGenerationResult(resp)
+	result, err := parseSiteGenerationResult(resp)
+	if err != nil {
+		log.Printf("DuplicateSite: parse failed (raw response %d chars): %v\n--- response head ---\n%s", len(resp), err, headStr(resp, 800))
+		return nil, err
+	}
+	// Sparse-output guardrail: when the LLM truncates we get a single
+	// page with no blocks. Surface that loudly instead of letting an
+	// empty site silently land in mongo.
+	totalBlocks := 0
+	for _, p := range result.Pages {
+		if root, ok := p.PuckRoot["content"].([]any); ok {
+			totalBlocks += len(root)
+		}
+	}
+	if len(result.Pages) <= 1 || totalBlocks == 0 {
+		// Dump the full response and the parsed shape so we can tell
+		// whether this is token truncation, schema drift, or a parser
+		// bug. 5-10kb is fine in dev logs.
+		parsedJSON, _ := json.MarshalIndent(result, "", "  ")
+		log.Printf("DuplicateSite: SUSPECT result — pages=%d totalBlocks=%d (response was %d chars).\n--- raw response ---\n%s\n--- parsed result ---\n%s",
+			len(result.Pages), totalBlocks, len(resp), resp, string(parsedJSON))
+	}
+	return result, nil
+}
+
+func headStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func tailStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // parseSiteGenerationResult parses a SiteGenerationResult tolerating field name variants from different LLMs.
@@ -271,11 +308,31 @@ func normalizePage(p map[string]json.RawMessage) *PageGenerationResult {
 		}
 	}
 
-	// puck_root may be the canonical {"content": [], "root": {}} or just a "content" array directly
+	// puck_root may be:
+	//   - canonical {"content": [...], "root": {...}}
+	//   - a flat array of blocks (LLMs sometimes interpret "puck_root" as the doc body)
+	//   - or the page may use "content" / "document" as the field name
 	if v, ok := p["puck_root"]; ok {
-		_ = json.Unmarshal(v, &page.PuckRoot)
+		var asMap map[string]any
+		if json.Unmarshal(v, &asMap) == nil && asMap != nil {
+			// If asMap has "content" already, use it. Otherwise treat the
+			// whole map as the content body and wrap it (rare but seen).
+			if _, hasContent := asMap["content"]; hasContent {
+				page.PuckRoot = asMap
+			} else {
+				page.PuckRoot = map[string]any{"content": []any{}, "root": map[string]any{"props": map[string]any{}}}
+			}
+		} else {
+			var asArray []any
+			if json.Unmarshal(v, &asArray) == nil {
+				page.PuckRoot = map[string]any{
+					"content": asArray,
+					"root":    map[string]any{"props": map[string]any{}},
+				}
+			}
+		}
 	} else if v, ok := p["content"]; ok {
-		// The AI returned a flat content array — wrap it in the Puck document structure
+		// The AI returned a flat content array under "content" at page level.
 		var content []any
 		if json.Unmarshal(v, &content) == nil {
 			page.PuckRoot = map[string]any{
@@ -285,6 +342,15 @@ func normalizePage(p map[string]json.RawMessage) *PageGenerationResult {
 		}
 	} else if v, ok := p["document"]; ok {
 		_ = json.Unmarshal(v, &page.PuckRoot)
+		if page.PuckRoot == nil {
+			var asArray []any
+			if json.Unmarshal(v, &asArray) == nil {
+				page.PuckRoot = map[string]any{
+					"content": asArray,
+					"root":    map[string]any{"props": map[string]any{}},
+				}
+			}
+		}
 	}
 
 	// Ensure slug starts with /
@@ -435,6 +501,11 @@ func (p *OpenAIProvider) chatCompletion(userMessage, systemMessage string) (stri
 		},
 		"response_format": map[string]string{"type": "json_object"},
 		"temperature":     0.7,
+		// gpt-4o supports up to 16384 output tokens. Without an explicit
+		// cap the API silently truncates around 4096 for json_object mode,
+		// which produced clones with one empty page. Asking for the full
+		// budget so DuplicateSite can emit 5-8 pages × 6-10 blocks each.
+		"max_tokens": 16384,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
