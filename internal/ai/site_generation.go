@@ -516,13 +516,14 @@ IMPORTANT JSON RULES:
 - Return ONLY valid JSON, no markdown fences, no explanation text before or after
 
 CRITICAL RULES:
-1. Use ONLY the content provided (headings, body text, image URLs, CTA text). Never invent content.
+1. Use ONLY the content provided (headings, body text, image URLs, CTA text) for the home page. Never invent content for sections that came from the source.
 2. Preserve image URLs exactly — pass them through as imageSrc/imageUrl/src on the matching component.
 3. **Bands carry tone.** The user prompt groups source sections into bands and gives you the tone for each band. Every block you emit for sections inside a band MUST set props.tone to that band's tone value. This is the single most important rule for visual fidelity.
 4. Include ALL nav links in the site navigation.
-5. Generate at least 7-10 top-level components for the home page using a varied mix.
-6. Do NOT wrap blocks in Section/Container/Stack/Grid — the editor will silently flatten them. Use per-block tone instead.
-7. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array.
+5. **Every page in the pages array MUST have a fully populated puck_root with 6-10 content blocks. Do NOT emit empty stubs.** This is non-negotiable — there is no fallback HTML. If a page has no source content (because only the home page was crawled), generate plausible content for that page based on its name + the source brand. A "Pricing" page should have a Pricing block with reasonable tier names; an "About" page should have a Hero + MediaSection (founder/team) + a closing CTASection; a "Blog" page should have a Hero + a 3-column FeatureGrid acting as recent-post cards; a "Contact" page should have a Hero + SentanylLeadForm + FAQSection. Always close every page with a CTASection variant=banner.
+6. Generate at least 7-10 top-level components for the home page using a varied mix.
+7. Do NOT wrap blocks in Section/Container/Stack/Grid — the editor will silently flatten them. Use per-block tone instead.
+8. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array. Every page must include is_home (boolean), name, slug, seo, and puck_root.
 
 Mapping guide for source patterns:
 - First band with one big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set.
@@ -709,8 +710,88 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 		}
 	}
 
-	sb.WriteString("\n\nGenerate the complete Puck site JSON. Include the home page and stub pages for each navigation item. Remember: every block in a band carries that band's `tone` value (default | muted | inverse).")
+	// Enumerate every page that must appear in the response — home plus one
+	// page per top-level nav link — and tell the LLM exactly what content to
+	// invent for the nav-only pages (the crawler only fetched the home).
+	sb.WriteString("\n## Pages to generate (output one entry in `pages[]` for EACH of these — every page must have a fully populated puck_root with 6-10 blocks)\n\n")
+	sb.WriteString("- [home] name=\"Home\" slug=\"/\" is_home=true — reproduce the source bands above, in order.\n")
+	seenSlugs := map[string]bool{"/": true}
+	for _, l := range req.NavLinks {
+		slug := navLinkToSlug(l.URL, l.Label)
+		if slug == "" || seenSlugs[slug] {
+			continue
+		}
+		seenSlugs[slug] = true
+		hint := pageContentHint(l.Label, slug)
+		sb.WriteString(fmt.Sprintf("- [%s] name=%q slug=%q is_home=false — %s\n", strings.TrimPrefix(slug, "/"), l.Label, slug, hint))
+	}
+
+	sb.WriteString("\nRemember: EVERY page above must have 6-10 blocks. Empty stubs are forbidden. Every block in a band carries that band's tone (default | muted | inverse).")
 	return sb.String()
+}
+
+// navLinkToSlug derives a URL-safe slug from a nav link's URL or label.
+// Keeps absolute paths if they look like a path; otherwise slugifies the
+// label. Skips external links and empty paths so we don't generate a page
+// for "https://twitter.com/..." just because the source linked to it.
+func navLinkToSlug(rawURL, label string) string {
+	u := strings.TrimSpace(rawURL)
+	if u == "" || u == "#" {
+		return slugFromName(label)
+	}
+	// Treat absolute http(s) urls as external unless same-host. Without
+	// host context here we just look at scheme — anything with a scheme is
+	// external.
+	if strings.Contains(u, "://") {
+		return ""
+	}
+	if strings.HasPrefix(u, "/") {
+		clean := strings.SplitN(u, "?", 2)[0]
+		clean = strings.SplitN(clean, "#", 2)[0]
+		if clean == "/" || clean == "" {
+			return ""
+		}
+		// Normalize trailing slash
+		clean = strings.TrimRight(clean, "/")
+		if clean == "" {
+			return ""
+		}
+		return clean
+	}
+	return slugFromName(label)
+}
+
+// pageContentHint returns a one-line hint that tells the LLM what blocks
+// fit a typical page of this name. Generic enough to work across business
+// domains, specific enough to keep output non-empty.
+func pageContentHint(label, slug string) string {
+	n := strings.ToLower(label + " " + slug)
+	switch {
+	case strings.Contains(n, "about") || strings.Contains(n, "team"):
+		return "About / team page: HeroSection (centered or split, eyebrow=\"Our story\") + MediaSection (founder or mission, layout=right) + Stats (3 metrics about company history) + TestimonialsSection variant=cards + closing CTASection variant=banner."
+	case strings.Contains(n, "contact"):
+		return "Contact page: HeroSection (centered, heading=\"Get in touch\") + SentanylContactForm (includeMessage=true) + FAQSection variant=cols (4 generic support questions) + closing CTASection."
+	case strings.Contains(n, "pricing") || strings.Contains(n, "plan"):
+		return "Pricing page: HeroSection (centered, eyebrow=\"Plans\") + Pricing block with 3 tiers (Starter / Pro featured=true / Enterprise) using brand-appropriate names + FAQSection variant=cols (4 pricing FAQs) + closing CTASection variant=banner."
+	case strings.Contains(n, "blog") || strings.Contains(n, "article") || strings.Contains(n, "news") || strings.Contains(n, "research"):
+		return "Blog/news listing: HeroSection (centered, heading=\"Latest from {brand}\") + FeatureGrid columns=3 with 6 items where each item.title is a plausible post title and item.body is a 1-line teaser + closing CTASection (e.g. \"Subscribe to updates\")."
+	case strings.Contains(n, "course") || strings.Contains(n, "lms") || strings.Contains(n, "learn") || strings.Contains(n, "training"):
+		return "Course catalog: HeroSection (split if image available, eyebrow=\"Courses\") + SentanylCourseGrid OR FeatureGrid columns=3 with course-shaped items + Stats (students enrolled, hours, rating) + closing CTASection."
+	case strings.Contains(n, "store") || strings.Contains(n, "shop") || strings.Contains(n, "product"):
+		return "Store page: HeroSection (centered) + SentanylProductGrid OR FeatureGrid columns=3 of products + TestimonialsSection variant=cards + closing CTASection variant=banner."
+	case strings.Contains(n, "coach") || strings.Contains(n, "mentor"):
+		return "Coaching page: HeroSection (split with coach-fitting tone) + MediaSection (what coaching includes) + Pricing (1-3 tiers of coaching packages) + TestimonialsSection variant=quote + closing CTASection variant=banner."
+	case strings.Contains(n, "login") || strings.Contains(n, "signin") || strings.Contains(n, "sign-in"):
+		return "Login landing: HeroSection (centered, heading=\"Welcome back\") + SentanylLeadForm (acts as a sign-in stand-in) + closing CTASection (link to signup)."
+	case strings.Contains(n, "signup") || strings.Contains(n, "register") || strings.Contains(n, "join"):
+		return "Signup landing: HeroSection (centered, eyebrow=\"Start free\") + SentanylLeadForm + Stats (3 social-proof metrics) + closing CTASection."
+	case strings.Contains(n, "faq") || strings.Contains(n, "support") || strings.Contains(n, "help"):
+		return "Support / FAQ page: HeroSection (centered, heading=\"How can we help?\") + FAQSection variant=cols (8 plausible FAQs) + SentanylContactForm + closing CTASection."
+	case strings.Contains(n, "discord") || strings.Contains(n, "community") || strings.Contains(n, "forum"):
+		return "Community page: HeroSection (image or gradient, eyebrow=\"Community\") + FeatureGrid columns=3 (3 community benefits) + Stats (members, posts/day, etc) + closing CTASection (\"Join the community\")."
+	}
+	// Generic fallback — still gets 6+ blocks.
+	return "Generic landing: HeroSection (centered or split) + FeatureGrid columns=3 (3 benefits) + MediaSection (deeper explanation, layout=right) + TestimonialsSection variant=cards + FAQSection (3-4 items) + closing CTASection variant=banner."
 }
 
 // BuildSiteHTMLPrompt constructs the prompt for vision-based HTML page generation.

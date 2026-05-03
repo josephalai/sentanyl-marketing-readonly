@@ -136,33 +136,12 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 		return
 	}
 
-	// Generate high-fidelity HTML for the home page using GPT-4o vision.
-	homeHTML := ""
-	homeStyleCSS := "" // extracted for stub pages
-	htmlReq := ai.SiteHTMLRequest{
-		SourceURL:      req.URL,
-		PageTitle:      extracted.PageTitle,
-		MetaDesc:       extracted.MetaDesc,
-		NavLinks:       extracted.NavLinks,
-		Sections:       extracted.Sections,
-		PrimaryColor:   extracted.PrimaryColor,
-		SecondaryColor: extracted.SecondaryColor,
-		AccentColor:    extracted.AccentColor,
-		HeadingFont:    extracted.HeadingFont,
-		BodyFont:       extracted.BodyFont,
-		ScreenshotB64:  extracted.ScreenshotB64,
-	}
-	if hHTML, err := provider.GenerateSiteHTML(htmlReq); err != nil {
-		log.Printf("HTML generation failed (non-fatal): %v", err)
-	} else {
-		homeHTML = hHTML
-		// Extract the <style> block for stub pages
-		if start := strings.Index(homeHTML, "<style>"); start >= 0 {
-			if end := strings.Index(homeHTML[start:], "</style>"); end >= 0 {
-				homeStyleCSS = homeHTML[start : start+end+8]
-			}
-		}
-	}
+	// Note: we intentionally no longer call provider.GenerateSiteHTML or write
+	// PublishedHTML on cloned pages. The two-track storage (vision HTML +
+	// Puck JSON) caused user edits in the editor to be invisible in the
+	// public view, because the viewer prefers PublishedHTML when set. Puck
+	// is now the single source of truth — RenderPuckDocumentToHTML paints
+	// the same blocks the editor sees.
 
 	var createdPages []site.SitePage
 	for _, pageResult := range result.Pages {
@@ -175,15 +154,6 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 			}
 		}
 		pg.DraftDocument = pageResult.PuckRoot
-
-		// Assign high-fidelity HTML:
-		// Home page → AI-generated vision-based HTML
-		// Stub pages → simple branded placeholder (no extra AI call)
-		if pg.IsHome && homeHTML != "" {
-			pg.PublishedHTML = homeHTML
-		} else if !pg.IsHome && homeStyleCSS != "" {
-			pg.PublishedHTML = buildStyledStubHTML(pageResult.Name, pageResult.Slug, extracted, homeStyleCSS)
-		}
 
 		if err := site.CreateSitePage(pg); err != nil {
 			log.Printf("failed to create duplicated page %s: %v", pageResult.Name, err)
@@ -684,38 +654,3 @@ func minInt(a, b int) int {
 	return b
 }
 
-// buildStyledStubHTML generates a branded placeholder page reusing the home page's CSS.
-func buildStyledStubHTML(pageName, slug string, extracted *crawledSite, styleBlock string) string {
-	var nav strings.Builder
-	for _, l := range extracted.NavLinks {
-		nav.WriteString(fmt.Sprintf("<li><a href=\"%s\">%s</a></li>", l.URL, l.Label))
-	}
-
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>%s</title>
-%s
-<style>
-.stub-hero { padding: 100px 40px; text-align: center; }
-.stub-hero h1 { font-size: 3rem; margin-bottom: 1rem; font-family: var(--font-heading, inherit); }
-.stub-hero p { font-size: 1.2rem; color: #666; max-width: 600px; margin: 0 auto; }
-</style>
-</head>
-<body>
-<nav class="nav">
-  <a class="nav-brand" href="/">%s</a>
-  <ul class="nav-links">%s</ul>
-</nav>
-<div class="stub-hero">
-  <h1>%s</h1>
-  <p>Content for this page is coming soon.</p>
-</div>
-<footer class="footer">
-  <p>%s</p>
-</footer>
-</body>
-</html>`, pageName, styleBlock, extracted.PageTitle, nav.String(), pageName, extracted.PageTitle)
-}
