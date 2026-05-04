@@ -516,9 +516,14 @@ IMPORTANT JSON RULES:
 - Return ONLY valid JSON, no markdown fences, no explanation text before or after
 
 CRITICAL RULES:
-0. **Newsletter-headed sections are SentanylLeadForm, never HeroSection.** If the FIRST extracted section's heading contains "newsletter", "subscribe", "join my", "get my email", or similar email-capture language, the FIRST block on Home MUST be SentanylLeadForm (title=heading, subtitle=tagline-or-subheading, buttonText="Subscribe"). It is FORBIDDEN to emit a HeroSection where ctaText is "Log in" / "Sign in" — the conversion event on this site is email capture, NOT login. The login link belongs in site navigation, not as the hero CTA. Worked example:
-   WRONG → {"type":"HeroSection","props":{"variant":"split","heading":"Get My Weekly Newsletter","subheading":"…","ctaText":"Log in","ctaUrl":"/login/","imageUrl":"…"}}
-   RIGHT → {"type":"SentanylLeadForm","props":{"title":"Get My Weekly Newsletter","subtitle":"…","buttonText":"Subscribe","tone":"default"}} followed immediately by a MediaSection or HeroSection variant=split that carries the brand image + pitch.
+0. **Newsletter heading + hero image → keep BOTH the visual hero AND the form.** If the FIRST extracted section's heading is newsletter-shaped (contains "newsletter", "subscribe", "join my", "get my email") AND it has an imageUrl, the visual hero is the page's anchor — DO NOT delete it.
+   - Block 0 MUST be HeroSection variant="split" with the source's imageUrl, the source heading, the source subheading/tagline, ctaText="Subscribe", ctaUrl="#subscribe", and tone="default" (or "inverse" if the source band is dark).
+   - Block 1 MUST be SentanylLeadForm with id="subscribe", title=a short "Get on the list"-style restatement, subtitle=social proof if available (e.g. "Join 125,000+ subscribers"), buttonText="Subscribe", tone="muted" or "default".
+   It is FORBIDDEN to emit a HeroSection with ctaText="Log in" / "Sign in" — that login link belongs in site navigation, never as the hero CTA. If a newsletter-headed first section has NO imageUrl, then Block 0 may be SentanylLeadForm directly.
+   Worked example for the WITH-IMAGE case:
+   WRONG → {"type":"HeroSection","props":{"variant":"split","heading":"Get My Weekly Newsletter","ctaText":"Log in","ctaUrl":"/login/","imageUrl":"…"}}
+   ALSO WRONG → emitting only SentanylLeadForm and dropping the hero image entirely — this destroys the page's visual weight.
+   RIGHT → [HeroSection variant=split with image + ctaText="Subscribe" + ctaUrl="#subscribe", then SentanylLeadForm id="subscribe"]
 1. Use ONLY the content provided (headings, body text, image URLs, CTA text) for the home page. Never invent content for sections that came from the source. EXCEPTION: Stats blocks should have at least 3 items — if the source only surfaced one big metric, fabricate 2 brand-plausible adjacent metrics (e.g. "125k subscribers" → add "25 years" and "Top 1% podcast"). Stats with one item looks broken.
 2. Preserve image URLs exactly — pass them through as imageSrc/imageUrl/src on the matching component.
 3. **Bands carry tone.** The user prompt groups source sections into bands and gives you the tone for each band. Every block you emit for sections inside a band MUST set props.tone to that band's tone value. This is the single most important rule for visual fidelity.
@@ -615,6 +620,29 @@ func firstHeading(sections []ExtractedSection) string {
 		}
 	}
 	return ""
+}
+
+// firstSectionWithHeading returns the first section that actually carries a
+// heading. Useful for inspecting properties (image, body) of the page's
+// real first content block, since the crawler sometimes leads with empty
+// chrome sections.
+func firstSectionWithHeading(sections []ExtractedSection) *ExtractedSection {
+	for i := range sections {
+		if strings.TrimSpace(sections[i].Heading) != "" {
+			return &sections[i]
+		}
+	}
+	return nil
+}
+
+// jsonString returns a JSON-quoted version of a string for safe embedding
+// in prompt text (handles internal quotes and special chars).
+func jsonString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
 }
 
 // isNewsletterHeading detects the email-capture phrasings that the LLM
@@ -756,10 +784,48 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	// impossible to miss.
 	if isNewsletterHeading(firstHeading(cleanSections)) {
 		sb.WriteString("\n## CRITICAL OVERRIDE FOR THIS CLONE\n")
-		sb.WriteString("The FIRST source section's heading is newsletter-shaped. Block 0 of the Home page MUST be a SentanylLeadForm — NEVER a HeroSection. Use the heading and tagline as the form's title/subtitle. Buttons labeled \"Log in\" / \"Sign in\" / \"Subscribe\" do NOT go on a hero — the conversion event is email capture.\n")
+		first := firstSectionWithHeading(cleanSections)
+		if first != nil && first.ImageURL != "" {
+			sb.WriteString("The FIRST source section is newsletter-shaped AND has a hero image. Emit:\n")
+			sb.WriteString("  Block 0 → HeroSection variant=\"split\" with imageUrl=" + first.ImageURL + ", heading=" + jsonString(first.Heading) + ", ctaText=\"Subscribe\", ctaUrl=\"#subscribe\". KEEP THE IMAGE — it is the page's primary visual anchor.\n")
+			sb.WriteString("  Block 1 → SentanylLeadForm with id=\"subscribe\", title=a short call-to-subscribe, buttonText=\"Subscribe\".\n")
+			sb.WriteString("DO NOT replace the hero with a standalone SentanylLeadForm — that strips the page's visual weight. DO NOT use ctaText=\"Log in\" or ctaUrl=\"/login/\".\n")
+		} else {
+			sb.WriteString("The FIRST source section is newsletter-shaped and has NO hero image. Block 0 of Home MUST be SentanylLeadForm (title=heading, subtitle=tagline, buttonText=\"Subscribe\"). Do NOT emit a HeroSection with ctaText=\"Log in\".\n")
+		}
 	}
 
 	bands := groupSectionsByBand(cleanSections)
+
+	// Tally how dark the source actually is. The LLM under-uses inverse
+	// tone on its own — sites like mikedillard.com are 60-70% dark and
+	// clones come back almost entirely default-toned. Inject a hard
+	// minimum so the visual rhythm survives.
+	inverseBands := 0
+	for _, b := range bands {
+		if b.Tone == "inverse" {
+			inverseBands++
+		}
+	}
+	if inverseBands >= 1 {
+		sb.WriteString("\n## TONE BUDGET (mandatory)\n")
+		sb.WriteString(fmt.Sprintf("The source has %d dark band(s) out of %d. The Home page MUST emit AT LEAST %d block(s) with tone=\"inverse\". Spread them through the page (don't pile them all at the bottom). Setting tone=\"inverse\" on a CTASection variant=\"banner\" alone is NOT enough — at least one inverse block must be a content block (FeatureGrid, MediaSection, or HeroSection). If the source is mostly dark, default to inverse and use default/muted as the contrast accent.\n", inverseBands, len(bands), inverseBands))
+	}
+
+	// Image preservation: every source section with an imageURL contributes
+	// a usable photo. Tell the LLM to carry those URLs forward — the
+	// most common mistake is emitting a MediaSection with no imageUrl
+	// when the source had one.
+	withImages := 0
+	for _, s := range cleanSections {
+		if s.ImageURL != "" {
+			withImages++
+		}
+	}
+	if withImages >= 2 {
+		sb.WriteString("\n## IMAGE PRESERVATION\n")
+		sb.WriteString(fmt.Sprintf("The source has %d sections with imageURLs. Every block you emit from a source section that had an imageURL MUST include the imageUrl prop. Empty MediaSections with no image are forbidden — if the source had an image at that position, use it. If you collapse multiple image sections into one FeatureGrid, each grid item gets the corresponding source image.\n", withImages))
+	}
 	sb.WriteString("\n## Page Bands (reproduce in source order)\n")
 	sb.WriteString("Each band below is a continuous run of source sections that share a background. EVERY block you emit for sections inside a band MUST set the same `tone` shown for the band. This keeps the cloned page's visual rhythm matching the source.\n")
 
