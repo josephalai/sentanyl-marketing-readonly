@@ -817,16 +817,11 @@ func renderHeroSection(sb *strings.Builder, props map[string]any, esc func(strin
 
 	classes := "hero"
 	imagePosition, _ := props["imagePosition"].(string)
-	// Architectural default: split heroes default to image-LEFT. Sampling
-	// across mikedillard.com / josephalai.com / jeffwalker.com / typical
-	// landing pages, image-LEFT is the dominant pattern for personal-brand
-	// and product sites. The LLM rarely sets imagePosition explicitly
-	// even when the source has it; defaulting at the renderer keeps cloned
-	// pages aligned with the source's visual axis without requiring the
-	// AI to infer it from the screenshot.
-	if imagePosition == "" {
-		imagePosition = "left"
-	}
+	// No renderer-side default: when imagePosition is empty, layout follows
+	// DOM order (text first → image right). The LLM and sandbox are
+	// responsible for emitting imagePosition='left' when the source has
+	// image-left. The earlier 'default to left' opinion was dropped — it
+	// flipped the layout for image-right sources too.
 	switch variant {
 	case "split":
 		classes += " hero--split"

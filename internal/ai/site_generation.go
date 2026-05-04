@@ -648,6 +648,23 @@ func firstHeading(sections []ExtractedSection) string {
 	return ""
 }
 
+// firstHeroImagePosition returns the position label ("left"|"right") of
+// the first source section whose image carries a left/right position
+// signal. Used to drive the hero block's imagePosition default per-clone
+// rather than via a renderer-side opinion.
+func firstHeroImagePosition(sections []ExtractedSection) string {
+	for _, s := range sections {
+		if s.ImageURL == "" {
+			continue
+		}
+		switch s.ImagePosition {
+		case "left", "right":
+			return s.ImagePosition
+		}
+	}
+	return ""
+}
+
 // firstSectionWithHeading returns the first section that actually carries a
 // heading. Useful for inspecting properties (image, body) of the page's
 // real first content block, since the crawler sometimes leads with empty
@@ -732,6 +749,118 @@ func isFooterJunk(s ExtractedSection) bool {
 	return false
 }
 
+// mergeSimilarConsecutiveSections finds runs of 3+ consecutive sections
+// that share structural shape (same heading level, similar body length,
+// no CTA divergence, all have-image or all not-have-image, similar tone)
+// and merges them into a synthetic single section carrying GridItems.
+// This catches the Elementor pattern where each "card" is its own
+// .elementor-section — the LLM otherwise emits 3 stacked MediaSections
+// instead of one FeatureGrid.
+//
+// Universal: triggers whenever the structural similarity is present,
+// regardless of source platform.
+func mergeSimilarConsecutiveSections(sections []ExtractedSection) []ExtractedSection {
+	if len(sections) < 3 {
+		return sections
+	}
+	out := make([]ExtractedSection, 0, len(sections))
+	i := 0
+	for i < len(sections) {
+		// Find length of a run starting at i where each item shares shape
+		// with sections[i].
+		j := i + 1
+		for j < len(sections) && sectionShapeMatches(sections[i], sections[j]) {
+			j++
+		}
+		runLen := j - i
+		if runLen >= 3 && sections[i].Heading != "" {
+			// Merge: synth a parent section whose GridItems are the run.
+			merged := ExtractedSection{
+				Heading:      "", // intentionally blank — caller's prompt
+				HeadingLevel: 2,
+				IsDark:       sections[i].IsDark,
+				BgColor:      sections[i].BgColor,
+			}
+			// Promote the FIRST card's heading as the grid heading only if
+			// the run has 4+ items and they all start with verbs/labels —
+			// otherwise leave heading blank and let the band-grouping band
+			// header carry it.
+			items := make([]ExtractedGridItem, 0, runLen)
+			for k := i; k < j; k++ {
+				items = append(items, ExtractedGridItem{
+					Title:    sections[k].Heading,
+					Body:     truncateForGrid(sections[k].Body),
+					ImageURL: sections[k].ImageURL,
+				})
+			}
+			merged.GridItems = items
+			out = append(out, merged)
+			i = j
+			continue
+		}
+		out = append(out, sections[i])
+		i++
+	}
+	return out
+}
+
+// sectionShapeMatches returns true if two sections look like cards in the
+// same grid. Conservative criteria: card-shaped means short heading
+// (≤45 chars), short body (≤220 chars or empty), same heading level,
+// consistent has-image, no CTA divergence, same tone band. Heroes,
+// image+text editorial blocks, and feature spotlights all fail one or
+// more of these checks and survive as standalone blocks.
+func sectionShapeMatches(a, b ExtractedSection) bool {
+	if a.HeadingLevel != b.HeadingLevel {
+		return false
+	}
+	if a.Heading == "" || b.Heading == "" {
+		return false
+	}
+	// Card pattern: short heading text. Editorial / feature sections
+	// typically have longer titles. 45 chars accommodates "Demystified
+	// Techniques" / "Comprehensive Learning" but rules out "THE MOST
+	// DEPENDABLE AND CONSISTENT WAY TO MANIFEST".
+	if len(a.Heading) > 45 || len(b.Heading) > 45 {
+		return false
+	}
+	// Both must EITHER have image or both not.
+	if (a.ImageURL != "") != (b.ImageURL != "") {
+		return false
+	}
+	// Card pattern: bodies are short (or empty). Long-body sections are
+	// editorial spotlights — never merge those.
+	la, lb := len(a.Body), len(b.Body)
+	if la > 220 || lb > 220 {
+		return false
+	}
+	if la > 0 && lb > 0 {
+		shorter, longer := la, lb
+		if shorter > longer {
+			shorter, longer = longer, shorter
+		}
+		if float64(shorter)/float64(longer) < 0.4 {
+			return false
+		}
+	}
+	// CTA presence consistent.
+	if (a.CTAText != "") != (b.CTAText != "") {
+		return false
+	}
+	// Don't merge dark+light bands together.
+	if a.IsDark != b.IsDark {
+		return false
+	}
+	return true
+}
+
+func truncateForGrid(s string) string {
+	if len(s) > 240 {
+		return s[:240] + "…"
+	}
+	return s
+}
+
 // trimFooterSections drops trailing sections that are clearly page-chrome
 // junk (footer copyright/privacy/terms). Only trims from the end — a
 // section with no heading mid-page might be valid (e.g. an image-only
@@ -803,6 +932,7 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	}
 
 	cleanSections := trimFooterSections(req.Sections)
+	cleanSections = mergeSimilarConsecutiveSections(cleanSections)
 
 	// If the very first source section is newsletter-headed, the LLM
 	// keeps mistaking it for a Hero with a "Log in" CTA. Inject an
@@ -818,6 +948,14 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 		sb.WriteString("\n## CRITICAL OVERRIDE — FIRST SECTION HAS IMAGE BUT NO TEXT\n")
 		sb.WriteString(fmt.Sprintf("Source section 0 is the page hero — it has an image (%s) but the crawler couldn't extract its heading text (likely rendered as graphic, in a CSS background, or as a custom font in a deeply-nested element). DO NOT drop this section. Emit Block 0 as HeroSection variant=\"split\" (or variant=\"image\" if imageAspect=wide and imagePosition=background) using:\n  heading = the site name from the page title (or %q),\n  subheading = the meta description if available,\n  imageUrl = %s,\n  imageAspect = pass through whatever [aspect=…] hint appears in the source listing,\n  imagePosition = pass through [position=…] when shown.\nIf the image is a logo/wordmark (small width, ends in .svg or .png with brand-name in filename), use variant=\"centered\" instead and put the logo in the eyebrow with a short tagline as heading.\n", cleanSections[0].ImageURL, req.SiteName, cleanSections[0].ImageURL))
 	}
+	// Page-level hero-image position: the LLM consistently fails to
+	// transcribe imagePosition from the screenshot, so we surface the
+	// detected position from the first section that actually carries
+	// position info. This is a per-clone signal, not a global opinion.
+	if pos := firstHeroImagePosition(cleanSections); pos != "" {
+		sb.WriteString(fmt.Sprintf("\n## HERO IMAGE POSITION (sandbox-detected)\nThe source's first hero image is on the %q side of its heading. Set imagePosition=%q on the Home page's HeroSection so the cloned layout mirrors the source. Apply the same imagePosition signal to any subsequent MediaSections with imagery.\n", pos, pos))
+	}
+
 	if isNewsletterHeading(firstHeading(cleanSections)) {
 		sb.WriteString("\n## CRITICAL OVERRIDE FOR THIS CLONE\n")
 		first := firstSectionWithHeading(cleanSections)

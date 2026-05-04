@@ -64,6 +64,58 @@ func TestNewOpenAIProvider(t *testing.T) {
 	}
 }
 
+func TestMergeSimilarConsecutiveSections(t *testing.T) {
+	// 3 parallel cards (icon+title+body, no images, no CTAs) → merge.
+	in := []ExtractedSection{
+		{Heading: "Speed", Body: "Fast everything. Built for scale.", HeadingLevel: 3},
+		{Heading: "Security", Body: "SOC 2 compliant out of the box.", HeadingLevel: 3},
+		{Heading: "Reliability", Body: "99.99% uptime SLA.", HeadingLevel: 3},
+	}
+	out := mergeSimilarConsecutiveSections(in)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 merged section, got %d", len(out))
+	}
+	if len(out[0].GridItems) != 3 {
+		t.Fatalf("expected 3 grid items, got %d", len(out[0].GridItems))
+	}
+
+	// Mixed shape: hero + 2 cards → no merge (run too short).
+	mixed := []ExtractedSection{
+		{Heading: "Welcome", Body: "Long hero body...........................................................", HeadingLevel: 1, ImageURL: "h.jpg"},
+		{Heading: "Speed", Body: "Fast.", HeadingLevel: 3},
+		{Heading: "Security", Body: "Secure.", HeadingLevel: 3},
+	}
+	out = mergeSimilarConsecutiveSections(mixed)
+	if len(out) != 3 {
+		t.Fatalf("expected unchanged length 3, got %d", len(out))
+	}
+
+	// Long-headline editorial spotlights: should NOT merge even though they
+	// share level + image presence. Joseph Alai's "How It Works" /
+	// "THE MOST DEPENDABLE..." / "What Do My Teachings Offer You?" are
+	// distinct image-led editorial blocks, not card shapes.
+	editorial := []ExtractedSection{
+		{Heading: "How It Works", Body: "A short overview.", HeadingLevel: 2, ImageURL: "a.jpg"},
+		{Heading: "THE MOST DEPENDABLE AND CONSISTENT WAY TO MANIFEST", Body: "Longer body text describing the system in detail.", HeadingLevel: 2, ImageURL: "b.jpg"},
+		{Heading: "What Do My Teachings Offer You?", Body: "Another editorial block.", HeadingLevel: 2, ImageURL: "c.jpg"},
+	}
+	out = mergeSimilarConsecutiveSections(editorial)
+	if len(out) != 3 {
+		t.Fatalf("editorial sections should not merge: got %d", len(out))
+	}
+
+	// Dark+light boundary: don't merge across tones.
+	tones := []ExtractedSection{
+		{Heading: "A", HeadingLevel: 3, IsDark: true},
+		{Heading: "B", HeadingLevel: 3, IsDark: true},
+		{Heading: "C", HeadingLevel: 3, IsDark: false},
+	}
+	out = mergeSimilarConsecutiveSections(tones)
+	if len(out) != 3 {
+		t.Fatalf("dark-light boundary: expected unmerged, got %d", len(out))
+	}
+}
+
 func TestGroupSectionsByBand(t *testing.T) {
 	sections := []ExtractedSection{
 		{Heading: "Hero", IsDark: true},                          // band 1: inverse
