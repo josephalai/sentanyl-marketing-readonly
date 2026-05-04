@@ -67,6 +67,78 @@ func (p *OpenAIProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
 	return html, nil
 }
 
+// visionAddendum is appended to siteDuplicateSystemPrompt when the call
+// includes a screenshot. Tells the model to reconcile what it sees with the
+// extracted-text section list, since the crawler often misses or mis-groups
+// sections (forms, multi-card grids, image-heavy hero variants).
+const visionAddendum = `
+
+VISION CONTEXT:
+You also have the source page's screenshot attached. The structured section list above is the crawler's BEST EFFORT — the screenshot is ground truth. Use the image to:
+- Resolve mis-grouped sections (e.g. 3 separate "card sections" in the text list are usually one FeatureGrid in the screenshot — emit ONE FeatureGrid).
+- Detect content the crawler missed (forms, logo rows, stat callouts, pricing tiers, navigation prominence).
+- Verify hero variant: split (image side-by-side), image (background photo with text overlaid), centered (text-only centered), or gradient.
+- Match background tone bands to what you see (dark-on-light, alternating tones, full-bleed photo backgrounds).
+- Pick block density — when the screenshot shows tightly packed sections, emit density="compact"; when airy, density="spacious".
+The screenshot is the home page only. For nav-derived inner pages, you still synthesize content per the page hint.`
+
+// chatCompletionVisionJSON sends a vision request to GPT-4o with an image
+// AND requests json_object output. Used by DuplicateSite when a home-page
+// screenshot is available — the model reconciles structured-text sections
+// with what it actually sees in the screenshot, which is the largest
+// single fidelity lift over text-only cloning.
+func (p *OpenAIProvider) chatCompletionVisionJSON(userText, systemMessage, imageB64 string) (string, error) {
+	systemMsg := map[string]any{
+		"role":    "system",
+		"content": systemMessage,
+	}
+	userContent := []map[string]any{
+		{"type": "text", "text": userText},
+		{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url":    "data:image/jpeg;base64," + imageB64,
+				"detail": "high",
+			},
+		},
+	}
+	reqBody := map[string]any{
+		"model":           "gpt-4o",
+		"messages":        []any{systemMsg, map[string]any{"role": "user", "content": userContent}},
+		"response_format": map[string]string{"type": "json_object"},
+		"temperature":     0.7,
+		"max_tokens":      16384,
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("OpenAI vision-JSON request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+	respBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", err
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OpenAI vision-JSON returned %d: %s", httpResp.StatusCode, string(respBytes[:min(800, len(respBytes))]))
+	}
+	var apiResp struct {
+		Choices []struct {
+			Message struct{ Content string `json:"content"` } `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil || len(apiResp.Choices) == 0 {
+		return "", fmt.Errorf("no choices in vision-JSON response")
+	}
+	return apiResp.Choices[0].Message.Content, nil
+}
+
 // chatCompletionVision sends a vision request to GPT-4o with an image.
 func (p *OpenAIProvider) chatCompletionVision(userText, imageB64 string) (string, error) {
 	systemMsg := map[string]string{
@@ -134,7 +206,17 @@ func min(a, b int) int {
 
 func (p *OpenAIProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error) {
 	prompt := BuildSiteDuplicatePrompt(req)
-	resp, err := p.chatCompletion(prompt, siteDuplicateSystemPrompt)
+	var resp string
+	var err error
+	if req.ScreenshotB64 != "" {
+		resp, err = p.chatCompletionVisionJSON(prompt, siteDuplicateSystemPrompt+visionAddendum, req.ScreenshotB64)
+		if err != nil {
+			log.Printf("DuplicateSite: vision call failed (%v) — falling back to text-only", err)
+			resp, err = p.chatCompletion(prompt, siteDuplicateSystemPrompt)
+		}
+	} else {
+		resp, err = p.chatCompletion(prompt, siteDuplicateSystemPrompt)
+	}
 	if err != nil {
 		return nil, err
 	}

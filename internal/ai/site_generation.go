@@ -716,6 +716,41 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 			if section.CTAText != "" {
 				sb.WriteString(fmt.Sprintf("    CTA: %q → %s\n", section.CTAText, section.CTAUrl))
 			}
+			if section.FormType != "" {
+				btn := section.FormButtonText
+				if btn == "" {
+					btn = "Subscribe"
+				}
+				switch section.FormType {
+				case "newsletter":
+					sb.WriteString(fmt.Sprintf("    FORM (newsletter signup, button=%q) → emit ONE SentanylLeadForm block (title=section heading, buttonText=%q, includeName=%v). Do NOT emit a HeroSection here even if heading looks hero-ish.\n",
+						btn, btn, section.FormHasName))
+				case "contact":
+					sb.WriteString(fmt.Sprintf("    FORM (contact form with message field, button=%q) → emit ONE SentanylContactForm block (title=section heading, buttonText=%q, includeMessage=true).\n",
+						btn, btn))
+				}
+			}
+			if len(section.GridItems) >= 3 {
+				sb.WriteString(fmt.Sprintf("    GRID DETECTED (%d repeating cards) → emit ONE FeatureGrid block (heading=section heading, columns=3 if items<=3 else 4) with these EXACT items:\n", len(section.GridItems)))
+				for i, gi := range section.GridItems {
+					if i >= 8 {
+						break
+					}
+					title := gi.Title
+					if len(title) > 80 {
+						title = title[:80]
+					}
+					body := gi.Body
+					if len(body) > 200 {
+						body = body[:200] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("      • title=%q body=%q", title, body))
+					if gi.ImageURL != "" {
+						sb.WriteString(fmt.Sprintf(" image=%s", gi.ImageURL))
+					}
+					sb.WriteString("\n")
+				}
+			}
 		}
 	}
 

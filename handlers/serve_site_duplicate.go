@@ -91,6 +91,7 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 		AccentColor:    extracted.AccentColor,
 		HeadingFont:    extracted.HeadingFont,
 		BodyFont:       extracted.BodyFont,
+		ScreenshotB64:  extracted.ScreenshotB64,
 	}
 
 	result, err := provider.DuplicateSite(dupReq)
@@ -228,16 +229,26 @@ type sandboxNavLink struct {
 }
 
 type sandboxSection struct {
-	Heading            string `json:"heading"`
-	HeadingLevel       int    `json:"headingLevel"`
-	HeadingAccentColor string `json:"headingAccentColor"`
-	Body               string `json:"body"`
-	ImageURL           string `json:"imageURL"`
-	ImageAlt           string `json:"imageAlt"`
-	CTAText            string `json:"ctaText"`
-	CTAUrl             string `json:"ctaUrl"`
-	IsDark             bool   `json:"isDark"`
-	BgColor            string `json:"bgColor"`
+	Heading            string             `json:"heading"`
+	HeadingLevel       int                `json:"headingLevel"`
+	HeadingAccentColor string             `json:"headingAccentColor"`
+	Body               string             `json:"body"`
+	ImageURL           string             `json:"imageURL"`
+	ImageAlt           string             `json:"imageAlt"`
+	CTAText            string             `json:"ctaText"`
+	CTAUrl             string             `json:"ctaUrl"`
+	IsDark             bool               `json:"isDark"`
+	BgColor            string             `json:"bgColor"`
+	FormType           string             `json:"formType"`
+	FormButtonText     string             `json:"formButtonText"`
+	FormHasName        bool               `json:"formHasName"`
+	GridItems          []sandboxGridItem  `json:"gridItems"`
+}
+
+type sandboxGridItem struct {
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	ImageURL string `json:"imageUrl"`
 }
 
 // crawlViaSandbox calls the site-sandbox Docker service.
@@ -272,6 +283,14 @@ func crawlViaSandbox(sandboxBaseURL, targetURL string) (*crawledSite, error) {
 		result.NavLinks = append(result.NavLinks, ai.NavLinkResult{Label: l.Label, URL: l.URL})
 	}
 	for _, s := range sr.Sections {
+		var gridItems []ai.ExtractedGridItem
+		for _, gi := range s.GridItems {
+			gridItems = append(gridItems, ai.ExtractedGridItem{
+				Title:    gi.Title,
+				Body:     gi.Body,
+				ImageURL: gi.ImageURL,
+			})
+		}
 		result.Sections = append(result.Sections, ai.ExtractedSection{
 			Heading:            s.Heading,
 			HeadingLevel:       s.HeadingLevel,
@@ -283,6 +302,10 @@ func crawlViaSandbox(sandboxBaseURL, targetURL string) (*crawledSite, error) {
 			CTAUrl:             s.CTAUrl,
 			IsDark:             s.IsDark,
 			BgColor:            s.BgColor,
+			FormType:           s.FormType,
+			FormButtonText:     s.FormButtonText,
+			FormHasName:        s.FormHasName,
+			GridItems:          gridItems,
 		})
 	}
 	// Assign colors: primary/secondary from darks, accent from heading accent color or vivid color

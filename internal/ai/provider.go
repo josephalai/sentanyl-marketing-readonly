@@ -126,6 +126,24 @@ type ExtractedSection struct {
 	CTAUrl             string `json:"cta_url,omitempty"`
 	BgColor            string `json:"bg_color,omitempty"`
 	IsDark             bool   `json:"is_dark,omitempty"`
+	// FormType is "newsletter" or "contact" when the section contains a
+	// <form> with an email input. Drives prompt routing to
+	// SentanylLeadForm / SentanylContactForm so the AI doesn't have to
+	// guess from text alone.
+	FormType       string `json:"form_type,omitempty"`
+	FormButtonText string `json:"form_button_text,omitempty"`
+	FormHasName    bool   `json:"form_has_name,omitempty"`
+	// GridItems is set when the section contains a repeating-card pattern
+	// (3+ parallel siblings with heading+body). When present the AI emits
+	// one FeatureGrid block with these exact items.
+	GridItems []ExtractedGridItem `json:"grid_items,omitempty"`
+}
+
+// ExtractedGridItem is one card in a repeating-pattern section.
+type ExtractedGridItem struct {
+	Title    string `json:"title,omitempty"`
+	Body     string `json:"body,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
 }
 
 // SiteDuplicateRequest is the input for AI site duplication from a crawled URL.
@@ -142,6 +160,12 @@ type SiteDuplicateRequest struct {
 	HeadingFont    string             `json:"heading_font,omitempty"`
 	BodyFont       string             `json:"body_font,omitempty"`
 	BorderRadius   string             `json:"border_radius,omitempty"`
+	// ScreenshotB64 is a JPEG screenshot of the source home page.
+	// When present, OpenAIProvider routes the duplicate call through GPT-4o
+	// vision so the model can see the actual layout/spacing/imagery in
+	// addition to the extracted text. This is the single largest fidelity
+	// lift over text-only structural cloning.
+	ScreenshotB64 string `json:"screenshot_b64,omitempty"`
 }
 
 // SiteHTMLRequest is the input for vision-based high-fidelity HTML page generation.
