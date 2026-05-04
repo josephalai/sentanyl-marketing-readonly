@@ -516,7 +516,10 @@ IMPORTANT JSON RULES:
 - Return ONLY valid JSON, no markdown fences, no explanation text before or after
 
 CRITICAL RULES:
-1. Use ONLY the content provided (headings, body text, image URLs, CTA text) for the home page. Never invent content for sections that came from the source.
+0. **Newsletter-headed sections are SentanylLeadForm, never HeroSection.** If the FIRST extracted section's heading contains "newsletter", "subscribe", "join my", "get my email", or similar email-capture language, the FIRST block on Home MUST be SentanylLeadForm (title=heading, subtitle=tagline-or-subheading, buttonText="Subscribe"). It is FORBIDDEN to emit a HeroSection where ctaText is "Log in" / "Sign in" — the conversion event on this site is email capture, NOT login. The login link belongs in site navigation, not as the hero CTA. Worked example:
+   WRONG → {"type":"HeroSection","props":{"variant":"split","heading":"Get My Weekly Newsletter","subheading":"…","ctaText":"Log in","ctaUrl":"/login/","imageUrl":"…"}}
+   RIGHT → {"type":"SentanylLeadForm","props":{"title":"Get My Weekly Newsletter","subtitle":"…","buttonText":"Subscribe","tone":"default"}} followed immediately by a MediaSection or HeroSection variant=split that carries the brand image + pitch.
+1. Use ONLY the content provided (headings, body text, image URLs, CTA text) for the home page. Never invent content for sections that came from the source. EXCEPTION: Stats blocks should have at least 3 items — if the source only surfaced one big metric, fabricate 2 brand-plausible adjacent metrics (e.g. "125k subscribers" → add "25 years" and "Top 1% podcast"). Stats with one item looks broken.
 2. Preserve image URLs exactly — pass them through as imageSrc/imageUrl/src on the matching component.
 3. **Bands carry tone.** The user prompt groups source sections into bands and gives you the tone for each band. Every block you emit for sections inside a band MUST set props.tone to that band's tone value. This is the single most important rule for visual fidelity.
 4. Include ALL nav links in the site navigation.
@@ -603,6 +606,89 @@ func hexByte(s string) byte {
 	return n
 }
 
+// firstHeading returns the heading of the first non-empty source section,
+// skipping leading sections whose heading is blank.
+func firstHeading(sections []ExtractedSection) string {
+	for _, s := range sections {
+		if h := strings.TrimSpace(s.Heading); h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
+// isNewsletterHeading detects the email-capture phrasings that the LLM
+// keeps mis-routing into HeroSection/Log-in CTAs.
+func isNewsletterHeading(heading string) bool {
+	h := strings.ToLower(heading)
+	if h == "" {
+		return false
+	}
+	for _, kw := range []string{
+		"newsletter", "subscribe", "join my", "join the",
+		"get my email", "get the email", "free email",
+		"sign up", "signup", "sign-up", "weekly email",
+		"weekly newsletter", "daily newsletter",
+	} {
+		if strings.Contains(h, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFooterJunk returns true for sections that are obviously page footers
+// — empty heading combined with a body that's mostly copyright/legal text,
+// or only a "Privacy Policy" / "Terms" / "Cookie Policy" CTA. The crawler's
+// section walker doesn't always strip footers cleanly (especially when a
+// brand logo image lives in the footer) and these leak into the LLM
+// prompt as trailing junk blocks.
+func isFooterJunk(s ExtractedSection) bool {
+	heading := strings.ToLower(strings.TrimSpace(s.Heading))
+	body := strings.ToLower(strings.TrimSpace(s.Body))
+	cta := strings.ToLower(strings.TrimSpace(s.CTAText))
+
+	junkCTAs := []string{"privacy policy", "terms of use", "terms of service", "cookie", "copyright", "all rights", "earnings disclaimer"}
+	legalPhrases := []string{"©", "all rights reserved", "privacy policy", "terms of use", "terms of service", "earnings disclaimer", "cookie policy"}
+
+	// Heading-less sections whose body is dominated by legal text — even
+	// if there's a brand logo image attached. Footers commonly carry the
+	// site logo; that doesn't make them content.
+	if heading == "" && body != "" && len(body) < 600 {
+		hits := 0
+		for _, l := range legalPhrases {
+			if strings.Contains(body, l) {
+				hits++
+			}
+		}
+		if hits >= 2 {
+			return true
+		}
+	}
+
+	// Heading-less sections whose only CTA is legal navigation.
+	if heading == "" && cta != "" {
+		for _, j := range junkCTAs {
+			if strings.Contains(cta, j) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// trimFooterSections drops trailing sections that are clearly page-chrome
+// junk (footer copyright/privacy/terms). Only trims from the end — a
+// section with no heading mid-page might be valid (e.g. an image-only
+// callout) and we don't want to nuke it.
+func trimFooterSections(sections []ExtractedSection) []ExtractedSection {
+	for len(sections) > 0 && isFooterJunk(sections[len(sections)-1]) {
+		sections = sections[:len(sections)-1]
+	}
+	return sections
+}
+
 // groupSectionsByBand walks sections in source order and groups consecutive
 // sections with the same tone into bands. A page with hero (dark), three
 // feature sections (light), and a final CTA (dark) becomes 3 bands.
@@ -662,7 +748,18 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 		}
 	}
 
-	bands := groupSectionsByBand(req.Sections)
+	cleanSections := trimFooterSections(req.Sections)
+
+	// If the very first source section is newsletter-headed, the LLM
+	// keeps mistaking it for a Hero with a "Log in" CTA. Inject an
+	// explicit per-clone override above the bands so the rule is
+	// impossible to miss.
+	if isNewsletterHeading(firstHeading(cleanSections)) {
+		sb.WriteString("\n## CRITICAL OVERRIDE FOR THIS CLONE\n")
+		sb.WriteString("The FIRST source section's heading is newsletter-shaped. Block 0 of the Home page MUST be a SentanylLeadForm — NEVER a HeroSection. Use the heading and tagline as the form's title/subtitle. Buttons labeled \"Log in\" / \"Sign in\" / \"Subscribe\" do NOT go on a hero — the conversion event is email capture.\n")
+	}
+
+	bands := groupSectionsByBand(cleanSections)
 	sb.WriteString("\n## Page Bands (reproduce in source order)\n")
 	sb.WriteString("Each band below is a continuous run of source sections that share a background. EVERY block you emit for sections inside a band MUST set the same `tone` shown for the band. This keeps the cloned page's visual rhythm matching the source.\n")
 
@@ -841,6 +938,14 @@ func pageContentHint(label, slug string) string {
 		return "Login landing: HeroSection (centered, heading=\"Welcome back\") + SentanylLeadForm (acts as a sign-in stand-in) + closing CTASection (link to signup)."
 	case strings.Contains(n, "signup") || strings.Contains(n, "register") || strings.Contains(n, "join"):
 		return "Signup landing: HeroSection (centered, eyebrow=\"Start free\") + SentanylLeadForm + Stats (3 social-proof metrics) + closing CTASection."
+	case strings.Contains(n, "subscribe") || strings.Contains(n, "newsletter") || strings.Contains(n, "email"):
+		return "Newsletter signup page: SentanylLeadForm (title=heading from source like \"Get My Weekly Newsletter\", buttonText=\"Subscribe\") FIRST as the primary block + MediaSection explaining what subscribers get + Stats (subscriber count, open rate, years running — keep authentic to brand) + TestimonialsSection variant=quote + closing CTASection variant=banner. Do NOT lead with HeroSection — the conversion event IS the email capture."
+	case strings.Contains(n, "show") || strings.Contains(n, "podcast") || strings.Contains(n, "episode"):
+		return "Podcast / show page: HeroSection (split if image, eyebrow=\"The Show\") + LogoCloud (Apple Podcasts / Spotify / YouTube / Stitcher — list whichever platforms make sense) + FeatureGrid columns=3 with 3-6 recent episode-shaped items + closing CTASection (\"Subscribe wherever you listen\")."
+	case strings.Contains(n, "review") || strings.Contains(n, "testimonial") || strings.Contains(n, "press"):
+		return "Reviews / press page: HeroSection (centered, heading=\"What people say\") + TestimonialsSection variant=cards (6 testimonials) + Stats (3 social-proof metrics) + LogoCloud (publications / clients) + closing CTASection."
+	case strings.Contains(n, "venture") || strings.Contains(n, "portfolio") || strings.Contains(n, "investment") || strings.Contains(n, "deal"):
+		return "Ventures / portfolio page: HeroSection (centered, eyebrow=\"Ventures\") + FeatureGrid columns=3 (4-6 portfolio companies / deals as items with title + 1-line description + image if available) + MediaSection (investment thesis or criteria) + closing CTASection (\"Submit a deal\" or \"Get in touch\")."
 	case strings.Contains(n, "faq") || strings.Contains(n, "support") || strings.Contains(n, "help"):
 		return "Support / FAQ page: HeroSection (centered, heading=\"How can we help?\") + FAQSection variant=cols (8 plausible FAQs) + SentanylContactForm + closing CTASection."
 	case strings.Contains(n, "discord") || strings.Contains(n, "community") || strings.Contains(n, "forum"):
