@@ -190,7 +190,7 @@ DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks dire
 ### Hero & CTA — visual anchors
 
 **HeroSection** — The page-opening band. Pick a variant — do NOT default to centered for every page.
-  props: id, variant ("centered"|"split"|"gradient"|"image"), eyebrow, heading, subheading, description, ctaText, ctaUrl, secondaryCtaText, secondaryCtaUrl, imageUrl (used for "split"), backgroundImage (used for "image"), tone, paddingY
+  props: id, variant ("centered"|"split"|"gradient"|"image"), eyebrow, heading, subheading, description, ctaText, ctaUrl, secondaryCtaText, secondaryCtaUrl, imageUrl (used for "split"), imagePosition ("left"|"right"; mirror the source's hero layout — image-LEFT is the default modern pattern), imageAspect ("square"|"landscape"|"wide"|"tall"|"auto"; pass through the [aspect=…] hint from source), backgroundImage (used for "image"), tone, paddingY
   Notes: "split" puts an image on one side and the headline+CTA on the other. "image" uses a full-bleed background photo with overlay. "gradient" is a centered headline on a brand gradient. Use "split" whenever a representative product/screenshot image is available.
 
 **CTASection** — Mid-page or end-of-page conversion band.
@@ -204,7 +204,7 @@ DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks dire
   Example: {"type":"FeatureGrid","props":{"id":"fg-1","heading":"Built for momentum","subheading":"Three reasons teams move faster.","columns":3,"items":[{"icon":"⚡","title":"Real-time sync","body":"Updates flow to every device in under a second."},{"icon":"🛡","title":"Enterprise security","body":"SOC 2 + SSO + audit logs out of the box."},{"icon":"🚀","title":"Deploy anywhere","body":"One-click rollouts to AWS, GCP, or your own cluster."}]}}
 
 **MediaSection** — Side-by-side image + heading + body + CTA. Alternate "left" and "right" between consecutive sections to create rhythm.
-  props: id, layout ("left"|"right"), eyebrow, heading, body, ctaText, ctaUrl, imageSrc, imageAlt, tone, paddingY
+  props: id, layout ("left"|"right"), eyebrow, heading, body, ctaText, ctaUrl, imageSrc, imageAlt, imageAspect ("square"|"landscape"|"wide"|"tall"|"auto"; pass through [aspect=…] from the source — when wide/tall, the renderer letterboxes instead of cover-cropping, which prevents stretched logos/banners), tone, paddingY
 
 **Pricing** — Pricing-tier comparison.
   props: id, heading, subheading, tone, paddingY, tiers (array of {name, price, cadence, description, featured (bool), features (array of strings), ctaText, ctaUrl})
@@ -225,7 +225,7 @@ DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks dire
   props: id, variant ("list"|"cols"), heading, tone, paddingY, items (array of {question, answer})
   Use "cols" (2-column) when there are 6+ FAQ items.
 
-**RichTextSection** — Free-form HTML content. Use sparingly for prose-heavy pages (about, blog excerpts). Prefer FeatureGrid/MediaSection for marketing content.
+**RichTextSection** — Free-form HTML content. STRICT: ONLY use when there's substantial prose (>100 words of body text from the source). Never use for short taglines, single phrases, or "subheading-shaped" content — those belong as the description/subheading prop of an adjacent block. If you find yourself emitting a RichTextSection with one short paragraph, you should be using a HeroSection (centered) or merging into the next block. Defaults: tone="default", paddingY="lg".
   props: id, content (HTML string with multiple paragraphs/headings/lists), tone, paddingY
 
 **ImageSection** — Standalone wide image with optional caption.
@@ -242,8 +242,8 @@ DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks dire
 
 ### Platform Components (use only when contextually relevant)
 
-**SentanylLeadForm** — Lead capture form
-  props: id, title (string), buttonText (string), nextUrl (redirect URL string)
+**SentanylLeadForm** — Lead capture form (newsletter / email signup)
+  props: id, title (string), subtitle (string; social proof or one-line context — e.g. "Join 125,000+ subscribers"), buttonText (string), tone ("default"|"muted"|"inverse"|"branded"), nextUrl (redirect URL string)
 
 **SentanylContactForm** — Contact form with optional fields
   props: id, title (string), buttonText (string), includePhone ("true"/"false"), includeMessage ("true"/"false"), nextUrl (string)
@@ -532,6 +532,9 @@ CRITICAL RULES:
 6. Generate at least 7-10 top-level components for the home page using a varied mix.
 7. Do NOT wrap blocks in Section/Container/Stack/Grid — the editor will silently flatten them. Use per-block tone instead.
 8. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array. Every page must include is_home (boolean), name, slug, seo, and puck_root.
+9. **EVERY block MUST carry meaningful content.** No empty blocks, no orphan tagline-only blocks, no RichTextSection containing a single half-finished sentence. If you'd emit a block whose only content is a stray phrase ("And let me help you achieve your full potential"), instead attach that phrase to the FOLLOWING block as its description/subheading. Standalone "tagline" blocks are forbidden — every block needs at least: a heading + (body OR cta OR image OR items[]).
+10. **When a section has imageAspect=wide (a banner/wordmark/podcast badge) or imageAspect=tall (a phone screenshot/poster), DO NOT use it as a hero or media-section image with cover crop — emit it inside a LogoCloud, FeatureGrid item.image, or set the block's imageAspect prop to "wide" so the renderer letterboxes instead of stretching.**
+11. **Hero image position: when the source image's position=left or position=right, set imagePosition on the HeroSection prop accordingly so the renderer mirrors the source layout.** Default for split heroes when unspecified: imagePosition="left" (matches the most common modern landing-page pattern).
 
 Mapping guide for source patterns:
 - First band with one big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set, subheading + ctaText REQUIRED.
@@ -609,6 +612,29 @@ func hexByte(s string) byte {
 		}
 	}
 	return n
+}
+
+// imageAspectCategory bucks an extracted image's pixel dimensions into one
+// of the renderer's supported aspect modes. Wide banners (>=2:1) get
+// letterboxed; ultra-tall portraits (taller than 1.5:1) likewise. Standard
+// 4:3-ish photos get cover-cropped. The returned token flows through the
+// prompt and ends up as `imageAspect` on the emitted block, which the
+// renderer reads to set object-fit and the data-aspect attribute.
+func imageAspectCategory(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	r := float64(w) / float64(h)
+	switch {
+	case r >= 1.9:
+		return "wide" // banner / podcast badge / wordmark — DON'T cover-crop
+	case r <= 0.75:
+		return "tall" // poster / phone screenshot — letterbox
+	case r >= 1.25 && r < 1.9:
+		return "landscape"
+	default:
+		return "square" // ~1:1 photos
+	}
 }
 
 // firstHeading returns the heading of the first non-empty source section,
@@ -782,6 +808,16 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 	// keeps mistaking it for a Hero with a "Log in" CTA. Inject an
 	// explicit per-clone override above the bands so the rule is
 	// impossible to miss.
+	// If the very first source section has NO heading but DOES have an
+	// image (Kajabi/Squarespace pattern: hero is a CSS background or a
+	// graphic-text image that the crawler can't read), the LLM tends to
+	// drop it because rule 9 forbids empty blocks. Inject an explicit
+	// override telling the LLM to emit it as a HeroSection using the
+	// site title as the heading.
+	if len(cleanSections) > 0 && strings.TrimSpace(cleanSections[0].Heading) == "" && cleanSections[0].ImageURL != "" {
+		sb.WriteString("\n## CRITICAL OVERRIDE — FIRST SECTION HAS IMAGE BUT NO TEXT\n")
+		sb.WriteString(fmt.Sprintf("Source section 0 is the page hero — it has an image (%s) but the crawler couldn't extract its heading text (likely rendered as graphic, in a CSS background, or as a custom font in a deeply-nested element). DO NOT drop this section. Emit Block 0 as HeroSection variant=\"split\" (or variant=\"image\" if imageAspect=wide and imagePosition=background) using:\n  heading = the site name from the page title (or %q),\n  subheading = the meta description if available,\n  imageUrl = %s,\n  imageAspect = pass through whatever [aspect=…] hint appears in the source listing,\n  imagePosition = pass through [position=…] when shown.\nIf the image is a logo/wordmark (small width, ends in .svg or .png with brand-name in filename), use variant=\"centered\" instead and put the logo in the eyebrow with a short tagline as heading.\n", cleanSections[0].ImageURL, req.SiteName, cleanSections[0].ImageURL))
+	}
 	if isNewsletterHeading(firstHeading(cleanSections)) {
 		sb.WriteString("\n## CRITICAL OVERRIDE FOR THIS CLONE\n")
 		first := firstSectionWithHeading(cleanSections)
@@ -874,7 +910,16 @@ func BuildSiteDuplicatePrompt(req SiteDuplicateRequest) string {
 				sb.WriteString(fmt.Sprintf("    Body: %s\n", body))
 			}
 			if section.ImageURL != "" {
-				sb.WriteString(fmt.Sprintf("    Image: %s (alt: %s)\n", section.ImageURL, section.ImageAlt))
+				aspect := imageAspectCategory(section.ImageWidth, section.ImageHeight)
+				pos := section.ImagePosition
+				extra := ""
+				if aspect != "" {
+					extra = fmt.Sprintf("  [aspect=%s, %dx%d]", aspect, section.ImageWidth, section.ImageHeight)
+				}
+				if pos != "" {
+					extra += fmt.Sprintf("  [position=%s]", pos)
+				}
+				sb.WriteString(fmt.Sprintf("    Image: %s (alt: %s)%s\n", section.ImageURL, section.ImageAlt, extra))
 			}
 			if section.CTAText != "" {
 				sb.WriteString(fmt.Sprintf("    CTA: %q → %s\n", section.CTAText, section.CTAUrl))

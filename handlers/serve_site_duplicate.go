@@ -235,6 +235,9 @@ type sandboxSection struct {
 	Body               string             `json:"body"`
 	ImageURL           string             `json:"imageURL"`
 	ImageAlt           string             `json:"imageAlt"`
+	ImageWidth         int                `json:"imageWidth"`
+	ImageHeight        int                `json:"imageHeight"`
+	ImagePosition      string             `json:"imagePosition"`
 	CTAText            string             `json:"ctaText"`
 	CTAUrl             string             `json:"ctaUrl"`
 	IsDark             bool               `json:"isDark"`
@@ -298,6 +301,9 @@ func crawlViaSandbox(sandboxBaseURL, targetURL string) (*crawledSite, error) {
 			Body:               s.Body,
 			ImageURL:           s.ImageURL,
 			ImageAlt:           s.ImageAlt,
+			ImageWidth:         s.ImageWidth,
+			ImageHeight:        s.ImageHeight,
+			ImagePosition:      s.ImagePosition,
 			CTAText:            s.CTAText,
 			CTAUrl:             s.CTAUrl,
 			IsDark:             s.IsDark,

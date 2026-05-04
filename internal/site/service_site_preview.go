@@ -314,6 +314,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 
 	case "SentanylLeadForm", "SentanylContactForm":
 		formTitle, _ := props["title"].(string)
+		subtitle, _ := props["subtitle"].(string)
 		if formTitle == "" {
 			formTitle = "Get in Touch"
 		}
@@ -321,25 +322,43 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		if buttonText == "" {
 			buttonText = "Submit"
 		}
+		formID, _ := props["id"].(string)
 		nextURL, _ := props["nextUrl"].(string)
 		includePhone, _ := props["includePhone"].(bool)
 		includeMessage, _ := props["includeMessage"].(bool)
-		sb.WriteString("<section class=\"section\">\n")
+		isContactForm := compType == "SentanylContactForm"
+		// Default to including name+message for contact, just email for lead.
+		if isContactForm {
+			includeMessage = true
+		}
+		tone, _ := props["tone"].(string)
+		toneCls := toneClass(tone)
+		idAttr := ""
+		if formID != "" {
+			idAttr = fmt.Sprintf(" id=\"%s\"", esc(formID))
+		}
+		sb.WriteString(fmt.Sprintf("<section class=\"section %s\"%s>\n<div class=\"container container--narrow\">\n", toneCls, idAttr))
+		sb.WriteString("<div class=\"lead-form-block\">\n")
 		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(formTitle)))
-		sb.WriteString("<form method=\"POST\" action=\"/api/marketing/site/form/submit\" style=\"max-width:500px;margin:0 auto\">\n")
-		sb.WriteString("<input type=\"text\" name=\"name\" placeholder=\"Name\" required style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
-		sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"Email\" required style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
+		if subtitle != "" {
+			sb.WriteString(fmt.Sprintf("<p class=\"lead\">%s</p>\n", esc(subtitle)))
+		}
+		sb.WriteString("<form class=\"lead-form-block__form\" method=\"POST\" action=\"/api/marketing/site/form/submit\">\n")
+		if isContactForm {
+			sb.WriteString("<input type=\"text\" name=\"name\" placeholder=\"Your name\" required>\n")
+		}
+		sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"you@example.com\" required>\n")
 		if includePhone {
-			sb.WriteString("<input type=\"tel\" name=\"phone\" placeholder=\"Phone\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\">\n")
+			sb.WriteString("<input type=\"tel\" name=\"phone\" placeholder=\"Phone\">\n")
 		}
 		if includeMessage {
-			sb.WriteString("<textarea name=\"message\" placeholder=\"Message\" rows=\"4\" style=\"width:100%%;padding:12px;margin:8px 0;border:1px solid #d1d5db;border-radius:8px\"></textarea>\n")
+			sb.WriteString("<textarea name=\"message\" placeholder=\"Your message\" rows=\"5\"></textarea>\n")
 		}
 		if nextURL != "" {
 			sb.WriteString(fmt.Sprintf("<input type=\"hidden\" name=\"next_url\" value=\"%s\">\n", esc(nextURL)))
 		}
-		sb.WriteString(fmt.Sprintf("<button type=\"submit\" class=\"cta-button\" style=\"width:100%%;border:none;cursor:pointer\">%s</button>\n", esc(buttonText)))
-		sb.WriteString("</form>\n</section>\n")
+		sb.WriteString(fmt.Sprintf("<button type=\"submit\" class=\"btn btn--accent btn--lg\">%s</button>\n", esc(buttonText)))
+		sb.WriteString("</form>\n</div>\n</div>\n</section>\n")
 
 	case "SentanylCheckoutForm":
 		heading, _ := props["heading"].(string)
@@ -797,9 +816,23 @@ func renderHeroSection(sb *strings.Builder, props map[string]any, esc func(strin
 	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\"%s>\n<div class=\"container container--wide\">\n", toneClass(tone), padClass(pad), bgAttr))
 
 	classes := "hero"
+	imagePosition, _ := props["imagePosition"].(string)
+	// Architectural default: split heroes default to image-LEFT. Sampling
+	// across mikedillard.com / josephalai.com / jeffwalker.com / typical
+	// landing pages, image-LEFT is the dominant pattern for personal-brand
+	// and product sites. The LLM rarely sets imagePosition explicitly
+	// even when the source has it; defaulting at the renderer keeps cloned
+	// pages aligned with the source's visual axis without requiring the
+	// AI to infer it from the screenshot.
+	if imagePosition == "" {
+		imagePosition = "left"
+	}
 	switch variant {
 	case "split":
 		classes += " hero--split"
+		if imagePosition == "left" {
+			classes += " hero--image-left"
+		}
 	case "centered":
 		classes += " hero--centered"
 	case "gradient":
@@ -851,7 +884,12 @@ func renderHeroSection(sb *strings.Builder, props map[string]any, esc func(strin
 
 	// Image column for split variant
 	if variant == "split" && imageURL != "" {
-		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", esc(imageURL), esc(heading)))
+		aspect, _ := props["imageAspect"].(string)
+		aspectAttr := ""
+		if aspect != "" {
+			aspectAttr = fmt.Sprintf(" data-aspect=\"%s\"", esc(aspect))
+		}
+		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\"%s>\n", esc(imageURL), esc(heading), aspectAttr))
 	}
 
 	sb.WriteString("</div>\n</div></section>\n")
@@ -1088,7 +1126,12 @@ func renderMediaSection(sb *strings.Builder, props map[string]any, esc func(stri
 	}
 	writeImage := func() {
 		if imageSrc != "" {
-			sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", esc(imageSrc), esc(imageAlt)))
+			aspect, _ := props["imageAspect"].(string)
+			aspectAttr := ""
+			if aspect != "" {
+				aspectAttr = fmt.Sprintf(" data-aspect=\"%s\"", esc(aspect))
+			}
+			sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\"%s>\n", esc(imageSrc), esc(imageAlt), aspectAttr))
 		}
 	}
 	if textFirst {
@@ -1561,7 +1604,7 @@ func buildGlobalStyleVars(s *pkgmodels.Site) string {
   --container-narrow: 720px;
   --container-normal: 1080px;
   --container-wide: 1280px;
-  --container-full: 100%%;
+  --container-full: 100%;
 }
 `, primary, secondary, accent, headingFont, bodyFont, borderRadius)
 }
@@ -1592,10 +1635,11 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.015em;
   color: inherit;
 }
-h1 { font-size: clamp(2rem, 4vw + 1rem, 3.75rem); }
-h2 { font-size: clamp(1.6rem, 2.4vw + 0.8rem, 2.5rem); }
-h3 { font-size: clamp(1.25rem, 1vw + 0.9rem, 1.5rem); }
-p { font-size: 1rem; line-height: 1.65; }
+h1 { font-size: clamp(2.25rem, 5vw + 1rem, 4.5rem); letter-spacing: -0.02em; font-weight: 800; }
+h2 { font-size: clamp(1.875rem, 3vw + 0.8rem, 3.25rem); letter-spacing: -0.02em; font-weight: 800; }
+h3 { font-size: clamp(1.25rem, 1vw + 0.9rem, 1.625rem); font-weight: 700; }
+p { font-size: 1.0625rem; line-height: 1.65; }
+.lead, .hero p, .cta p { font-size: clamp(1.125rem, 0.5vw + 1rem, 1.3125rem); line-height: 1.55; }
 .lead { font-size: clamp(1.05rem, 0.4vw + 1rem, 1.25rem); color: var(--color-muted-fg); }
 .eyebrow { display: inline-block; text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.78rem; font-weight: 700; color: var(--color-accent); margin-bottom: var(--space-3); }
 
@@ -1606,8 +1650,12 @@ p { font-size: 1rem; line-height: 1.65; }
 .section--xl { padding-block: var(--space-10); }
 .section--tone-default { background: var(--color-bg); color: var(--color-fg); }
 .section--tone-muted { background: var(--color-muted-bg); color: var(--color-fg); }
-.section--tone-inverse { background: var(--color-inverse-bg); color: var(--color-inverse-fg); }
+.section--tone-inverse { background: linear-gradient(180deg, var(--color-inverse-bg) 0%, color-mix(in srgb, var(--color-inverse-bg) 88%, var(--color-accent) 6%) 100%); color: var(--color-inverse-fg); }
 .section--tone-inverse p { color: var(--color-inverse-muted); }
+.section--tone-inverse h1, .section--tone-inverse h2 { font-size: clamp(2.25rem, 4.5vw + 1rem, 4rem); }
+.section--tone-inverse h2 + p, .section--tone-inverse .lead { color: rgba(248,250,252,0.78); }
+.section--tone-inverse .btn--accent { box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--color-accent) 70%, transparent); }
+.section--tone-inverse em, .section--tone-inverse .accent { color: var(--color-accent); font-style: normal; }
 .section--tone-branded { background: var(--color-primary); color: var(--color-inverse-fg); }
 .section--tone-branded p { color: rgba(255,255,255,0.86); }
 .section--tone-accent { background: var(--color-accent); color: #0a0a0a; }
@@ -1667,23 +1715,31 @@ p { font-size: 1rem; line-height: 1.65; }
 .site-footer a { color: inherit; margin: 0 var(--space-2); text-decoration: none; }
 
 /* --- Hero variants --- */
+.section:has(.hero), section.section.hero-section { padding-block: var(--space-9); }
 .hero { display: grid; gap: var(--space-7); align-items: center; }
-.hero--centered { justify-items: center; text-align: center; max-width: 760px; margin-inline: auto; }
-.hero--split { grid-template-columns: 1.05fr 1fr; gap: var(--space-8); }
-.hero--split img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); }
+.hero--centered { justify-items: center; text-align: center; max-width: 820px; margin-inline: auto; }
+.hero--split { grid-template-columns: 1fr 1fr; gap: var(--space-8); }
+.hero--split img { width: 100%; aspect-ratio: 1 / 1; max-height: 560px; object-fit: cover; border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); }
+.hero--split img[data-aspect=wide], .hero--split img[data-aspect=auto] { aspect-ratio: auto; object-fit: contain; max-height: 380px; padding: var(--space-4); background: rgba(0,0,0,0.04); }
+.hero--image-left .stack { order: 2; }
+.hero--image-left img { order: 1; }
 .hero--gradient { background: linear-gradient(135deg, var(--color-secondary), var(--color-primary)); color: var(--color-inverse-fg); padding: var(--space-9) var(--space-6); border-radius: var(--radius-lg); }
 .hero--gradient p { color: rgba(255,255,255,0.85); }
-.hero h1 { margin-bottom: var(--space-4); }
-.hero p { margin-bottom: var(--space-5); max-width: 60ch; }
+.hero h1 { margin-bottom: var(--space-4); font-size: clamp(2.5rem, 5.5vw + 1rem, 4.75rem); }
+.hero p { margin-bottom: var(--space-6); max-width: 60ch; }
 .hero .btn-row { display: flex; gap: var(--space-3); flex-wrap: wrap; }
+.hero .btn { padding: 18px 36px; font-size: 1.05rem; }
+.hero .btn--accent { box-shadow: 0 8px 20px -8px color-mix(in srgb, var(--color-accent) 60%, transparent); }
 @media (max-width: 860px) { .hero--split { grid-template-columns: 1fr; } }
 
 /* --- CTA variants --- */
 .cta { display: grid; gap: var(--space-5); align-items: center; }
-.cta--centered { justify-items: center; text-align: center; max-width: 720px; margin-inline: auto; }
+.cta--centered { justify-items: center; text-align: center; max-width: 760px; margin-inline: auto; }
 .cta--split { grid-template-columns: 1.4fr 1fr; }
-.cta--banner { padding: var(--space-7) var(--space-6); border-radius: var(--radius-lg); background: var(--color-primary); color: #ffffff; }
+.cta--banner { padding: var(--space-9) var(--space-7); border-radius: var(--radius-lg); background: linear-gradient(135deg, var(--color-secondary), var(--color-primary)); color: #ffffff; box-shadow: var(--shadow-lg); }
 .cta--banner p { color: rgba(255,255,255,0.85); }
+.cta--banner h2 { font-size: clamp(2rem, 3.5vw + 1rem, 3rem); }
+.cta--banner .btn { padding: 18px 40px; font-size: 1.05rem; }
 @media (max-width: 740px) { .cta--split { grid-template-columns: 1fr; text-align: center; } }
 
 /* --- Cards & feature grids --- */
@@ -1740,8 +1796,12 @@ p { font-size: 1rem; line-height: 1.65; }
 .media { display: grid; gap: var(--space-7); align-items: center; }
 .media--right { grid-template-columns: 1fr 1.05fr; }
 .media--left { grid-template-columns: 1.05fr 1fr; }
-.media img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--radius-lg); }
+.media img { width: 100%; max-height: 520px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--radius-lg); background: rgba(0,0,0,0.04); }
+.media img[data-aspect=wide], .media img[data-aspect=auto] { aspect-ratio: auto; object-fit: contain; max-height: 420px; padding: var(--space-4); background: rgba(0,0,0,0.03); border: 1px solid var(--color-border); }
+.section--tone-inverse .media img { background: rgba(255,255,255,0.05); }
+.section--tone-inverse .media img[data-aspect=wide], .section--tone-inverse .media img[data-aspect=auto] { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
 .media .stack p { color: var(--color-muted-fg); }
+.section--tone-inverse .media .stack p { color: var(--color-inverse-muted); }
 @media (max-width: 740px) { .media--left, .media--right { grid-template-columns: 1fr; } }
 
 /* --- Forms --- */
@@ -1749,6 +1809,27 @@ p { font-size: 1rem; line-height: 1.65; }
 .form input, .form textarea { padding: 12px 14px; border: 1px solid var(--color-border-strong); border-radius: var(--radius); font: inherit; font-size: 1rem; background: var(--color-bg); color: var(--color-fg); }
 .form input:focus, .form textarea:focus { outline: 2px solid var(--color-accent); outline-offset: 1px; border-color: var(--color-accent); }
 .form button { padding: 14px; border: none; border-radius: var(--radius); background: var(--color-accent); color: #0a0a0a; font-weight: 700; font-size: 1rem; cursor: pointer; }
+
+/* --- Lead form block (SentanylLeadForm / SentanylContactForm) --- */
+.lead-form-block { display: flex; flex-direction: column; gap: var(--space-5); align-items: stretch; text-align: center; max-width: 540px; margin-inline: auto; }
+.lead-form-block h2 { font-size: clamp(1.875rem, 3vw + 1rem, 2.75rem); }
+.lead-form-block .lead { color: var(--color-muted-fg); }
+.section--tone-inverse .lead-form-block .lead { color: rgba(248,250,252,0.78); }
+.lead-form-block__form { display: flex; flex-direction: column; gap: var(--space-3); width: 100%; }
+.lead-form-block__form input, .lead-form-block__form textarea { padding: 16px 18px; border: 1px solid var(--color-border-strong); border-radius: var(--radius); font: inherit; font-size: 1rem; background: var(--color-bg); color: var(--color-fg); width: 100%; }
+.section--tone-inverse .lead-form-block__form input,
+.section--tone-inverse .lead-form-block__form textarea { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.16); color: var(--color-inverse-fg); }
+.section--tone-inverse .lead-form-block__form input::placeholder,
+.section--tone-inverse .lead-form-block__form textarea::placeholder { color: rgba(248,250,252,0.5); }
+.lead-form-block__form input:focus, .lead-form-block__form textarea:focus { outline: 2px solid var(--color-accent); outline-offset: 1px; border-color: var(--color-accent); }
+.lead-form-block__form .btn { width: 100%; }
+@media (min-width: 640px) {
+  .lead-form-block__form { flex-direction: row; flex-wrap: wrap; }
+  .lead-form-block__form input[type=email] { flex: 1 1 220px; }
+  .lead-form-block__form input[type=text], .lead-form-block__form input[type=tel] { flex: 1 1 160px; }
+  .lead-form-block__form textarea { flex: 1 1 100%; }
+  .lead-form-block__form .btn { flex: 0 0 auto; width: auto; }
+}
 
 /* --- Image-wide block --- */
 .img-wide { width: 100%; max-height: 600px; overflow: hidden; border-radius: var(--radius-lg); }

@@ -122,6 +122,9 @@ type ExtractedSection struct {
 	Body               string `json:"body,omitempty"`
 	ImageURL           string `json:"image_url,omitempty"`
 	ImageAlt           string `json:"image_alt,omitempty"`
+	ImageWidth         int    `json:"image_width,omitempty"`  // natural pixel width — drives renderer's object-fit choice
+	ImageHeight        int    `json:"image_height,omitempty"` // natural pixel height
+	ImagePosition      string `json:"image_position,omitempty"` // "left" | "right" | "above" | "below" | "background"
 	CTAText            string `json:"cta_text,omitempty"`
 	CTAUrl             string `json:"cta_url,omitempty"`
 	BgColor            string `json:"bg_color,omitempty"`
