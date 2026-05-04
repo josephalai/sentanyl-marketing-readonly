@@ -526,17 +526,26 @@ CRITICAL RULES:
 8. The response must be the same JSON structure as GenerateSite: site_name, theme, navigation, seo, pages array. Every page must include is_home (boolean), name, slug, seo, and puck_root.
 
 Mapping guide for source patterns:
-- First band with one big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set.
+- First band with one big heading + tagline + image side-by-side → HeroSection variant="split", imageUrl set, subheading + ctaText REQUIRED.
 - First band with heading + tagline + button on a dark photo → HeroSection variant="image", backgroundImage set, tone="inverse".
-- A band of customer/partner logos → LogoCloud.
-- A band of 3-4 parallel icon+title+body sections → ONE FeatureGrid block with items[].
+- **Newsletter / email signup section** (heading like "Get my newsletter", "Subscribe", "Join 100k+", section containing an email input or "Submit") → ONE SentanylLeadForm with title=heading, buttonText="Subscribe" (or the source's submit text). NEVER a HeroSection with a "Log in" button — the conversion event is the email capture, not a login.
+- A heading like "Join 100,000+ subscribers", "Trusted by 5M readers", "Used by 12k teams" with one or two big numbers and minimal body → ONE Stats block (extract the numbers as items, not a Hero).
+- A row of customer/partner logos → LogoCloud.
+- A band of 3-4 parallel icon+title+body sections (often under a parent heading like "Here's how I can help" or "What you get") → ONE FeatureGrid block with the parent heading and N items.
 - A band with a single image+text section → ONE MediaSection (alternate layout left/right between consecutive MediaSections).
 - A band of 3-4 metric/number callouts → ONE Stats block.
 - A band of pricing tiers → ONE Pricing block (mark the most popular tier featured: true).
 - A band of customer quotes → ONE TestimonialsSection variant="cards" (or "quote" for a single big featured quote).
 - A band of FAQ items → ONE FAQSection (variant="cols" if 6+ items).
-- Newsletter/email signup → SentanylLeadForm.
+- A row of podcast / app / store badges (Apple Podcasts, Spotify, App Store) → LogoCloud with the brand names.
 - Closing band with a heading + button → ONE CTASection variant="banner".
+
+DO NOT emit:
+- A trailing section that is just a copyright string ("© Brand 2026 | Privacy | Terms") — the site footer is rendered by the navigation config; do not include it as a content block.
+- A standalone HeroSection for an intra-page section heading. If you see a heading like "Here's how I can help" or "What's included" or "Learn how to make money" without its own image and primary CTA, attach it as the heading on the FOLLOWING block (FeatureGrid heading, MediaSection heading, Stats heading), do NOT make it its own Hero.
+- More than ONE HeroSection per page. Subsequent visual anchors should be MediaSection, FeatureGrid, or Stats.
+
+Required Hero fields: every HeroSection MUST set heading AND (subheading OR description) AND ctaText AND ctaUrl. Do not omit them. If the source's primary CTA is an email signup, swap the HeroSection for a SentanylLeadForm and let the next block carry the brand pitch.
 
 ` + componentSchemaReference
 

@@ -747,7 +747,18 @@ func renderGridContainer(sb *strings.Builder, props map[string]any, tenantID bso
 func renderHeroSection(sb *strings.Builder, props map[string]any, esc func(string) string) {
 	heading, _ := props["heading"].(string)
 	subheading, _ := props["subheading"].(string)
+	if subheading == "" {
+		// LLMs sometimes use "tagline" / "subtitle" — alias them.
+		subheading, _ = props["tagline"].(string)
+		if subheading == "" {
+			subheading, _ = props["subtitle"].(string)
+		}
+	}
 	description, _ := props["description"].(string)
+	if description == "" {
+		// Common LLM drift: "body" used in place of "description".
+		description, _ = props["body"].(string)
+	}
 	ctaText, _ := props["ctaText"].(string)
 	ctaURL, _ := props["ctaUrl"].(string)
 	secondaryCTAText, _ := props["secondaryCtaText"].(string)
