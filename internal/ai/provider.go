@@ -91,11 +91,22 @@ type PostFromBriefRequest struct {
 	BrandProfile  string   `json:"brand_profile,omitempty"`
 }
 
+// EmailBlockTypeCampaign signals to email-AI providers that the call is for a
+// one-off campaign. Providers may emit an additional audience_suggestion field
+// in the result. Empty string means "transactional/template email" — original
+// provider behaviour preserved.
+const (
+	EmailBlockTypeCampaign      = "campaign"
+	EmailBlockTypeTransactional = "transactional"
+)
+
 // EmailGenerationRequest is the input for AI email generation.
 type EmailGenerationRequest struct {
 	Instruction   string   `json:"instruction"`
 	ContextChunks []string `json:"context_chunks,omitempty"` // text from context packs
 	BrandProfile  string   `json:"brand_profile,omitempty"`  // brand voice/positioning summary
+	BlockType     string   `json:"block_type,omitempty"`     // "campaign" | "" (transactional)
+	BadgeCatalog  []string `json:"badge_catalog,omitempty"`  // list of available badges by name/public_id
 }
 
 // EmailEditRequest is the input for AI email editing.
@@ -107,11 +118,21 @@ type EmailEditRequest struct {
 	BrandProfile   string   `json:"brand_profile,omitempty"`
 }
 
+// CampaignAudienceSuggestion holds the LLM's recommended audience badges for a
+// generated campaign. Only populated when EmailGenerationRequest.BlockType ==
+// EmailBlockTypeCampaign.
+type CampaignAudienceSuggestion struct {
+	MustHave    []string `json:"must_have,omitempty"`
+	MustNotHave []string `json:"must_not_have,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
 // EmailGenerationResult is the output of AI email generation.
 type EmailGenerationResult struct {
-	Subject string `json:"subject"`
-	Body    string `json:"body"` // HTML body
-	Summary string `json:"summary,omitempty"`
+	Subject  string `json:"subject"`
+	Body     string `json:"body"` // HTML body
+	Summary  string `json:"summary,omitempty"`
+	Audience *CampaignAudienceSuggestion `json:"audience_suggestion,omitempty"`
 }
 
 // ExtractedSection holds one structural section parsed from a crawled page.

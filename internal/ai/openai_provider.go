@@ -513,8 +513,13 @@ func (p *OpenAIProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggest
 }
 
 func (p *OpenAIProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {
+	systemPrompt := emailGenerationSystemPrompt
 	prompt := buildEmailGenerationPrompt(req.Instruction, req.ContextChunks, req.BrandProfile)
-	resp, err := p.chatCompletion(prompt, emailGenerationSystemPrompt)
+	if req.BlockType == EmailBlockTypeCampaign {
+		systemPrompt = campaignEmailSystemPrompt
+		prompt = buildCampaignGenerationPrompt(req)
+	}
+	resp, err := p.chatCompletion(prompt, systemPrompt)
 	if err != nil {
 		return nil, err
 	}

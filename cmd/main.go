@@ -95,6 +95,11 @@ func main() {
 	routes.RegisterEmailRoutes(api)
 	routes.RegisterOutboundWebhookRoutes(api)
 
+	// Public campaign click tracker — recipients have no JWT, so this lives
+	// outside the tenant-auth group. Engine-level register since it's not
+	// confined to /api/marketing.
+	routes.RegisterCampaignTrackingRoutes(r)
+
 	// Protected tenant routes (require JWT).
 	// Scoped under /api/marketing/tenant/* to avoid collisions with public routes above.
 	// Caddy routes all /api/marketing/* to this service, so both are reachable.
@@ -129,6 +134,10 @@ func main() {
 
 	// Email AI generation and editing.
 	handlers.RegisterEmailAIRoutes(legacyTenantAPI)
+
+	// Campaigns — one-off email sends with badge-defined audience.
+	routes.RegisterCampaignRoutes(legacyTenantAPI)
+	handlers.RegisterCampaignAIRoutes(legacyTenantAPI)
 
 	// Newsletter authoring AI (post generation + editing).
 	handlers.RegisterNewsletterAIRoutes(legacyTenantAPI)

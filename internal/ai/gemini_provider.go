@@ -101,8 +101,13 @@ func (p *GeminiProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggest
 }
 
 func (p *GeminiProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenerationResult, error) {
+	systemPrompt := emailGenerationSystemPrompt
 	prompt := buildEmailGenerationPrompt(req.Instruction, req.ContextChunks, req.BrandProfile)
-	resp, err := p.generateContent(emailGenerationSystemPrompt + "\n\n" + prompt)
+	if req.BlockType == EmailBlockTypeCampaign {
+		systemPrompt = campaignEmailSystemPrompt
+		prompt = buildCampaignGenerationPrompt(req)
+	}
+	resp, err := p.generateContent(systemPrompt + "\n\n" + prompt)
 	if err != nil {
 		return nil, err
 	}
