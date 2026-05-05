@@ -73,14 +73,16 @@ func (p *OpenAIProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
 // sections (forms, multi-card grids, image-heavy hero variants).
 const visionAddendum = `
 
-VISION CONTEXT:
-You also have the source page's screenshot attached. The structured section list above is the crawler's BEST EFFORT — the screenshot is ground truth. Use the image to:
-- Resolve mis-grouped sections (e.g. 3 separate "card sections" in the text list are usually one FeatureGrid in the screenshot — emit ONE FeatureGrid).
-- Detect content the crawler missed (forms, logo rows, stat callouts, pricing tiers, navigation prominence).
-- Verify hero variant: split (image side-by-side), image (background photo with text overlaid), centered (text-only centered), or gradient.
-- Match background tone bands to what you see (dark-on-light, alternating tones, full-bleed photo backgrounds).
-- Pick block density — when the screenshot shows tightly packed sections, emit density="compact"; when airy, density="spacious".
-The screenshot is the home page only. For nav-derived inner pages, you still synthesize content per the page hint.`
+VISION CONTEXT — the screenshot is ground truth, the text list is best-effort.
+
+REQUIRED reconciliation pass before you write JSON:
+1. **Card-grid census.** Scan the screenshot top-to-bottom. For EVERY visible "row of cards" (3+ tiles laid out horizontally — feature cards, service cards, "how it works" steps, recent posts, team grid, social-proof logos), you MUST emit ONE FeatureGrid (or LogoCloud / Pricing / Stats — whichever fits) with the right number of items. The crawler under-detects these because each card is often its own DOM section in builder pages (Elementor, Webflow). If the screenshot shows 3 cards but the text list shows 3 separate sections, MERGE THEM into a single FeatureGrid block.
+2. **Image-aspect tagging.** For EVERY block whose imageUrl points to a banner / wordmark / logo / podcast badge / phone screenshot (any image visibly wider than ~2:1 OR taller than ~1.5:1 in the screenshot), set imageAspect="wide" or "tall" so the renderer letterboxes instead of cover-cropping. This single rule prevents the most common visual defect — a horizontal logo stretched to fill a square media slot.
+3. **Hero direction.** Look at the screenshot's first content band. Is the photo on the LEFT or RIGHT of the headline? Set imagePosition="left" or "right" on the HeroSection accordingly. Default DOM order produces image-right; only set imagePosition explicitly if you see image-LEFT.
+4. **Tone band fidelity.** Walk the screenshot top-to-bottom. Count distinct background "bands" (e.g. white → dark gray → white → dark gradient → final dark CTA = 5 bands, 3 inverse). Your emitted blocks' tone props must produce the same alternation. If the screenshot is 60%+ dark, default tone=inverse and use default/muted as the contrast accent.
+5. **Density / pacing.** When the screenshot shows tightly packed sections, emit paddingY="md"; when airy, paddingY="lg" or "xl".
+
+The screenshot is the home page only. For nav-derived inner pages, you still synthesize content per the page hint, but apply rules 2–5 to those too based on page intent.`
 
 // chatCompletionVisionJSON sends a vision request to GPT-4o with an image
 // AND requests json_object output. Used by DuplicateSite when a home-page
