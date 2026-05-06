@@ -291,6 +291,7 @@ func buildFunnelSlotPrompt(instruction string, tmpl pkgmodels.FunnelTemplate, co
 
 	if tmpl.SlotManifest != nil && len(tmpl.SlotManifest.Slots) > 0 {
 		sb.WriteString("SLOTS TO FILL:\n")
+		hasSentanylSlot := false
 		for _, slot := range tmpl.SlotManifest.Slots {
 			sb.WriteString(fmt.Sprintf("- %s (%s): %s", slot.Key, slot.Label, slot.SlotType))
 			if slot.MaxWords > 0 {
@@ -303,10 +304,29 @@ func buildFunnelSlotPrompt(instruction string, tmpl pkgmodels.FunnelTemplate, co
 				sb.WriteString(fmt.Sprintf(" — %s", slot.Description))
 			}
 			sb.WriteString("\n")
+			if strings.HasPrefix(slot.SlotType, "sentanyl_") {
+				hasSentanylSlot = true
+			}
 		}
 		sb.WriteString("\n")
 		sb.WriteString("Return a JSON object where each key is a slot key and the value is the generated content.\n")
 		sb.WriteString("For 'array' slots, the value should be a JSON array of objects.\n\n")
+
+		// Phase 11B Step 8: when the template's manifest references the
+		// new Sentanyl-aware slot types (video / squeeze / sales) OR
+		// the template_kind is one of the video kinds, surface the
+		// resolution rules so the LLM knows it must return tenant
+		// resource IDs (Media.public_id, PageForm.public_id,
+		// Offer.public_id) rather than free-form HTML.
+		kind := strings.ToLower(strings.TrimSpace(tmpl.TemplateKind))
+		if hasSentanylSlot || kind == "video_sales_letter" || kind == "video_squeeze" {
+			sb.WriteString("SENTANYL RESOURCE SLOTS:\n")
+			sb.WriteString("- sentanyl_video_id: must resolve to a Media.public_id from the tenant. Pick the most recent or most-relevant media. NEVER invent an id; if no media exists, return an empty string and add a note in `_warnings`.\n")
+			sb.WriteString("- sentanyl_squeeze_form_id: must resolve to a PageForm.public_id whose on_submit grants a free product (newsletter, lead magnet). Prefer the form named most recently or one whose name matches the page intent.\n")
+			sb.WriteString("- sentanyl_sales_offer_id: must resolve to an Offer.public_id appropriate to the page's pitch — match by price tier or offer name when the user gave a hint.\n")
+			sb.WriteString("- sentanyl_media_poster_url (optional): direct URL to the poster image for the chosen media.\n")
+			sb.WriteString("These slot values get injected into the augmented `<video data-sentanyl>` block that the runtime player auto-activates; downstream conversion attribution depends on them being correct.\n\n")
+		}
 	} else {
 		sb.WriteString("The template uses {{ render_blocks }} for content insertion.\n")
 		sb.WriteString("Return a JSON object with key 'content' containing the HTML to inject.\n\n")
