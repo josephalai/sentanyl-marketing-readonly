@@ -345,32 +345,99 @@ func resolveFunnelPageByDomain(domain, path string) (string, error) {
 }
 
 // resolveOfferPageByPath tries to match a path segment to an offer public_id.
+// The lookup is tenant-scoped via the request domain so offer public_ids
+// from one tenant cannot resolve on another tenant's domain.
 func resolveOfferPageByPath(domain string, path string) (string, error) {
 	slug := strings.TrimPrefix(path, "/offer/")
 	if slug == path || slug == "" {
 		return "", fmt.Errorf("not an offer path")
 	}
+	tenantID, err := ResolveTenantFromDomain(domain)
+	if err != nil {
+		return "", err
+	}
 	var offer pkgmodels.Offer
-	err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
+	err = db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"public_id":             slug,
+		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
 	}).One(&offer)
 	if err != nil {
 		return "", err
 	}
-	// Generate a simple offer landing page.
+	return renderOfferPage(domain, &offer), nil
+}
+
+// renderOfferPage produces the public offer landing page. The Buy CTA is a
+// JS-driven JSON POST to /api/marketing/site/checkout/start (the endpoint
+// only accepts POST; a bare GET anchor cannot create a Stripe session).
+// Offer ID and domain are pre-filled as data attributes; email is captured
+// inline so we can pass it for duplicate-purchase detection.
+func renderOfferPage(domain string, offer *pkgmodels.Offer) string {
 	var sb strings.Builder
-	sb.WriteString("<!DOCTYPE html><html><head><meta charset=\"UTF-8\">")
-	sb.WriteString(fmt.Sprintf("<title>%s</title>", html.EscapeString(offer.Title)))
-	sb.WriteString("<style>body{font-family:sans-serif;text-align:center;padding:60px 20px} .btn{display:inline-block;padding:12px 32px;background:#4f46e5;color:white;text-decoration:none;border-radius:8px;font-weight:600;margin-top:1rem}</style>")
-	sb.WriteString("</head><body>")
-	sb.WriteString(fmt.Sprintf("<h1>%s</h1>", html.EscapeString(offer.Title)))
+	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="UTF-8">`)
+	sb.WriteString(fmt.Sprintf(`<title>%s</title>`, html.EscapeString(offer.Title)))
+	sb.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	sb.WriteString(`<style>
+body{font-family:-apple-system,Segoe UI,sans-serif;text-align:center;padding:60px 20px;color:#111;background:#fafafa;margin:0}
+.offer{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:48px 32px;box-shadow:0 2px 12px rgba(0,0,0,0.06)}
+.offer h1{font-size:2rem;margin:0 0 12px}
+.offer .price{font-size:2.4rem;font-weight:700;margin:16px 0}
+.offer input{width:100%;padding:12px;border:1px solid #ccc;border-radius:8px;font-size:1rem;box-sizing:border-box;margin:12px 0}
+.btn{display:inline-block;padding:14px 36px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:1rem;width:100%}
+.btn[disabled]{opacity:0.6;cursor:not-allowed}
+.msg{margin-top:14px;color:#c33;min-height:1.2em}
+</style>`)
+	sb.WriteString(`</head><body><div class="offer" data-offer-id="`)
+	sb.WriteString(html.EscapeString(offer.Id.Hex()))
+	sb.WriteString(`" data-domain="`)
+	sb.WriteString(html.EscapeString(domain))
+	sb.WriteString(`">`)
+	sb.WriteString(fmt.Sprintf(`<h1>%s</h1>`, html.EscapeString(offer.Title)))
 	if offer.Amount > 0 {
-		sb.WriteString(fmt.Sprintf("<p style=\"font-size:2rem;font-weight:bold\">$%.2f %s</p>", float64(offer.Amount)/100, html.EscapeString(strings.ToUpper(offer.Currency))))
+		sb.WriteString(fmt.Sprintf(`<div class="price">$%.2f %s</div>`,
+			float64(offer.Amount)/100,
+			html.EscapeString(strings.ToUpper(offer.Currency))))
 	}
-	sb.WriteString("<a class=\"btn\" href=\"/api/marketing/site/checkout/start\">Buy Now</a>")
-	sb.WriteString("</body></html>")
-	return sb.String(), nil
+	sb.WriteString(`<form onsubmit="return startCheckout(event,this)">`)
+	sb.WriteString(`<input type="email" name="email" placeholder="you@example.com" required autocomplete="email">`)
+	sb.WriteString(`<button class="btn" type="submit">Buy Now</button>`)
+	sb.WriteString(`<div class="msg" data-role="msg"></div>`)
+	sb.WriteString(`</form></div>`)
+	sb.WriteString(`<script>
+function startCheckout(ev, form){
+  ev.preventDefault();
+  var root = form.closest('.offer');
+  var msg = form.querySelector('[data-role=msg]');
+  var btn = form.querySelector('button');
+  btn.disabled = true; msg.style.color = '#666'; msg.textContent = 'Starting checkout…';
+  var payload = {
+    offer_id: root.getAttribute('data-offer-id'),
+    domain: root.getAttribute('data-domain') || location.host,
+    email: form.email.value.trim()
+  };
+  fetch('/api/marketing/site/checkout/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(function(r){ return r.json().then(function(j){ return {status:r.status, body:j}; }); })
+    .then(function(res){
+      var j = res.body;
+      if (res.status === 200 && j.checkout_url) { window.location.href = j.checkout_url; return; }
+      if (res.status === 409 && j.redirect_url) { window.location.href = j.redirect_url; return; }
+      msg.style.color = '#c33';
+      msg.textContent = (j && j.error) || 'Checkout failed — try again.';
+      btn.disabled = false;
+    })
+    .catch(function(){
+      msg.style.color = '#c33'; msg.textContent = 'Network error — try again.';
+      btn.disabled = false;
+    });
+  return false;
+}
+</script>`)
+	sb.WriteString(`</body></html>`)
+	return sb.String()
 }
 
 // ServiceAttachDomain attaches a verified domain to a site's attached_domains list.

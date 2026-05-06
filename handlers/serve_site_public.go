@@ -94,9 +94,18 @@ func handlePublicFormSubmit(c *gin.Context) {
 	// form, validate required fields, run the executor, and return its
 	// structured Result.
 	if strings.TrimSpace(req.FormID) != "" {
+		// Tenant-scope the form lookup by request domain. Public public_ids
+		// are not a trust boundary: a tenant's form_id must only resolve on
+		// that tenant's own domains.
+		tenantID, err := site.ResolveTenantFromDomain(domain)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
+			return
+		}
 		var form pkgmodels.PageForm
 		if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
 			"public_id":             req.FormID,
+			"tenant_id":             tenantID,
 			"timestamps.deleted_at": nil,
 		}).One(&form); err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "form not found"})
