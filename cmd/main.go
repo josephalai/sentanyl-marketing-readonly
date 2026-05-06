@@ -169,6 +169,11 @@ func main() {
 	// No auth, public_id only, serves raw HTML directly in the browser.
 	handlers.RegisterSiteViewRoutes(r)
 
+	// Public static assets used by published pages (sentanyl-video.js
+	// runtime player). Mounted on the root engine, not the /api group,
+	// so the URL `/static/sentanyl-video.js` is stable across tenant hosts.
+	handlers.RegisterPublicSiteAssetRoutes(r)
+
 	// Public form submission and checkout routes (no auth — for published websites).
 	handlers.RegisterPublicFormRoutes(api)
 
