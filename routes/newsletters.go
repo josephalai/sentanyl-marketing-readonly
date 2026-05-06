@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/marketing-service/internal/checkout"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
@@ -53,18 +55,22 @@ func RegisterNewsletterTenantRoutes(rg *gin.RouterGroup) {
 }
 
 // RegisterNewsletterCustomerRoutes mounts the customer-facing routes:
-// list-my-newsletters, gated post fetch, upgrade-to-paid checkout-start.
+// list-my-newsletters, gated post fetch, and upgrade-to-paid checkout-start
+// which creates a Stripe Checkout session for a paid tier's linked offer.
 // Caller has already wrapped the group in RequireCustomerAuth.
 func RegisterNewsletterCustomerRoutes(rg *gin.RouterGroup) {
 	rg.GET("/newsletters", handleCustomerListNewsletters)
 	rg.GET("/newsletters/:productId", handleCustomerGetNewsletter)
 	rg.GET("/newsletters/:productId/posts/:postId", handleCustomerGetNewsletterPost)
+	rg.POST("/newsletters/:productId/checkout-start", handleCustomerNewsletterCheckoutStart)
 }
 
-// RegisterNewsletterPublicRoutes mounts the unauth subscribe + double-opt-in
-// + unsubscribe + public newsletter page renderer. The site renderer
-// dispatches /newsletter and /newsletter/<slug> here when the resolved
-// product type is newsletter.
+// RegisterNewsletterPublicRoutes mounts the unauth API surface for
+// subscribe + double-opt-in + unsubscribe + delivery webhook + open/click
+// tracking. The public newsletter page renderer (homepage and post detail)
+// is NOT registered here — it's served by the site renderer at
+// internal/site/service_site_renderer.go which dispatches /newsletter and
+// /newsletter/<slug> to resolveNewsletterPageByPath.
 func RegisterNewsletterPublicRoutes(rg *gin.RouterGroup) {
 	rg.POST("/newsletters/subscribe", handlePublicNewsletterSubscribe)
 	rg.GET("/newsletters/confirm", handlePublicNewsletterConfirm)
@@ -956,6 +962,113 @@ func handleCustomerGetNewsletterPost(c *gin.Context) {
 		"visible_html": splitR.VisibleHTML,
 		"gate":         splitR.GateCTA,
 		"paywall_tier": splitR.PaywallTierID,
+	})
+}
+
+// handleCustomerNewsletterCheckoutStart resolves the paid tier the customer
+// wants to upgrade to, looks up its linked Offer, and returns a Stripe
+// Checkout session URL that uses the tenant's own Stripe credentials.
+// On webhook fulfillment the existing newsletter tier-upgrade path in
+// serve_stripe_webhook.go flips the customer's NewsletterSubscription tier
+// and grants the tier badge — no extra wiring needed here.
+func handleCustomerNewsletterCheckoutStart(c *gin.Context) {
+	tenantID, _, ok := requireCustomer(c)
+	if !ok {
+		return
+	}
+	p, status, msg := loadNewsletter(tenantID, c.Param("productId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var req struct {
+		TierID     string `json:"tier_id"`
+		SuccessURL string `json:"success_url"`
+		CancelURL  string `json:"cancel_url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if req.TierID == "" || !bson.IsObjectIdHex(req.TierID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tier_id required"})
+		return
+	}
+	tid := bson.ObjectIdHex(req.TierID)
+	var tier *pkgmodels.NewsletterTier
+	if p.Newsletter != nil {
+		for _, t := range p.Newsletter.Tiers {
+			if t.Id == tid {
+				tier = t
+				break
+			}
+		}
+	}
+	if tier == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tier not found"})
+		return
+	}
+	if tier.IsFree {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot upgrade to a free tier"})
+		return
+	}
+	if tier.OfferID == "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "tier has no offer attached"})
+		return
+	}
+
+	var offer pkgmodels.Offer
+	if err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
+		"_id":                   tier.OfferID,
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&offer); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "offer not found for tier"})
+		return
+	}
+
+	var tenant pkgmodels.Tenant
+	if err := db.GetCollection(pkgmodels.TenantCollection).FindId(tenantID).One(&tenant); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payment processing is not configured for this business"})
+		return
+	}
+	stripeKey := tenant.StripeSecretKey
+	stripeAcct := ""
+	if stripeKey == "" && tenant.StripeConnectAccountID != "" {
+		stripeKey = os.Getenv("STRIPE_PLATFORM_SECRET_KEY")
+		stripeAcct = tenant.StripeConnectAccountID
+	}
+	if stripeKey == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payment processing is not configured for this business"})
+		return
+	}
+
+	domain := c.GetHeader("X-Forwarded-Host")
+	if domain == "" {
+		domain = c.Request.Host
+	}
+	successURL := req.SuccessURL
+	if successURL == "" {
+		successURL = "/portal/library/newsletters"
+	}
+	cancelURL := req.CancelURL
+	if cancelURL == "" {
+		cancelURL = "/portal/library/newsletters"
+	}
+
+	checkoutURL, err := checkout.CreateStripeCheckoutSession(stripeKey, stripeAcct, &offer, tenantID, successURL, cancelURL, domain, "")
+	if err != nil {
+		log.Printf("newsletter upgrade: stripe session failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":       "ok",
+		"checkout_url": checkoutURL,
+		"offer_id":     offer.Id.Hex(),
+		"tier_id":      tier.Id.Hex(),
+		"amount":       offer.Amount,
+		"currency":     offer.Currency,
 	})
 }
 

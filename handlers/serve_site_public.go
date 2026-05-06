@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/checkout"
 	"github.com/josephalai/sentanyl/marketing-service/internal/forms"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/db"
@@ -399,7 +399,7 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	}
 
 	// Create a Stripe Checkout Session using the tenant's Stripe key.
-	stripeSessionURL, err := createStripeCheckoutSession(stripeKey, stripeAcct, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email))
+	stripeSessionURL, err := CreateStripeCheckoutSession(stripeKey, stripeAcct, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email))
 	if err != nil {
 		log.Printf("Stripe checkout session creation failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
@@ -470,85 +470,10 @@ func alreadyOwnsAllProductsInOffer(tenantID bson.ObjectId, email string, offer *
 	return true
 }
 
-// createStripeCheckoutSession creates a Stripe Checkout Session via the API.
-// Uses the tenant's own Stripe secret key. Metadata (tenant_id, offer_id,
-// domain) is attached to the session and mirrored into payment_intent_data and
-// subscription_data so it survives across Stripe's internal objects and is
-// available to the Stripe webhook handler.
-func createStripeCheckoutSession(stripeKey, stripeAccount string, offer *pkgmodels.Offer, tenantID bson.ObjectId, successURL, cancelURL, domain, customerEmail string) (string, error) {
-	form := url.Values{}
-	form.Set("mode", "payment")
-	form.Set("line_items[0][quantity]", "1")
-	if offer.StripePriceID != "" {
-		form.Set("line_items[0][price]", offer.StripePriceID)
-	} else {
-		form.Set("line_items[0][price_data][currency]", offer.Currency)
-		form.Set("line_items[0][price_data][unit_amount]", fmt.Sprintf("%d", offer.Amount))
-		form.Set("line_items[0][price_data][product_data][name]", offer.Title)
-	}
-
-	scheme := "https"
-	if strings.Contains(domain, "lvh.me") || strings.Contains(domain, "localhost") {
-		scheme = "http"
-	}
-	absSuccess := successURL
-	if !strings.HasPrefix(absSuccess, "http") {
-		absSuccess = scheme + "://" + domain + successURL
-	}
-	absCancel := cancelURL
-	if !strings.HasPrefix(absCancel, "http") {
-		absCancel = scheme + "://" + domain + cancelURL
-	}
-	form.Set("success_url", absSuccess)
-	form.Set("cancel_url", absCancel)
-
-	if customerEmail != "" {
-		form.Set("customer_email", customerEmail)
-	}
-
-	// Session-level metadata is what the webhook reads. Mirror into
-	// payment_intent_data so it survives onto the PaymentIntent too. Stripe
-	// rejects subscription_data unless mode=subscription, so we omit it for
-	// now; add a branch when subscription-mode offers are supported.
-	form.Set("metadata[tenant_id]", tenantID.Hex())
-	form.Set("metadata[offer_id]", offer.Id.Hex())
-	form.Set("metadata[domain]", domain)
-	form.Set("payment_intent_data[metadata][tenant_id]", tenantID.Hex())
-	form.Set("payment_intent_data[metadata][offer_id]", offer.Id.Hex())
-	form.Set("payment_intent_data[metadata][domain]", domain)
-
-	httpReq, err := http.NewRequest("POST", "https://api.stripe.com/v1/checkout/sessions", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.SetBasicAuth(stripeKey, "")
-	if stripeAccount != "" {
-		// Direct charge on a connected account. Stripe routes the charge to
-		// this account and webhooks fire against that account's endpoint.
-		httpReq.Header.Set("Stripe-Account", stripeAccount)
-	}
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("stripe API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var stripeResp struct {
-		URL   string `json:"url"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&stripeResp); err != nil {
-		return "", fmt.Errorf("failed to decode stripe response: %w", err)
-	}
-	if stripeResp.Error != nil {
-		return "", fmt.Errorf("stripe error: %s", stripeResp.Error.Message)
-	}
-	if stripeResp.URL == "" {
-		return "", fmt.Errorf("stripe returned no checkout URL")
-	}
-	return stripeResp.URL, nil
+// CreateStripeCheckoutSession is retained as a thin wrapper around
+// internal/checkout.CreateStripeCheckoutSession. The implementation moved
+// out of handlers so the routes package (newsletter customer upgrade)
+// can call it without an import cycle.
+func CreateStripeCheckoutSession(stripeKey, stripeAccount string, offer *pkgmodels.Offer, tenantID bson.ObjectId, successURL, cancelURL, domain, customerEmail string) (string, error) {
+	return checkout.CreateStripeCheckoutSession(stripeKey, stripeAccount, offer, tenantID, successURL, cancelURL, domain, customerEmail)
 }
