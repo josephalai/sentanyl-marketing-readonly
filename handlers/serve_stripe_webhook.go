@@ -238,15 +238,16 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		log.Printf("[stripe webhook] newsletter tier upgrade: %v", err)
 	}
 
-	// Enroll the contact in every product the offer includes. Try them all
-	// (a single bad product shouldn't block the rest), but if any fail we
-	// return an error so Stripe retries delivery AND the failure is visible
-	// in the Stripe dashboard's webhook log. The lms-service enroll handler
-	// is idempotent on (tenant, contact, product), so retries are safe.
+	// Provision each product included in the offer. Dispatching by product
+	// type wires the right downstream system: courses → LMS enrollment,
+	// services → ServiceEnrollment row, coaching → coaching-service
+	// provisioning, downloads → already covered by badge grant, newsletters
+	// → already covered by tier upgrade above. Each branch is idempotent so
+	// Stripe retries are safe.
 	var enrollFailures []string
 	for _, productID := range offer.IncludedProducts {
-		if err := callInternalEnroll(tenantID, contact.Id, productID); err != nil {
-			log.Printf("[stripe webhook] ENROLL FAILED tenant=%s offer=%s product=%s contact=%s email=%s: %v",
+		if err := provisionProductPurchase(tenantID, contact.Id, productID, offer.Id); err != nil {
+			log.Printf("[stripe webhook] PROVISION FAILED tenant=%s offer=%s product=%s contact=%s email=%s: %v",
 				tenantID.Hex(), offer.Id.Hex(), productID.Hex(), contact.Id.Hex(), email, err)
 			enrollFailures = append(enrollFailures, fmt.Sprintf("%s: %v", productID.Hex(), err))
 		}
@@ -666,6 +667,11 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 			}},
 		); err != nil {
 			log.Printf("[stripe webhook] refund: revoke enrollments: %v", err)
+		}
+		// Mirror the revoke into non-course product types (services, coaching).
+		// downloads/newsletter unwind via badge removal below.
+		for _, productID := range offer.IncludedProducts {
+			revokeProductEntitlements(tenantID, contact.Id, productID, offerID)
 		}
 	}
 
