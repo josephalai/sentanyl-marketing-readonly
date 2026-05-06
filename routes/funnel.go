@@ -66,15 +66,21 @@ func triggerStoryStart(storyName, funnelId, userPublicId string) {
 	log.Printf("triggerStoryStart: story=%q user=%s → HTTP %d", storyName, userPublicId, resp.StatusCode)
 }
 
-// RegisterLegacyTenantFunnelRoutes wires the funnels + purchases list under /api/tenant/*
+// RegisterLegacyTenantFunnelRoutes wires the funnels list under /api/tenant/*
 // so that frontend pages built against the old monolith paths keep working.
-// Caddy routes /api/tenant/funnels* and /api/tenant/purchases* to this service.
+// Caddy routes /api/tenant/funnels* to this service.
+//
+// /api/tenant/purchases (formerly served by handleGetPurchases here, scoped
+// by subscriber_id query param) was superseded by handlers.RegisterPurchasesRoutes
+// in Phase 5 — that handler is tenant-scoped via JWT and returns hydrated
+// DTOs. The legacy handleGetPurchases remains in this file because the
+// /api/marketing/funnels group also registers it (different prefix, no
+// collision); it just isn't mounted on /api/tenant/* anymore.
 func RegisterLegacyTenantFunnelRoutes(rg *gin.RouterGroup) {
 	rg.GET("/funnels", handleGetFunnels)
 	rg.GET("/funnels/:funnelId", handleGetFunnel)
 	rg.POST("/funnels", handleCreateFunnel)
 	rg.DELETE("/funnels/:funnelId", handleDeleteFunnel)
-	rg.GET("/purchases", handleGetPurchases)
 }
 
 // RegisterLegacyFunnelTemplateRoutes wires funnel-template CRUD under /api/funnel/*

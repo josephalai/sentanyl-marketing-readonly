@@ -91,14 +91,14 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	}
 
 	for _, badgePub := range on.AssignBadgeIds {
-		if name, ok := assignBadge(contact.Id, badgePub); ok {
+		if name, ok := assignBadge(form.TenantID, contact.Id, badgePub); ok {
 			res.BadgesAssigned = append(res.BadgesAssigned, name)
 		} else {
 			res.Warnings = append(res.Warnings, "assign_badge: "+badgePub+" not found")
 		}
 	}
 	for _, badgePub := range on.RemoveBadgeIds {
-		if name, ok := removeBadge(contact.Id, badgePub); ok {
+		if name, ok := removeBadge(form.TenantID, contact.Id, badgePub); ok {
 			res.BadgesRemoved = append(res.BadgesRemoved, name)
 		} else {
 			res.Warnings = append(res.Warnings, "remove_badge: "+badgePub+" not found")
@@ -106,14 +106,14 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	}
 
 	for _, listPub := range on.AddToListIds {
-		if name, ok := addToList(contact.Id, listPub); ok {
+		if name, ok := addToList(form.TenantID, contact.Id, listPub); ok {
 			res.ListsAdded = append(res.ListsAdded, name)
 		} else {
 			res.Warnings = append(res.Warnings, "add_to_list: "+listPub+" not found")
 		}
 	}
 	for _, listPub := range on.RemoveFromListIds {
-		if name, ok := removeFromList(contact.Id, listPub); ok {
+		if name, ok := removeFromList(form.TenantID, contact.Id, listPub); ok {
 			res.ListsRemoved = append(res.ListsRemoved, name)
 		} else {
 			res.Warnings = append(res.Warnings, "remove_from_list: "+listPub+" not found")
@@ -185,6 +185,18 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, e
 		"tenant_id": form.TenantID,
 	}).One(&existing)
 	if err == nil {
+		// Backfill SubscriberId on legacy rows (the modern stack stopped
+		// writing it; the story engine still requires it). One-shot
+		// $set, no-op when already set, so this is safe to run on every
+		// match.
+		if existing.SubscriberId == "" {
+			tenantHex := form.TenantID.Hex()
+			_ = col.Update(
+				bson.M{"_id": existing.Id},
+				bson.M{"$set": bson.M{"subscriber_id": tenantHex}},
+			)
+			existing.SubscriberId = tenantHex
+		}
 		return &existing, nil
 	}
 
@@ -193,7 +205,13 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, e
 		Id:       bson.NewObjectId(),
 		PublicId: utils.GeneratePublicId(),
 		TenantID: form.TenantID,
-		Email:    pkgmodels.EmailAddress(email),
+		// SubscriberId is the legacy tenant-scope key the story engine
+		// (core-service/routes/story_engine.go StartStoryForUser) and
+		// triggerStoryStart still read. Without this set, storyline
+		// dispatch silently no-ops because TriggerStoryStart can't
+		// resolve a non-empty subscriber_id from the new contact.
+		SubscriberId: form.TenantID.Hex(),
+		Email:        pkgmodels.EmailAddress(email),
 	}
 	contact.Subscribed = true
 	contact.SoftDeletes.CreatedAt = &now
@@ -268,17 +286,29 @@ func writeAttributes(form *pkgmodels.PageForm, sub Submission, contact *pkgmodel
 	}
 }
 
+// scopedFind builds a (public_id + tenant_or_subscriber) filter. Different
+// generations of the schema scoped collections by tenant_id (Badge, Story)
+// or subscriber_id (EmailList), so we $or-match either to be safe — same
+// pattern as serve_site_resources.go's tenantScope helper.
+func scopedFind(tenantID bson.ObjectId, publicID string) bson.M {
+	return bson.M{
+		"public_id": publicID,
+		"$or": []bson.M{
+			{"tenant_id": tenantID},
+			{"subscriber_id": tenantID.Hex()},
+		},
+	}
+}
+
 // ── badges ────────────────────────────────────────────────────────────────
 
-func assignBadge(contactID bson.ObjectId, badgePublicID string) (string, bool) {
+func assignBadge(tenantID, contactID bson.ObjectId, badgePublicID string) (string, bool) {
 	var badge pkgmodels.Badge
-	if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{
-		"public_id": badgePublicID,
-	}).One(&badge); err != nil {
+	if err := db.GetCollection(pkgmodels.BadgeCollection).Find(scopedFind(tenantID, badgePublicID)).One(&badge); err != nil {
 		return "", false
 	}
 	if err := db.GetCollection(pkgmodels.UserCollection).Update(
-		bson.M{"_id": contactID},
+		bson.M{"_id": contactID, "tenant_id": tenantID},
 		bson.M{"$addToSet": bson.M{"badges": badge.Id}},
 	); err != nil {
 		log.Printf("forms.executor: assignBadge failed: %v", err)
@@ -287,15 +317,13 @@ func assignBadge(contactID bson.ObjectId, badgePublicID string) (string, bool) {
 	return badge.Name, true
 }
 
-func removeBadge(contactID bson.ObjectId, badgePublicID string) (string, bool) {
+func removeBadge(tenantID, contactID bson.ObjectId, badgePublicID string) (string, bool) {
 	var badge pkgmodels.Badge
-	if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{
-		"public_id": badgePublicID,
-	}).One(&badge); err != nil {
+	if err := db.GetCollection(pkgmodels.BadgeCollection).Find(scopedFind(tenantID, badgePublicID)).One(&badge); err != nil {
 		return "", false
 	}
 	if err := db.GetCollection(pkgmodels.UserCollection).Update(
-		bson.M{"_id": contactID},
+		bson.M{"_id": contactID, "tenant_id": tenantID},
 		bson.M{"$pull": bson.M{"badges": badge.Id}},
 	); err != nil {
 		log.Printf("forms.executor: removeBadge failed: %v", err)
@@ -306,11 +334,9 @@ func removeBadge(contactID bson.ObjectId, badgePublicID string) (string, bool) {
 
 // ── email lists ───────────────────────────────────────────────────────────
 
-func addToList(contactID bson.ObjectId, listPublicID string) (string, bool) {
+func addToList(tenantID, contactID bson.ObjectId, listPublicID string) (string, bool) {
 	var list pkgmodels.EmailList
-	if err := db.GetCollection(pkgmodels.EmailListCollection).Find(bson.M{
-		"public_id": listPublicID,
-	}).One(&list); err != nil {
+	if err := db.GetCollection(pkgmodels.EmailListCollection).Find(scopedFind(tenantID, listPublicID)).One(&list); err != nil {
 		return "", false
 	}
 	if err := db.GetCollection(pkgmodels.EmailListCollection).Update(
@@ -326,11 +352,9 @@ func addToList(contactID bson.ObjectId, listPublicID string) (string, bool) {
 	return list.Name, true
 }
 
-func removeFromList(contactID bson.ObjectId, listPublicID string) (string, bool) {
+func removeFromList(tenantID, contactID bson.ObjectId, listPublicID string) (string, bool) {
 	var list pkgmodels.EmailList
-	if err := db.GetCollection(pkgmodels.EmailListCollection).Find(bson.M{
-		"public_id": listPublicID,
-	}).One(&list); err != nil {
+	if err := db.GetCollection(pkgmodels.EmailListCollection).Find(scopedFind(tenantID, listPublicID)).One(&list); err != nil {
 		return "", false
 	}
 	if err := db.GetCollection(pkgmodels.EmailListCollection).Update(
@@ -353,11 +377,10 @@ func removeFromList(contactID bson.ObjectId, listPublicID string) (string, bool)
 // core-service /internal/story/start). Story names can collide and rename, so
 // we store IDs and resolve to name at execution time.
 func startStory(tenantID bson.ObjectId, contactPublicID, storyPublicID string) (string, bool) {
+	q := scopedFind(tenantID, storyPublicID)
+	q["timestamps.deleted_at"] = nil
 	var story pkgmodels.Story
-	if err := db.GetCollection(pkgmodels.StoryCollection).Find(bson.M{
-		"public_id":             storyPublicID,
-		"timestamps.deleted_at": nil,
-	}).One(&story); err != nil {
+	if err := db.GetCollection(pkgmodels.StoryCollection).Find(q).One(&story); err != nil {
 		return "", false
 	}
 	go routes.TriggerStoryStart(story.Name, "", contactPublicID)
