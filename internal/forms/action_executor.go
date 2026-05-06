@@ -240,13 +240,14 @@ func emailFromSubmission(form *pkgmodels.PageForm, sub Submission) string {
 
 // writeAttributes maps each FormField with a non-empty MapsTo into the user
 // record. Top-level columns (email, first_name, last_name, phone_number) get
-// their dedicated fields; everything else lands in CustomFields.
+// their dedicated fields; everything else lands in CustomFields, coerced to
+// the FieldType the form declared (number→float64, boolean→bool, date→time).
 func writeAttributes(form *pkgmodels.PageForm, sub Submission, contact *pkgmodels.User) {
 	if contact == nil {
 		return
 	}
 	set := bson.M{}
-	custom := map[string]string{}
+	custom := map[string]any{}
 	for _, f := range form.Fields {
 		if f == nil || f.MapsTo == "" {
 			continue
@@ -265,7 +266,7 @@ func writeAttributes(form *pkgmodels.PageForm, sub Submission, contact *pkgmodel
 		case "phone", "phone_number":
 			set["phone_number"] = val
 		default:
-			custom[f.MapsTo] = val
+			custom[f.MapsTo] = coerceFieldValue(f.FieldType, val)
 		}
 	}
 	if len(custom) > 0 {
@@ -284,6 +285,35 @@ func writeAttributes(form *pkgmodels.PageForm, sub Submission, contact *pkgmodel
 	); err != nil {
 		log.Printf("forms.executor: writeAttributes failed: %v", err)
 	}
+}
+
+// coerceFieldValue converts a wire-format string submission to the typed
+// value the FormField declares. Unknown or unparseable inputs fall back to
+// the raw string so we never silently drop data.
+func coerceFieldValue(fieldType, raw string) any {
+	switch strings.ToLower(strings.TrimSpace(fieldType)) {
+	case "number":
+		if n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil {
+			return n
+		}
+	case "boolean", "bool":
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off", "":
+			return false
+		}
+	case "date", "datetime":
+		s := strings.TrimSpace(raw)
+		// Accept full ISO 8601 and the bare "yyyy-mm-dd" the HTML date input
+		// produces.
+		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"} {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t
+			}
+		}
+	}
+	return raw
 }
 
 // scopedFind builds a (public_id + tenant_or_subscriber) filter. Different
