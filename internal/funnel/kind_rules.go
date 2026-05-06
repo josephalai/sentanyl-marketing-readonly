@@ -33,8 +33,48 @@ func applyKindRules(tenantID bson.ObjectId, tmpl *pkgmodels.FunnelTemplate, slot
 		return applyWebinarRule(slots, rendered)
 	case pkgmodels.TemplateKindLeadMagnet:
 		return applyLeadMagnetRule(tenantID, slots, rendered)
+	case pkgmodels.TemplateKindVideoSalesLetter:
+		// Phase 11A Step 4: video sales letter — wraps the page's hero
+		// video in the augmented <video data-sentanyl> snippet so the
+		// runtime player activates, then runs the checkout rule (the
+		// bottom-of-page CTA still hits Stripe via Phase 11A Step 3).
+		return applyCheckoutRule(tenantID, slots, applyVideoBlockRule(tenantID, slots, rendered))
+	case pkgmodels.TemplateKindVideoSqueeze:
+		// Squeeze under a video. Same video wrapper, then the lead-magnet
+		// rule wires the bottom email-capture form.
+		return applyLeadMagnetRule(tenantID, slots, applyVideoBlockRule(tenantID, slots, rendered))
 	}
 	return rendered
+}
+
+// applyVideoBlockRule replaces a {{video_block}} placeholder (or appends
+// before </body>) with the augmented Sentanyl video snippet. Required slot:
+// media_public_id. Optional: media_poster_url. The runtime player
+// (sentanyl-video.js) attaches on load and activates chapters/turnstile/
+// end-CTA + watch tracking.
+func applyVideoBlockRule(tenantID bson.ObjectId, slots map[string]interface{}, rendered string) string {
+	mediaID := stringSlot(slots, "media_public_id")
+	if mediaID == "" {
+		return rendered
+	}
+	poster := stringSlot(slots, "media_poster_url")
+	posterAttr := ""
+	if poster != "" {
+		posterAttr = fmt.Sprintf(` poster="%s"`, html.EscapeString(poster))
+	}
+	configURL := fmt.Sprintf("/api/video/public/media/%s/config?tenant_id=%s",
+		html.EscapeString(mediaID), tenantID.Hex())
+	snippet := fmt.Sprintf(
+		`<section class="section sntl-video-section" style="text-align:center">
+<video controls preload="metadata" style="max-width:100%%" data-sentanyl `+
+			`data-media-public-id="%s" data-config-url="%s" data-tenant-id="%s"%s></video>
+</section>
+<script src="/static/sentanyl-video.js" defer></script>`,
+		html.EscapeString(mediaID), html.EscapeString(configURL), tenantID.Hex(), posterAttr)
+	if strings.Contains(rendered, "{{video_block}}") {
+		return strings.ReplaceAll(rendered, "{{video_block}}", snippet)
+	}
+	return appendBeforeBody(rendered, snippet)
 }
 
 // applyCheckoutRule wires the primary CTA on a checkout page to a real Stripe
