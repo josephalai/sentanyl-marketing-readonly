@@ -128,13 +128,27 @@ func HandleInternalHydrateFunnel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// insertEntities inserts each entity into its appropriate MongoDB collection
-// based on its type. For types not explicitly mapped, it uses a default
-// collection as a fallback.
+// insertEntities upserts each entity into its appropriate MongoDB collection.
+// Upsert (not Insert) so that:
+//  1. Re-running the same script doesn't fail with duplicate-key errors.
+//  2. The same Badge referenced by multiple BadgeTransactions in one
+//     decomposed funnel/story tree only writes once (the chain emits the
+//     Badge struct per reference; mgo's UpsertId is idempotent).
+// For entities lacking a usable _id, fall back to Insert.
 func insertEntities(entities []interface{}) error {
 	for _, entity := range entities {
 		collection := resolveCollection(entity)
-		if err := db.GetCollection(collection).Insert(entity); err != nil {
+		col := db.GetCollection(collection)
+		id, _, _, hasID := extractIdentity(entity)
+		if hasID && id.Valid() {
+			if _, err := col.UpsertId(id, bson.M{"$set": entity}); err != nil {
+				log.Printf("hydrate-graph: upsert into %s failed for type %T: %v", collection, entity, err)
+				return err
+			}
+			continue
+		}
+		if err := col.Insert(entity); err != nil {
+			log.Printf("hydrate-graph: insert into %s failed for type %T: %v", collection, entity, err)
 			return err
 		}
 	}
@@ -280,6 +294,44 @@ func extractIdentity(raw interface{}) (id, tenantID bson.ObjectId, publicID stri
 		// Tag predates the tenant_id column and is scoped by subscriber_id.
 		// Fall back to ObjectId-only upsert.
 		return v.Id, "", v.PublicId, v.Id.Valid()
+	// Value-type cases — funnel / story decompose paths emit value types
+	// (`funnel := *f; individuals = append(individuals, funnel)`) that the
+	// generic upsert in insertEntities also needs to identify by _id so it
+	// can re-run idempotently.
+	case pkgmodels.Funnel:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.FunnelRoute:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.FunnelStage:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.FunnelPage:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.PageBlock:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.PageForm:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.Trigger:
+		return v.Id, "", v.PublicId, v.Id.Valid()
+	case pkgmodels.Action:
+		return v.Id, "", v.PublicId, v.Id.Valid()
+	case pkgmodels.BadgeTransaction:
+		return v.Id, "", "", v.Id.Valid()
+	case pkgmodels.RequiredBadge:
+		return v.Id, "", "", v.Id.Valid()
+	case pkgmodels.Badge:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.Story:
+		return v.Id, v.TenantID, v.PublicId, v.Id.Valid()
+	case pkgmodels.Storyline:
+		return v.Id, "", v.PublicId, v.Id.Valid()
+	case pkgmodels.Enactment:
+		return v.Id, "", v.PublicId, v.Id.Valid()
+	case pkgmodels.Scene:
+		return v.Id, "", v.PublicId, v.Id.Valid()
+	case pkgmodels.Message:
+		return v.Id, "", v.PublicId, v.Id.Valid()
+	case pkgmodels.MessageContent:
+		return v.Id, "", v.PublicId, v.Id.Valid()
 	}
 	return "", "", "", false
 }
@@ -321,6 +373,8 @@ func resolveCollection(entity interface{}) string {
 		return pkgmodels.MessageContentCollection
 	case pkgmodels.Tag:
 		return pkgmodels.TagCollection
+	case pkgmodels.Badge:
+		return pkgmodels.BadgeCollection
 	default:
 		log.Printf("resolveCollection: unknown entity type %T, using default", entity)
 		return "unknown_entities"
