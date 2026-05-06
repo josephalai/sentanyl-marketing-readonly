@@ -69,6 +69,14 @@ func Materialize(tenantID bson.ObjectId, req MaterializeRequest) (*MaterializeRe
 
 	rendered := renderTemplate(req.Template, slotValues)
 
+	// Apply kind-specific behavior rules. Without these the runtime is purely
+	// "whatever was in the source HTML" — checkout pages need a real Buy CTA,
+	// thank-yous need an order confirmation block, webinars need a video
+	// placeholder, lead magnets need the asset download link. Each rule is a
+	// no-op when its required structured input is absent so legacy templates
+	// still work.
+	rendered = applyKindRules(tenantID, req.Template, slotValues, rendered)
+
 	// Inject form HTML (if any) into the rendered output.
 	if req.FormPublicID != "" {
 		formHTML, fErr := buildFormHTML(tenantID, req.FormPublicID, slotValues, hostname, path)
