@@ -403,20 +403,27 @@ func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *p
 		share = totalAmount / float64(len(productIDs))
 	}
 
+	// Phase 11A Step 3: stamp the originating video session id when the
+	// buyer was watching a Sentanyl video on the page that launched
+	// checkout. The runtime player propagates session_public_id through
+	// /api/marketing/site/checkout/start → Stripe metadata → this handler.
+	videoSessionID := session.Metadata["video_session_id"]
+
 	now := time.Now()
 	for _, pid := range productIDs {
 		entry := pkgmodels.PurchaseLog{
-			Id:             bson.NewObjectId(),
-			PublicId:       utils.GeneratePublicId(),
-			TenantID:       tenantID,
-			SubscriberId:   tenantID.Hex(),
-			UserId:         contact.Id,
-			ProductId:      pid,
-			OfferID:        offer.Id,
-			Amount:         share,
-			Currency:       currency,
-			StripeChargeId: chargeRef,
-			Status:         "paid",
+			Id:                   bson.NewObjectId(),
+			PublicId:             utils.GeneratePublicId(),
+			TenantID:             tenantID,
+			SubscriberId:         tenantID.Hex(),
+			UserId:               contact.Id,
+			ProductId:            pid,
+			OfferID:              offer.Id,
+			Amount:               share,
+			Currency:             currency,
+			StripeChargeId:       chargeRef,
+			Status:               "paid",
+			VideoSessionPublicId: videoSessionID,
 		}
 		entry.SoftDeletes.CreatedAt = &now
 		if err := col.Insert(entry); err != nil {

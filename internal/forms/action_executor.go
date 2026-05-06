@@ -34,6 +34,12 @@ const downloadEmailTTL = 24 * time.Hour
 // FieldValues is keyed by FormField.FieldName as configured on the form.
 type Submission struct {
 	FieldValues map[string]string
+	// VideoSessionPublicId, when set, stamps any PurchaseLog rows the
+	// executor creates (e.g. granted_via_form rows) so a video-driven
+	// landing page's bottom-of-page conversion is attributable to the
+	// watch session that drove it. Populated by the public form-submit
+	// handler from the request body's video_session_id field.
+	VideoSessionPublicId string
 }
 
 // Result is what the executor returns to the public submit handler.
@@ -151,7 +157,7 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	}
 
 	for _, productPub := range on.GrantProductIds {
-		if ok := grantProductAccess(form.TenantID, contact, productPub); ok {
+		if ok := grantProductAccess(form.TenantID, contact, productPub, sub.VideoSessionPublicId); ok {
 			res.ProductsGranted = append(res.ProductsGranted, productPub)
 		} else {
 			res.Warnings = append(res.Warnings, "grant_product: "+productPub+" failed")
@@ -419,7 +425,7 @@ func startStory(tenantID bson.ObjectId, contactPublicID, storyPublicID string) (
 
 // ── product grants (pre-Stripe, free grant for lead-magnet flows) ─────────
 
-func grantProductAccess(tenantID bson.ObjectId, contact *pkgmodels.User, productPublicID string) bool {
+func grantProductAccess(tenantID bson.ObjectId, contact *pkgmodels.User, productPublicID, videoSessionID string) bool {
 	var product pkgmodels.Product
 	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
 		"public_id":             productPublicID,
@@ -430,15 +436,16 @@ func grantProductAccess(tenantID bson.ObjectId, contact *pkgmodels.User, product
 	}
 	now := time.Now()
 	logEntry := pkgmodels.PurchaseLog{
-		Id:           bson.NewObjectId(),
-		PublicId:     utils.GeneratePublicId(),
-		TenantID:     tenantID,
-		SubscriberId: contact.SubscriberId,
-		UserId:       contact.Id,
-		ProductId:    product.Id,
-		Status:       "granted_via_form",
-		Amount:       0,
-		Currency:     "usd",
+		Id:                   bson.NewObjectId(),
+		PublicId:             utils.GeneratePublicId(),
+		TenantID:             tenantID,
+		SubscriberId:         contact.SubscriberId,
+		UserId:               contact.Id,
+		ProductId:            product.Id,
+		Status:               "granted_via_form",
+		Amount:               0,
+		Currency:             "usd",
+		VideoSessionPublicId: videoSessionID,
 	}
 	logEntry.SoftDeletes.CreatedAt = &now
 	if err := db.GetCollection(pkgmodels.PurchaseLogCollection).Insert(logEntry); err != nil {

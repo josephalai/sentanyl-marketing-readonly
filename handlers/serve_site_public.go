@@ -45,6 +45,12 @@ type publicFormRequest struct {
 	FormID  string            `json:"form_id" form:"form_id"`
 	NextURL string            `json:"next_url" form:"next_url"`
 	Fields  map[string]string `json:"fields" form:"-"`
+	// VideoSessionID is set by the sentanyl-video.js fetch shim when the
+	// form lives on a page with an active video session. It propagates
+	// from form submit → MediaLeadCapture row + (when an offer is also
+	// attached) Stripe metadata → PurchaseLog.VideoSessionPublicId, so
+	// conversions trace back to the video that drove them.
+	VideoSessionID string `json:"video_session_id" form:"video_session_id"`
 }
 
 func handlePublicFormSubmit(c *gin.Context) {
@@ -121,7 +127,10 @@ func handlePublicFormSubmit(c *gin.Context) {
 			return
 		}
 
-		result := forms.Execute(&form, forms.Submission{FieldValues: values})
+		result := forms.Execute(&form, forms.Submission{
+			FieldValues:          values,
+			VideoSessionPublicId: req.VideoSessionID,
+		})
 
 		// Browser form posts that include a redirect get a 303 to the
 		// configured URL; the next_url body field still wins over the
@@ -290,6 +299,11 @@ type checkoutStartRequest struct {
 	Email      string `json:"email" form:"email"`
 	SuccessURL string `json:"success_url" form:"success_url"`
 	CancelURL  string `json:"cancel_url" form:"cancel_url"`
+	// VideoSessionID propagates from the runtime sentanyl-video.js fetch
+	// shim when the buyer is mid-watch on the same page; it crosses to
+	// Stripe via session metadata so the webhook handler can stamp it on
+	// the resulting PurchaseLog.
+	VideoSessionID string `json:"video_session_id" form:"video_session_id"`
 }
 
 func handlePublicCheckoutStart(c *gin.Context) {
@@ -399,7 +413,11 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	}
 
 	// Create a Stripe Checkout Session using the tenant's Stripe key.
-	stripeSessionURL, err := CreateStripeCheckoutSession(stripeKey, stripeAcct, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email))
+	extras := map[string]string{}
+	if v := strings.TrimSpace(req.VideoSessionID); v != "" {
+		extras["video_session_id"] = v
+	}
+	stripeSessionURL, err := checkout.CreateStripeCheckoutSessionWithExtras(stripeKey, stripeAcct, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email), extras)
 	if err != nil {
 		log.Printf("Stripe checkout session creation failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})

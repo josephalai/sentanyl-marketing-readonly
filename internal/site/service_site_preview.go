@@ -476,6 +476,111 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		}
 		sb.WriteString("</div>\n</section>\n")
 
+	case "SentanylSqueezeSection":
+		// Phase 11A Step 3: bottom-of-page lead capture. Resolves the
+		// referenced PageForm and emits a small inline form that posts
+		// JSON to /api/marketing/site/form/submit. sentanyl-video.js's
+		// fetch shim auto-decorates the body with video_session_id when
+		// a Sentanyl video block also exists on the page, so the
+		// resulting PurchaseLog (granted_via_form rows) carries the
+		// video session.
+		headline, _ := props["headline"].(string)
+		subhead, _ := props["subhead"].(string)
+		formID, _ := props["formId"].(string)
+		ctaText, _ := props["ctaButtonText"].(string)
+		if ctaText == "" {
+			ctaText = "Get instant access"
+		}
+		bg, _ := props["backgroundColor"].(string)
+		if bg == "" {
+			bg = "#0e0e10"
+		}
+		sb.WriteString(fmt.Sprintf(
+			"<section class=\"section sntl-squeeze\" style=\"padding:64px 20px;text-align:center;background:%s;color:#fff\">\n",
+			esc(bg)))
+		if headline != "" {
+			sb.WriteString(fmt.Sprintf("<h2 style=\"font-size:2rem;margin:0 0 12px\">%s</h2>\n", esc(headline)))
+		}
+		if subhead != "" {
+			sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.1rem;opacity:0.85;margin:0 0 24px\">%s</p>\n", esc(subhead)))
+		}
+		btnID := "sntl-squeeze-" + formID
+		sb.WriteString("<form class=\"sntl-squeeze-form\" style=\"display:inline-flex;gap:8px;flex-wrap:wrap;justify-content:center\" " +
+			"onsubmit=\"event.preventDefault();var b=document.getElementById('" + esc(btnID) + "');b.disabled=true;b.textContent='Sending…';" +
+			"var email=this.querySelector('input[name=email]').value;" +
+			"fetch('/api/marketing/site/form/submit',{method:'POST',headers:{'Content-Type':'application/json'}," +
+			"body:JSON.stringify({form_id:'" + esc(formID) + "',email:email,domain:location.host})})" +
+			".then(function(r){return r.json()}).then(function(d){b.textContent=d.error?(d.error):'Thanks!';" +
+			"if(d.redirect_url){window.location.href=d.redirect_url}}).catch(function(){b.textContent='Error';b.disabled=false});return false\">\n")
+		sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"you@example.com\" required " +
+			"style=\"padding:12px 16px;border-radius:6px;border:1px solid #ccc;font-size:15px;min-width:240px\">\n")
+		sb.WriteString(fmt.Sprintf(
+			"<button id=\"%s\" type=\"submit\" style=\"padding:12px 24px;border-radius:6px;border:none;background:#fff;color:#111;font-weight:600;cursor:pointer\">%s</button>\n",
+			esc(btnID), esc(ctaText)))
+		sb.WriteString("</form>\n</section>\n")
+
+	case "SentanylSalesSection":
+		// Phase 11A Step 3: bottom-of-page sales offer card. Re-uses the
+		// /api/marketing/site/checkout/start contract (Phase 7 Step 1),
+		// which sentanyl-video.js's fetch shim decorates with the active
+		// video_session_id; the Stripe webhook propagates that onto the
+		// resulting PurchaseLog.VideoSessionPublicId.
+		headline, _ := props["headline"].(string)
+		description, _ := props["description"].(string)
+		offerIDStr, _ := props["offerId"].(string)
+		ctaText, _ := props["ctaText"].(string)
+		if ctaText == "" {
+			ctaText = "Buy Now"
+		}
+		socialProof, _ := props["socialProofText"].(string)
+		sb.WriteString("<section class=\"section sntl-sales\" style=\"padding:64px 20px;text-align:center;background:#fff;color:#111\">\n")
+		if headline != "" {
+			sb.WriteString(fmt.Sprintf("<h2 style=\"font-size:2rem;margin:0 0 16px\">%s</h2>\n", esc(headline)))
+		}
+		if description != "" {
+			sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.05rem;max-width:600px;margin:0 auto 24px;color:#444\">%s</p>\n", esc(description)))
+		}
+		// Render bullets if provided.
+		if bullets, ok := props["bullets"].([]any); ok && len(bullets) > 0 {
+			sb.WriteString("<ul style=\"list-style:none;padding:0;max-width:480px;margin:0 auto 24px;text-align:left\">\n")
+			for _, b := range bullets {
+				if m, ok := b.(map[string]any); ok {
+					if v, _ := m["value"].(string); v != "" {
+						sb.WriteString(fmt.Sprintf("<li style=\"padding:6px 0;border-bottom:1px solid #eee\">✓ %s</li>\n", esc(v)))
+					}
+				}
+			}
+			sb.WriteString("</ul>\n")
+		}
+		// Resolve the offer for amount + offer.Id; CTA button calls the
+		// existing checkout-start endpoint (the same SentanylOfferCard uses)
+		// so the runtime video-session shim can decorate the body.
+		btnID := "sntl-sales-" + offerIDStr
+		// Try resolving the offer for friendlier display when the public_id
+		// is a hex ObjectId. If it's a public_id string we still trust the
+		// click handler to pass it through.
+		offerIDForBody := offerIDStr
+		var resolved pkgmodels.Offer
+		if offerIDStr != "" && bson.IsObjectIdHex(offerIDStr) {
+			if err := db.GetCollection(pkgmodels.OfferCollection).FindId(bson.ObjectIdHex(offerIDStr)).One(&resolved); err == nil {
+				if resolved.Amount > 0 {
+					sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.5rem;font-weight:bold;margin:0 0 8px\">$%.2f %s</p>\n",
+						float64(resolved.Amount)/100, esc(strings.ToUpper(resolved.Currency))))
+				}
+				offerIDForBody = resolved.Id.Hex()
+			}
+		}
+		if socialProof != "" {
+			sb.WriteString(fmt.Sprintf("<p style=\"font-size:0.9rem;color:#666;margin:12px 0 24px\">%s</p>\n", esc(socialProof)))
+		}
+		sb.WriteString(fmt.Sprintf(
+			"<button id=\"%s\" class=\"cta-button\" style=\"padding:14px 32px;border-radius:6px;border:none;background:#111;color:#fff;font-weight:600;font-size:1rem;cursor:pointer\" "+
+				"onclick=\"(function(){var b=document.getElementById('%s');b.disabled=true;b.textContent='Processing…';"+
+				"fetch('/api/marketing/site/checkout/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({offer_id:'%s'})})"+
+				".then(function(r){return r.json()}).then(function(d){if(d.checkout_url){window.location.href=d.checkout_url;return}b.textContent=d.error||'%s';b.disabled=false}).catch(function(){b.textContent='Error';b.disabled=false});})()\">%s</button>\n",
+			esc(btnID), esc(btnID), esc(offerIDForBody), esc(ctaText), esc(ctaText)))
+		sb.WriteString("</section>\n")
+
 	case "SentanylOfferCard":
 		title, _ := props["title"].(string)
 		ctaText, _ := props["ctaText"].(string)
