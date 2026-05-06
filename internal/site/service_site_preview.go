@@ -322,7 +322,8 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		if buttonText == "" {
 			buttonText = "Submit"
 		}
-		formID, _ := props["id"].(string)
+		htmlID, _ := props["id"].(string)
+		formPublicID, _ := props["formId"].(string)
 		nextURL, _ := props["nextUrl"].(string)
 		includePhone, _ := props["includePhone"].(bool)
 		includeMessage, _ := props["includeMessage"].(bool)
@@ -334,8 +335,8 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		tone, _ := props["tone"].(string)
 		toneCls := toneClass(tone)
 		idAttr := ""
-		if formID != "" {
-			idAttr = fmt.Sprintf(" id=\"%s\"", esc(formID))
+		if htmlID != "" {
+			idAttr = fmt.Sprintf(" id=\"%s\"", esc(htmlID))
 		}
 		sb.WriteString(fmt.Sprintf("<section class=\"section %s\"%s>\n<div class=\"container container--narrow\">\n", toneCls, idAttr))
 		sb.WriteString("<div class=\"lead-form-block\">\n")
@@ -344,15 +345,55 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 			sb.WriteString(fmt.Sprintf("<p class=\"lead\">%s</p>\n", esc(subtitle)))
 		}
 		sb.WriteString("<form class=\"lead-form-block__form\" method=\"POST\" action=\"/api/marketing/site/form/submit\">\n")
-		if isContactForm {
-			sb.WriteString("<input type=\"text\" name=\"name\" placeholder=\"Your name\" required>\n")
+		// If a real PageForm was selected, emit form_id + one input per
+		// FormField so the public submit handler resolves the form and runs
+		// the OnSubmit action chain (Phase 2). Falls back to the legacy
+		// generic name/email/phone/message inputs when no form is bound.
+		var resolved *pkgmodels.PageForm
+		if formPublicID != "" && tenantID != "" {
+			var pf pkgmodels.PageForm
+			if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
+				"public_id":             formPublicID,
+				"tenant_id":             tenantID,
+				"timestamps.deleted_at": nil,
+			}).One(&pf); err == nil {
+				resolved = &pf
+			}
 		}
-		sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"you@example.com\" required>\n")
-		if includePhone {
-			sb.WriteString("<input type=\"tel\" name=\"phone\" placeholder=\"Phone\">\n")
-		}
-		if includeMessage {
-			sb.WriteString("<textarea name=\"message\" placeholder=\"Your message\" rows=\"5\"></textarea>\n")
+		if resolved != nil {
+			sb.WriteString(fmt.Sprintf("<input type=\"hidden\" name=\"form_id\" value=\"%s\">\n", esc(resolved.PublicId)))
+			for _, f := range resolved.Fields {
+				if f == nil || f.FieldName == "" {
+					continue
+				}
+				inputType := "text"
+				switch strings.ToLower(f.FieldType) {
+				case "email":
+					inputType = "email"
+				case "number":
+					inputType = "number"
+				case "tel", "phone":
+					inputType = "tel"
+				}
+				required := ""
+				if f.Required {
+					required = " required"
+				}
+				placeholder := humanizeFieldName(f.FieldName)
+				sb.WriteString(fmt.Sprintf("<input type=\"%s\" name=\"%s\" placeholder=\"%s\"%s>\n",
+					inputType, esc(f.FieldName), esc(placeholder), required))
+			}
+		} else {
+			if isContactForm {
+				sb.WriteString("<input type=\"text\" name=\"name\" placeholder=\"Your name\" required>\n")
+			}
+			sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"you@example.com\" required>\n")
+			if includePhone {
+				sb.WriteString("<input type=\"tel\" name=\"phone\" placeholder=\"Phone\">\n")
+			}
+			if includeMessage {
+				sb.WriteString("<textarea name=\"message\" placeholder=\"Your message\" rows=\"5\"></textarea>\n")
+			}
 		}
 		if nextURL != "" {
 			sb.WriteString(fmt.Sprintf("<input type=\"hidden\" name=\"next_url\" value=\"%s\">\n", esc(nextURL)))
@@ -405,7 +446,10 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		if ctaText == "" {
 			ctaText = "Get This Offer"
 		}
-		// Try to load real offer data if offerId is valid.
+		// Try to load real offer data if offerId is valid. When present, the
+		// CTA button calls /api/marketing/site/checkout/start with offer_id
+		// (matching the SentanylCheckoutForm path) so a click actually opens
+		// Stripe Checkout instead of pointing to "#".
 		if offerIDStr != "" && bson.IsObjectIdHex(offerIDStr) {
 			var offer pkgmodels.Offer
 			err := db.GetCollection(pkgmodels.OfferCollection).FindId(bson.ObjectIdHex(offerIDStr)).One(&offer)
@@ -413,12 +457,16 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 				if title == "" {
 					title = offer.Title
 				}
+				btnID := "offer-cta-" + offer.Id.Hex()
 				sb.WriteString("<div class=\"card\" style=\"text-align:center\">\n")
 				sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(title)))
 				if offer.Amount > 0 {
 					sb.WriteString(fmt.Sprintf("<p style=\"font-size:1.5rem;font-weight:bold;margin:0.5rem 0\">$%.2f %s</p>\n", float64(offer.Amount)/100, esc(strings.ToUpper(offer.Currency))))
 				}
-				sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"#\">%s</a>\n", esc(ctaText)))
+				sb.WriteString(fmt.Sprintf(
+					"<button id=\"%s\" class=\"cta-button\" style=\"border:none;cursor:pointer\" onclick=\"(function(){var b=document.getElementById('%s');b.disabled=true;b.textContent='Processing…';fetch('/api/marketing/site/checkout/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({offer_id:'%s'})}).then(function(r){return r.json()}).then(function(d){if(d.checkout_url){window.location.href=d.checkout_url;return}if(d.redirect_url){window.location.href=d.redirect_url;return}b.textContent=d.error||'%s';b.disabled=false}).catch(function(){b.textContent='Error — try again';b.disabled=false});})()\">%s</button>\n",
+					esc(btnID), esc(btnID), esc(offer.Id.Hex()), esc(ctaText), esc(ctaText),
+				))
 				sb.WriteString("</div>\n")
 				break
 			}
@@ -628,6 +676,17 @@ func normalizeGap(v any) string {
 		return s
 	}
 	return "md"
+}
+
+// humanizeFieldName turns "first_name" into "First name" for use as a
+// placeholder when a tenant-defined PageForm doesn't carry an explicit label.
+func humanizeFieldName(s string) string {
+	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // toneClass maps a tone token to the CSS class that paints background/foreground.

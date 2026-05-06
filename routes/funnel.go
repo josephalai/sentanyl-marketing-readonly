@@ -11,10 +11,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	pkgauth "github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
+
+// TriggerStoryStart calls core-service to start executing a story for a user.
+// Runs in a goroutine — fire and forget. Exported so other packages
+// (e.g. marketing-service/internal/forms) can reuse the same dispatch path
+// rather than duplicating the subscriber-id lookup logic.
+func TriggerStoryStart(storyName, funnelId, userPublicId string) {
+	triggerStoryStart(storyName, funnelId, userPublicId)
+}
 
 // triggerStoryStart calls core-service to start executing a story for a user.
 // Runs in a goroutine — fire and forget.
@@ -72,10 +81,49 @@ func RegisterLegacyTenantFunnelRoutes(rg *gin.RouterGroup) {
 // to match the legacy path /api/funnel/template used by FunnelTemplatesPage.
 func RegisterLegacyFunnelTemplateRoutes(rg *gin.RouterGroup) {
 	rg.GET("/template", handleGetFunnelTemplates)
+	rg.GET("/template/default", handleGetDefaultFunnelTemplate)
 	rg.GET("/template/:templateId", handleGetFunnelTemplate)
 	rg.POST("/template", handleCreateFunnelTemplate)
 	rg.PUT("/template/:templateId", handleUpdateFunnelTemplate)
 	rg.DELETE("/template/:templateId", handleDeleteFunnelTemplate)
+}
+
+// handleGetDefaultFunnelTemplate returns the tenant's default template for
+// a given kind (e.g. squeeze_page, lead_magnet). Falls back to the most-
+// recently created template of that kind when no explicit default is set,
+// and returns 404 only when the tenant has no template of that kind at all.
+func handleGetDefaultFunnelTemplate(c *gin.Context) {
+	tenantID := pkgauth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	kind := c.Query("kind")
+	if kind == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind query parameter required"})
+		return
+	}
+	var tmpl pkgmodels.FunnelTemplate
+	// Prefer the tenant-marked default.
+	err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+		"tenant_id":             tenantID,
+		"template_kind":         kind,
+		"default_for_tenant":    true,
+		"timestamps.deleted_at": nil,
+	}).One(&tmpl)
+	if err != nil {
+		// Fallback: latest of that kind.
+		err = db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+			"tenant_id":             tenantID,
+			"template_kind":         kind,
+			"timestamps.deleted_at": nil,
+		}).Sort("-timestamps.created_at").One(&tmpl)
+	}
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no template for kind " + kind})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "template": tmpl})
 }
 
 // RegisterFunnelRoutes registers all funnel-related endpoints.
@@ -520,10 +568,18 @@ func handleCreateFunnelTemplate(c *gin.Context) {
 func handleUpdateFunnelTemplate(c *gin.Context) {
 	templateId := c.Param("templateId")
 	var updates struct {
-		Name         string                  `json:"name"`
-		HTMLContent  string                  `json:"html_content"`
-		GlobalCSS    string                  `json:"global_css"`
-		SlotManifest *pkgmodels.SlotManifest `json:"slot_manifest"`
+		Name                 string                          `json:"name"`
+		TemplateKind         string                          `json:"template_kind"`
+		DefaultForTenant     *bool                           `json:"default_for_tenant"`
+		DefaultForPageType   string                          `json:"default_for_page_type"`
+		HTMLContent          string                          `json:"html_content"`
+		GlobalCSS            string                          `json:"global_css"`
+		SlotManifest         *pkgmodels.SlotManifest         `json:"slot_manifest"`
+		MasterPrompt         string                          `json:"master_prompt"`
+		InputSchema          bson.M                          `json:"input_schema"`
+		ExpectedOutputSchema bson.M                          `json:"expected_output_schema"`
+		StyleProfile         *pkgmodels.TemplateStyleProfile `json:"style_profile"`
+		AssetManifest        []pkgmodels.TemplateAsset       `json:"asset_manifest"`
 	}
 	if err := c.ShouldBindJSON(&updates); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid data"})
@@ -532,6 +588,15 @@ func handleUpdateFunnelTemplate(c *gin.Context) {
 	set := bson.M{}
 	if updates.Name != "" {
 		set["name"] = updates.Name
+	}
+	if updates.TemplateKind != "" {
+		set["template_kind"] = updates.TemplateKind
+	}
+	if updates.DefaultForPageType != "" {
+		set["default_for_page_type"] = updates.DefaultForPageType
+	}
+	if updates.DefaultForTenant != nil {
+		set["default_for_tenant"] = *updates.DefaultForTenant
 	}
 	if updates.HTMLContent != "" {
 		set["html_content"] = updates.HTMLContent
@@ -542,11 +607,45 @@ func handleUpdateFunnelTemplate(c *gin.Context) {
 	if updates.SlotManifest != nil {
 		set["slot_manifest"] = updates.SlotManifest
 	}
+	if updates.MasterPrompt != "" {
+		set["master_prompt"] = updates.MasterPrompt
+	}
+	if updates.InputSchema != nil {
+		set["input_schema"] = updates.InputSchema
+	}
+	if updates.ExpectedOutputSchema != nil {
+		set["expected_output_schema"] = updates.ExpectedOutputSchema
+	}
+	if updates.StyleProfile != nil {
+		set["style_profile"] = updates.StyleProfile
+	}
+	if updates.AssetManifest != nil {
+		set["asset_manifest"] = updates.AssetManifest
+	}
 	if len(set) > 0 {
 		db.GetCollection(pkgmodels.FunnelTemplateCollection).Update(
 			bson.M{"public_id": templateId},
 			bson.M{"$set": set},
 		)
+		// If this template is now the tenant default, clear the flag on
+		// every other template of the same kind for the tenant. Read the
+		// updated record to get the tenant id (the route doesn't carry it
+		// in the URL).
+		if updates.DefaultForTenant != nil && *updates.DefaultForTenant {
+			var t pkgmodels.FunnelTemplate
+			if err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+				"public_id": templateId,
+			}).One(&t); err == nil && t.TenantID != "" {
+				_, _ = db.GetCollection(pkgmodels.FunnelTemplateCollection).UpdateAll(
+					bson.M{
+						"tenant_id":     t.TenantID,
+						"template_kind": t.TemplateKind,
+						"public_id":     bson.M{"$ne": templateId},
+					},
+					bson.M{"$set": bson.M{"default_for_tenant": false}},
+				)
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

@@ -51,9 +51,10 @@ func handleCreateForm(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name     string                  `json:"name" binding:"required"`
-		FormType string                  `json:"form_type"`
-		Fields   []*pkgmodels.FormField  `json:"fields"`
+		Name     string                   `json:"name" binding:"required"`
+		FormType string                   `json:"form_type"`
+		Fields   []*pkgmodels.FormField   `json:"fields"`
+		OnSubmit *pkgmodels.FormOnSubmit  `json:"on_submit"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -68,6 +69,7 @@ func handleCreateForm(c *gin.Context) {
 		Name:     req.Name,
 		FormType: req.FormType,
 		Fields:   req.Fields,
+		OnSubmit: req.OnSubmit,
 	}
 	form.CreatedAt = &now
 
@@ -104,9 +106,10 @@ func handleUpdateForm(c *gin.Context) {
 	}
 	formId := c.Param("formId")
 	var req struct {
-		Name     string                  `json:"name"`
-		FormType string                  `json:"form_type"`
-		Fields   []*pkgmodels.FormField  `json:"fields"`
+		Name     string                   `json:"name"`
+		FormType string                   `json:"form_type"`
+		Fields   []*pkgmodels.FormField   `json:"fields"`
+		OnSubmit *pkgmodels.FormOnSubmit  `json:"on_submit"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -125,6 +128,9 @@ func handleUpdateForm(c *gin.Context) {
 	}
 	if req.Fields != nil {
 		update["fields"] = req.Fields
+	}
+	if req.OnSubmit != nil {
+		update["on_submit"] = req.OnSubmit
 	}
 
 	if err := db.GetCollection(pkgmodels.PageFormCollection).Update(

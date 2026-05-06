@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/forms"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -30,15 +31,20 @@ func RegisterPublicFormRoutes(publicAPI *gin.RouterGroup) {
 // ---------- Public Form Submission ----------
 
 // publicFormRequest is the expected JSON or form body for lead/contact form
-// submissions from published website pages.
+// submissions from published website pages. Fields holds arbitrary
+// FormField values (keyed by FieldName) so the executor can apply each
+// FormField.MapsTo declaration without a fixed schema. The flat name/email/
+// phone keys remain for backwards compatibility with browser-form posts that
+// don't know about Fields.
 type publicFormRequest struct {
-	Domain  string `json:"domain" form:"domain"`
-	Name    string `json:"name" form:"name"`
-	Email   string `json:"email" form:"email"`
-	Phone   string `json:"phone" form:"phone"`
-	Message string `json:"message" form:"message"`
-	FormID  string `json:"form_id" form:"form_id"`
-	NextURL string `json:"next_url" form:"next_url"`
+	Domain  string            `json:"domain" form:"domain"`
+	Name    string            `json:"name" form:"name"`
+	Email   string            `json:"email" form:"email"`
+	Phone   string            `json:"phone" form:"phone"`
+	Message string            `json:"message" form:"message"`
+	FormID  string            `json:"form_id" form:"form_id"`
+	NextURL string            `json:"next_url" form:"next_url"`
+	Fields  map[string]string `json:"fields" form:"-"`
 }
 
 func handlePublicFormSubmit(c *gin.Context) {
@@ -56,9 +62,25 @@ func handlePublicFormSubmit(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid form data"})
 			return
 		}
+		// Pull every form-encoded key the binder didn't claim into Fields so
+		// the executor can resolve FormField.MapsTo by FieldName.
+		if req.Fields == nil {
+			req.Fields = map[string]string{}
+		}
+		for k, vs := range c.Request.PostForm {
+			if len(vs) == 0 {
+				continue
+			}
+			switch k {
+			case "domain", "name", "email", "phone", "message", "form_id", "next_url":
+				continue
+			}
+			req.Fields[k] = vs[0]
+		}
 	}
 
-	// Resolve domain from body, header, or Host.
+	// Resolve domain from body, header, or Host. Used as the fallback tenant
+	// resolver when no form_id is provided (legacy lead-capture path).
 	domain := req.Domain
 	if domain == "" {
 		domain = c.GetHeader("X-Forwarded-Host")
@@ -67,36 +89,127 @@ func handlePublicFormSubmit(c *gin.Context) {
 		domain = c.Request.Host
 	}
 
+	// New path — caller supplies form_id. The form record carries TenantID,
+	// FormField definitions, and the OnSubmit action chain. We resolve the
+	// form, validate required fields, run the executor, and return its
+	// structured Result.
+	if strings.TrimSpace(req.FormID) != "" {
+		var form pkgmodels.PageForm
+		if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
+			"public_id":             req.FormID,
+			"timestamps.deleted_at": nil,
+		}).One(&form); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "form not found"})
+			return
+		}
+
+		values := mergeFormValues(&req)
+		if missing := validateRequiredFields(&form, values); len(missing) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":           "missing required fields",
+				"missing_fields":  missing,
+			})
+			return
+		}
+
+		result := forms.Execute(&form, forms.Submission{FieldValues: values})
+
+		// Browser form posts that include a redirect get a 303 to the
+		// configured URL; the next_url body field still wins over the
+		// stored OnSubmit.RedirectURL so handcrafted forms can override.
+		redirect := strings.TrimSpace(req.NextURL)
+		if redirect == "" {
+			redirect = result.RedirectURL
+		}
+		if redirect != "" && !strings.Contains(contentType, "application/json") {
+			c.Redirect(http.StatusSeeOther, redirect)
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":            "ok",
+			"contact_id":        result.ContactID,
+			"contact_public_id": result.ContactPublicID,
+			"redirect_url":      redirect,
+			"downloads":         result.Downloads,
+			"badges_assigned":   result.BadgesAssigned,
+			"badges_removed":    result.BadgesRemoved,
+			"lists_added":       result.ListsAdded,
+			"lists_removed":     result.ListsRemoved,
+			"stories_started":   result.StoriesStarted,
+			"products_granted":  result.ProductsGranted,
+			"offer_attached":    result.OfferAttached,
+			"warnings":          result.Warnings,
+		})
+		return
+	}
+
+	// Legacy path — no form_id. Resolve tenant by domain and do a basic
+	// upsert. Preserves the prior behavior for published websites that
+	// haven't been re-published with form_id wiring yet.
 	if strings.TrimSpace(req.Email) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "email is required"})
 		return
 	}
-
-	// Resolve the site to find the tenant.
 	s, err := site.FindSiteByDomain(domain)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 		return
 	}
-
-	// Upsert contact in the tenant's user/contact collection.
 	contact, err := upsertContact(s.TenantID, req.Email, req.Name, req.Phone, req.Message)
 	if err != nil {
 		log.Printf("form submit: failed to upsert contact: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save contact"})
 		return
 	}
-
-	// If a redirect URL is configured, redirect (for browser form submissions).
 	if req.NextURL != "" {
 		c.Redirect(http.StatusSeeOther, req.NextURL)
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "ok",
 		"contact_id": contact.Id.Hex(),
 	})
+}
+
+// mergeFormValues collapses the flat name/email/phone/message fields and the
+// arbitrary Fields map into a single FieldName→value lookup the action
+// executor consumes.
+func mergeFormValues(req *publicFormRequest) map[string]string {
+	values := map[string]string{}
+	for k, v := range req.Fields {
+		if v != "" {
+			values[k] = v
+		}
+	}
+	if req.Email != "" {
+		values["email"] = req.Email
+	}
+	if req.Name != "" {
+		values["name"] = req.Name
+	}
+	if req.Phone != "" {
+		values["phone"] = req.Phone
+	}
+	if req.Message != "" {
+		values["message"] = req.Message
+	}
+	return values
+}
+
+// validateRequiredFields returns the FieldNames the form marked Required
+// that were not provided in the submission.
+func validateRequiredFields(form *pkgmodels.PageForm, values map[string]string) []string {
+	var missing []string
+	for _, f := range form.Fields {
+		if f == nil || !f.Required {
+			continue
+		}
+		if v, ok := values[f.FieldName]; !ok || strings.TrimSpace(v) == "" {
+			missing = append(missing, f.FieldName)
+		}
+	}
+	return missing
 }
 
 // upsertContact finds or creates a contact (User) in the tenant's user

@@ -48,6 +48,9 @@ type stripeEvent struct {
 type stripeCheckoutSession struct {
 	ID              string            `json:"id"`
 	Mode            string            `json:"mode"`
+	AmountTotal     int64             `json:"amount_total"`
+	Currency        string            `json:"currency"`
+	PaymentIntent   string            `json:"payment_intent"`
 	CustomerEmail   string            `json:"customer_email"`
 	CustomerDetails struct {
 		Email string `json:"email"`
@@ -218,6 +221,15 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		return fmt.Errorf("record subscription: %w", err)
 	}
 
+	// Revenue trail: write one PurchaseLog row for the purchase. We use the
+	// session's amount_total (post-discount) so revenue queries reflect what
+	// the buyer actually paid. PaymentIntent (or the session id as fallback)
+	// is recorded as StripeChargeId so refund processing can mark this row
+	// refunded later.
+	if err := recordPurchaseLog(tenantID, contact, &offer, &session); err != nil {
+		log.Printf("[stripe webhook] purchase log: %v", err)
+	}
+
 	// Newsletter side-effect: if this offer is bound to any newsletter tier,
 	// upsert/upgrade the contact's NewsletterSubscription to that tier and
 	// flip status to active. The paywall renderer reads tier_id off these
@@ -344,6 +356,59 @@ func grantOfferBadges(tenantID, contactID bson.ObjectId, badgeNames []string) er
 		bson.M{"_id": contactID},
 		bson.M{"$addToSet": bson.M{"badges": bson.M{"$each": badgeIDs}}},
 	)
+}
+
+// recordPurchaseLog inserts a PurchaseLog for a successful checkout. Idempotent
+// on (tenant, stripe_charge_id) — replays of the same Stripe event don't
+// double-count revenue. When the offer bundles multiple products, the row
+// captures the offer-level total; per-product entitlement is tracked
+// separately in CourseEnrollment.
+func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *pkgmodels.Offer, session *stripeCheckoutSession) error {
+	chargeRef := session.PaymentIntent
+	if chargeRef == "" {
+		chargeRef = session.ID
+	}
+	col := db.GetCollection(pkgmodels.PurchaseLogCollection)
+	if chargeRef != "" {
+		var existing pkgmodels.PurchaseLog
+		if err := col.Find(bson.M{
+			"tenant_id":        tenantID,
+			"stripe_charge_id": chargeRef,
+		}).One(&existing); err == nil {
+			return nil
+		}
+	}
+
+	// Prefer the actual Stripe-charged amount (handles coupons/proration).
+	amount := float64(session.AmountTotal) / 100
+	currency := strings.ToLower(strings.TrimSpace(session.Currency))
+	if currency == "" {
+		currency = strings.ToLower(strings.TrimSpace(offer.Currency))
+	}
+	if amount == 0 && offer.Amount > 0 {
+		amount = float64(offer.Amount) / 100
+	}
+
+	now := time.Now()
+	productID := bson.ObjectId("")
+	if len(offer.IncludedProducts) > 0 {
+		productID = offer.IncludedProducts[0]
+	}
+	entry := pkgmodels.PurchaseLog{
+		Id:             bson.NewObjectId(),
+		PublicId:       utils.GeneratePublicId(),
+		TenantID:       tenantID,
+		SubscriberId:   tenantID.Hex(),
+		UserId:         contact.Id,
+		ProductId:      productID,
+		OfferID:        offer.Id,
+		Amount:         amount,
+		Currency:       currency,
+		StripeChargeId: chargeRef,
+		Status:         "paid",
+	}
+	entry.SoftDeletes.CreatedAt = &now
+	return col.Insert(entry)
 }
 
 // recordSubscription upserts a Subscription row. For recurring payments the
@@ -618,6 +683,28 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 			"offer_id":   offerID,
 			"status":     bson.M{"$ne": "refunded"},
 		},
+		bson.M{"$set": bson.M{"status": "refunded", "timestamps.updated_at": now}},
+	)
+
+	// Mark the matching PurchaseLog row(s) as refunded so revenue queries
+	// exclude them. Matched primarily by charge id (Stripe-supplied) and
+	// secondarily by (tenant, contact, offer) for charges whose original
+	// PurchaseLog stored only the session id.
+	purchaseFilter := bson.M{
+		"tenant_id":  tenantID,
+		"user_id":    contact.Id,
+		"offer_id":   offerID,
+		"status":     bson.M{"$ne": "refunded"},
+	}
+	if charge.PaymentIntent != "" {
+		purchaseFilter = bson.M{
+			"tenant_id":        tenantID,
+			"stripe_charge_id": charge.PaymentIntent,
+			"status":           bson.M{"$ne": "refunded"},
+		}
+	}
+	_, _ = db.GetCollection(pkgmodels.PurchaseLogCollection).UpdateAll(
+		purchaseFilter,
 		bson.M{"$set": bson.M{"status": "refunded", "timestamps.updated_at": now}},
 	)
 

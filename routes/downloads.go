@@ -645,6 +645,77 @@ func assertContactEntitled(tenantID, contactID, productID bson.ObjectId) error {
 	return nil
 }
 
+// SignedDownload is a public-safe representation of one signed download URL.
+// Used by callers outside this package (e.g. the public form-submit action
+// executor) to surface lead-magnet deliveries without going through the
+// customer-auth library route.
+type SignedDownload struct {
+	AssetID   string `json:"asset_id"`
+	Name      string `json:"name"`
+	FileType  string `json:"file_type,omitempty"`
+	FileSize  int64  `json:"file_size,omitempty"`
+	URL       string `json:"url"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+// SignProductDownloads loads the digital_download product for the tenant and
+// mints a signed GET URL for every attached, non-deleted asset. Returns nil
+// (no error) when the product has no attached assets — callers can safely
+// concat results across multiple product ids. When storage is not configured
+// the function returns an explanatory error so callers can surface it.
+func SignProductDownloads(tenantID bson.ObjectId, productID string, ttl time.Duration) ([]SignedDownload, error) {
+	if downloadStorage == nil {
+		return nil, errors.New("storage not configured")
+	}
+	if !bson.IsObjectIdHex(productID) {
+		return nil, fmt.Errorf("invalid product id %q", productID)
+	}
+	var product pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"_id":                   bson.ObjectIdHex(productID),
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&product); err != nil {
+		return nil, fmt.Errorf("product not found: %w", err)
+	}
+	if product.ProductType != pkgmodels.ProductTypeDigitalDownload {
+		return nil, fmt.Errorf("product %s is not a digital download", productID)
+	}
+	assets := loadAssetsByIDs(tenantID, productAssetIDs(&product))
+	if len(assets) == 0 {
+		return nil, nil
+	}
+	out := make([]SignedDownload, 0, len(assets))
+	ttlSec := int(ttl / time.Second)
+	if ttlSec <= 0 {
+		ttlSec = 60
+		ttl = 60 * time.Second
+	}
+	for _, a := range assets {
+		if a.S3Key == "" {
+			continue
+		}
+		signed, err := downloadStorage.GenerateSignedDownloadURL(downloadBucket, a.S3Key, ttl)
+		if err != nil {
+			log.Printf("downloads: SignProductDownloads sign failed for %s: %v", a.S3Key, err)
+			continue
+		}
+		name := a.Title
+		if name == "" {
+			name = a.FileName
+		}
+		out = append(out, SignedDownload{
+			AssetID:   a.Id.Hex(),
+			Name:      name,
+			FileType:  a.FileType,
+			FileSize:  a.FileSize,
+			URL:       signed,
+			ExpiresIn: ttlSec,
+		})
+	}
+	return out, nil
+}
+
 // safeFileName scrubs a name for use as a GCS object path component or zip
 // entry. Keeps alphanumerics, dots, hyphens, and underscores; everything
 // else collapses to a single underscore.

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/marketing-service/internal/funnel"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -19,6 +21,67 @@ import (
 func RegisterFunnelAIRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.POST("/funnel-ai/generate-from-template", handleAIGenerateFunnelFromTemplate)
 	tenantAPI.GET("/funnel-ai/templates", handleListFunnelTemplatesForAI)
+	tenantAPI.POST("/funnel-ai/materialize", handleMaterializeFunnelTemplate)
+}
+
+// handleMaterializeFunnelTemplate turns AI slot output + structured inputs +
+// a target (domain + path + optional form) into a saved FunnelPage with its
+// Funnel→Route→Stage parent chain. Returns the resulting URL the page will
+// be served at by the existing site renderer.
+func handleMaterializeFunnelTemplate(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		TemplateID       string                 `json:"template_id" binding:"required"`
+		LLMOutput        map[string]interface{} `json:"llm_output"`
+		StructuredInputs map[string]interface{} `json:"structured_inputs"`
+		FormID           string                 `json:"form_id"`
+		DomainID         string                 `json:"domain_id"`
+		Hostname         string                 `json:"hostname"`
+		Path             string                 `json:"path"`
+		Publish          bool                   `json:"publish"`
+		Name             string                 `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	var tmpl pkgmodels.FunnelTemplate
+	if err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+		"public_id":             req.TemplateID,
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&tmpl); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+		return
+	}
+	res, err := funnel.Materialize(tenantID, funnel.MaterializeRequest{
+		Template:         &tmpl,
+		LLMOutput:        req.LLMOutput,
+		StructuredInputs: req.StructuredInputs,
+		FormPublicID:     req.FormID,
+		DomainID:         req.DomainID,
+		Hostname:         req.Hostname,
+		Path:             req.Path,
+		Publish:          req.Publish,
+		Name:             req.Name,
+	})
+	if err != nil {
+		log.Printf("materialize: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"page_id":          res.PageID,
+		"page_public_id":   res.PagePublicID,
+		"funnel_id":        res.FunnelID,
+		"funnel_public_id": res.FunnelPublicID,
+		"url":              res.URL,
+	})
 }
 
 // handleListFunnelTemplatesForAI returns templates with their slot manifests — used by the AI Architect picker.
@@ -105,7 +168,43 @@ func handleAIGenerateFunnelFromTemplate(c *gin.Context) {
 func buildFunnelSlotPrompt(instruction string, tmpl pkgmodels.FunnelTemplate, contextChunks []string, brandProfile string) string {
 	var sb strings.Builder
 
-	sb.WriteString("You are an expert conversion copywriter filling in content for a pre-designed funnel page template.\n\n")
+	// MasterPrompt comes first so importer-supplied per-template framing
+	// ("you are filling a webinar registration page in a soft, expert tone…")
+	// sets the LLM's voice before generic instructions kick in. Falls back
+	// to the generic copywriter framing when the template doesn't carry one.
+	if mp := strings.TrimSpace(tmpl.MasterPrompt); mp != "" {
+		sb.WriteString(mp)
+		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString("You are an expert conversion copywriter filling in content for a pre-designed funnel page template.\n\n")
+	}
+
+	// StyleProfile gives the LLM concrete style anchors derived from the
+	// extracted template (tone, visual style, copy style, CTA style,
+	// audience). Skipped when the manifest didn't extract any.
+	if sp := tmpl.StyleProfile; sp != nil {
+		var styleParts []string
+		if sp.Tone != "" {
+			styleParts = append(styleParts, "tone: "+sp.Tone)
+		}
+		if sp.VisualStyle != "" {
+			styleParts = append(styleParts, "visual: "+sp.VisualStyle)
+		}
+		if sp.CopyStyle != "" {
+			styleParts = append(styleParts, "copy: "+sp.CopyStyle)
+		}
+		if sp.CTAStyle != "" {
+			styleParts = append(styleParts, "CTA: "+sp.CTAStyle)
+		}
+		if sp.AudienceAssumption != "" {
+			styleParts = append(styleParts, "audience: "+sp.AudienceAssumption)
+		}
+		if len(styleParts) > 0 {
+			sb.WriteString("STYLE PROFILE: ")
+			sb.WriteString(strings.Join(styleParts, "; "))
+			sb.WriteString("\n\n")
+		}
+	}
 
 	if brandProfile != "" {
 		sb.WriteString("BRAND PROFILE:\n")
@@ -136,6 +235,9 @@ func buildFunnelSlotPrompt(instruction string, tmpl pkgmodels.FunnelTemplate, co
 			if slot.Constraints != "" {
 				sb.WriteString(fmt.Sprintf(", constraints: %s", slot.Constraints))
 			}
+			if slot.Description != "" {
+				sb.WriteString(fmt.Sprintf(" — %s", slot.Description))
+			}
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
@@ -144,6 +246,17 @@ func buildFunnelSlotPrompt(instruction string, tmpl pkgmodels.FunnelTemplate, co
 	} else {
 		sb.WriteString("The template uses {{ render_blocks }} for content insertion.\n")
 		sb.WriteString("Return a JSON object with key 'content' containing the HTML to inject.\n\n")
+	}
+
+	// ExpectedOutputSchema is shipped to the LLM verbatim when the importer
+	// carried one — it's the strongest typing signal we have for output
+	// shape and overrides the generic "key=slot" instruction.
+	if len(tmpl.ExpectedOutputSchema) > 0 {
+		if b, err := json.Marshal(tmpl.ExpectedOutputSchema); err == nil {
+			sb.WriteString("EXPECTED OUTPUT SCHEMA (return JSON conforming to this):\n")
+			sb.Write(b)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	sb.WriteString("TASK:\n")

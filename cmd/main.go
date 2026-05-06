@@ -132,6 +132,10 @@ func main() {
 	// Forms management (tenant-scoped CRUD for PageForm entities).
 	handlers.RegisterFormsRoutes(legacyTenantAPI)
 
+	// Phase 5 — admin Purchases + Revenue surfaces.
+	handlers.RegisterPurchasesRoutes(legacyTenantAPI)
+	handlers.RegisterRevenueRoutes(legacyTenantAPI)
+
 	// Email AI generation and editing.
 	handlers.RegisterEmailAIRoutes(legacyTenantAPI)
 
