@@ -21,7 +21,71 @@ import (
 func RegisterFunnelAIRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.POST("/funnel-ai/generate-from-template", handleAIGenerateFunnelFromTemplate)
 	tenantAPI.GET("/funnel-ai/templates", handleListFunnelTemplatesForAI)
+	tenantAPI.GET("/funnel-ai/default-template", handleGetDefaultTemplate)
 	tenantAPI.POST("/funnel-ai/materialize", handleMaterializeFunnelTemplate)
+}
+
+// handleGetDefaultTemplate returns the default template the tenant should
+// use for a given template_kind. Resolution order:
+//  1. tenant-marked default (FunnelTemplate.DefaultForTenant=true matching kind)
+//  2. system-marked default (DefaultForPageType matching kind, tenant_id=system)
+//  3. first-imported template of that kind, scoped to tenant or system
+//
+// Returns 404 only when the corpus is fully empty for that kind. Tenants
+// hitting "Generate from template" without choosing one go through here.
+func handleGetDefaultTemplate(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	kind := strings.TrimSpace(c.Query("kind"))
+	if kind == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind query param required"})
+		return
+	}
+	col := db.GetCollection(pkgmodels.FunnelTemplateCollection)
+
+	// Tenant-marked default first.
+	var t pkgmodels.FunnelTemplate
+	if err := col.Find(bson.M{
+		"tenant_id":             tenantID,
+		"template_kind":         kind,
+		"default_for_tenant":    true,
+		"timestamps.deleted_at": nil,
+	}).One(&t); err == nil {
+		c.JSON(http.StatusOK, t)
+		return
+	}
+
+	// System default — DefaultForPageType matching kind across any tenant.
+	if err := col.Find(bson.M{
+		"template_kind":          kind,
+		"default_for_page_type":  kind,
+		"timestamps.deleted_at":  nil,
+	}).One(&t); err == nil {
+		c.JSON(http.StatusOK, t)
+		return
+	}
+
+	// Last resort: any template of that kind scoped to tenant, then any tenant.
+	if err := col.Find(bson.M{
+		"tenant_id":             tenantID,
+		"template_kind":         kind,
+		"timestamps.deleted_at": nil,
+	}).One(&t); err == nil {
+		c.JSON(http.StatusOK, t)
+		return
+	}
+	if err := col.Find(bson.M{
+		"template_kind":         kind,
+		"timestamps.deleted_at": nil,
+	}).One(&t); err == nil {
+		c.JSON(http.StatusOK, t)
+		return
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "no template available for kind " + kind})
 }
 
 // handleMaterializeFunnelTemplate turns AI slot output + structured inputs +

@@ -72,12 +72,13 @@ type rawManifest struct {
 
 func main() {
 	var (
-		tenantHex string
-		sourceDir string
-		dryRun    bool
-		mongoHost string
-		mongoPort string
-		mongoDB   string
+		tenantHex             string
+		sourceDir             string
+		dryRun                bool
+		mongoHost             string
+		mongoPort             string
+		mongoDB               string
+		allowMissingManifest  bool
 	)
 	flag.StringVar(&tenantHex, "tenant-id", "", "Tenant ObjectId hex (required)")
 	flag.StringVar(&sourceDir, "source-dir", "lead-pages-templates/templates", "Templates root dir")
@@ -85,6 +86,7 @@ func main() {
 	flag.StringVar(&mongoHost, "mongo-host", envOr("MONGO_HOST", "localhost"), "Mongo host")
 	flag.StringVar(&mongoPort, "mongo-port", envOr("MONGO_PORT", "27017"), "Mongo port")
 	flag.StringVar(&mongoDB, "mongo-db", envOr("MONGO_DB", "sentanyl"), "Mongo database name")
+	flag.BoolVar(&allowMissingManifest, "allow-missing-manifest", false, "Synthesize a minimal manifest from meta.json + index.html when template.manifest.json is absent (LLM-pipeline failed templates)")
 	flag.Parse()
 
 	if tenantHex == "" || !bson.IsObjectIdHex(tenantHex) {
@@ -117,36 +119,52 @@ func main() {
 		}
 		dir := filepath.Join(abs, e.Name())
 		manifestPath := filepath.Join(dir, "template.manifest.json")
-		if _, err := os.Stat(manifestPath); err != nil {
-			skipped++
-			continue
-		}
-		raw, err := os.ReadFile(manifestPath)
-		if err != nil {
-			log.Printf("[%s] read manifest: %v", e.Name(), err)
-			errors++
-			continue
-		}
 		var m rawManifest
-		if err := json.Unmarshal(raw, &m); err != nil {
-			log.Printf("[%s] parse manifest: %v", e.Name(), err)
-			errors++
-			continue
-		}
-		if len(m.Pages) == 0 {
-			log.Printf("[%s] manifest has no pages, skipping", e.Name())
+		var page rawPage
+		var htmlBytes []byte
+
+		if _, err := os.Stat(manifestPath); err == nil {
+			raw, err := os.ReadFile(manifestPath)
+			if err != nil {
+				log.Printf("[%s] read manifest: %v", e.Name(), err)
+				errors++
+				continue
+			}
+			if err := json.Unmarshal(raw, &m); err != nil {
+				log.Printf("[%s] parse manifest: %v", e.Name(), err)
+				errors++
+				continue
+			}
+			if len(m.Pages) == 0 {
+				log.Printf("[%s] manifest has no pages, skipping", e.Name())
+				skipped++
+				continue
+			}
+			page = m.Pages[0]
+			htmlPath := filepath.Join(dir, page.TemplateHTML)
+			if page.TemplateHTML == "" {
+				htmlPath = filepath.Join(dir, "index.template.html")
+			}
+			htmlBytes, err = os.ReadFile(htmlPath)
+			if err != nil {
+				log.Printf("[%s] read template html (%s): %v", e.Name(), htmlPath, err)
+				errors++
+				continue
+			}
+		} else if allowMissingManifest {
+			// LLM templatize pipeline didn't run for this template. Synthesize
+			// a minimal manifest from meta.json + raw index.html so we still
+				// get a usable corpus seeded for AI generation.
+			synth, html, ok := synthesizeFromRaw(dir, e.Name())
+			if !ok {
+				skipped++
+				continue
+			}
+			m = synth
+			page = m.Pages[0]
+			htmlBytes = []byte(html)
+		} else {
 			skipped++
-			continue
-		}
-		page := m.Pages[0]
-		htmlPath := filepath.Join(dir, page.TemplateHTML)
-		if page.TemplateHTML == "" {
-			htmlPath = filepath.Join(dir, "index.template.html")
-		}
-		htmlBytes, err := os.ReadFile(htmlPath)
-		if err != nil {
-			log.Printf("[%s] read template html (%s): %v", e.Name(), htmlPath, err)
-			errors++
 			continue
 		}
 
@@ -282,4 +300,82 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// synthesizeFromRaw produces a minimal manifest for templates that didn't
+// make it through the LLM templatize pipeline. The slug feeds kind detection
+// and the raw index.html ships untouched as the template body — the AI
+// generation step still has plenty to work with even without slot markers.
+func synthesizeFromRaw(dir, slug string) (rawManifest, string, bool) {
+	rawHTMLPath := filepath.Join(dir, "index.html")
+	htmlBytes, err := os.ReadFile(rawHTMLPath)
+	if err != nil {
+		return rawManifest{}, "", false
+	}
+	metaPath := filepath.Join(dir, "meta.json")
+	templateID := slug
+	if metaBytes, err := os.ReadFile(metaPath); err == nil {
+		var meta struct {
+			Slug       string `json:"slug"`
+			TemplateID string `json:"templateId"`
+		}
+		if err := json.Unmarshal(metaBytes, &meta); err == nil {
+			if meta.TemplateID != "" {
+				templateID = meta.TemplateID
+			}
+			if meta.Slug != "" {
+				slug = meta.Slug
+			}
+		}
+	}
+	role := guessRoleFromSlug(slug)
+	humanName := strings.Title(strings.ReplaceAll(slug, "-", " "))
+	m := rawManifest{
+		TemplateID:       templateID,
+		TemplateName:     humanName,
+		SourceFolder:     slug,
+		PrimaryEntryHTML: "index.html",
+		Classification: rawClassification{
+			PageRole:   role,
+			TitleGuess: humanName,
+		},
+		Pages: []rawPage{{
+			SourceHTML:   "index.html",
+			TemplateHTML: "index.html",
+			PageRole:     role,
+			TitleGuess:   humanName,
+			Slots:        nil,
+		}},
+		MasterPrompt: fmt.Sprintf(
+			"Generate copy for a %s page titled %q. Output a JSON object with a `slots` map; use the existing HTML structure as inspiration but only populate slots that the AI infers from the layout.",
+			role, humanName,
+		),
+	}
+	return m, string(htmlBytes), true
+}
+
+// guessRoleFromSlug picks a template role keyword from the LeadPages slug.
+// Heuristic-only — accurate enough to bucket templates into the kinds the
+// materializer cares about.
+func guessRoleFromSlug(slug string) string {
+	s := strings.ToLower(slug)
+	switch {
+	case strings.Contains(s, "thank") || strings.Contains(s, "confirmation") || strings.Contains(s, "delivery"):
+		return "thank_you"
+	case strings.Contains(s, "webinar"):
+		return "webinar"
+	case strings.Contains(s, "checkout") || strings.Contains(s, "order"):
+		return "checkout"
+	case strings.Contains(s, "magnet") || strings.Contains(s, "freebie") || strings.Contains(s, "guide"):
+		return "lead_magnet"
+	case strings.Contains(s, "sales") || strings.Contains(s, "pricing"):
+		return "sales"
+	case strings.Contains(s, "opt-in") || strings.Contains(s, "optin") || strings.Contains(s, "squeeze") || strings.Contains(s, "signup") || strings.Contains(s, "sign-up") || strings.Contains(s, "subscribe"):
+		return "squeeze"
+	case strings.Contains(s, "about-me") || strings.Contains(s, "bio"):
+		return "about"
+	case strings.Contains(s, "newsletter"):
+		return "newsletter"
+	}
+	return "custom"
 }
