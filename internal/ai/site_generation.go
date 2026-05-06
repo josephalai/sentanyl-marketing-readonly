@@ -260,8 +260,14 @@ DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks dire
 **SentanylProductGrid** — Grid of products
   props: id, heading (string), columns (number, default 3)
 
-**SentanylVideoPlayer** — Enhanced video player
-  props: id, videoUrl (string), autoplay ("true"/"false"), showControls ("true"/"false")
+**SentanylVideoPlayer** — Wistia-style runtime player. When mediaPublicId is set, the published page emits ` + "`<video data-sentanyl>`" + ` + the Sentanyl runtime script, which auto-activates chapters, mid-video turnstile lead capture, end-of-video CTAs, and watch-event tracking via /api/video/events. The runtime exposes window.__sentanylVideoSession so the SentanylSqueezeSection / SentanylSalesSection blocks below it can attribute their conversions back to the watch session.
+  props: id, mediaPublicId (string — preferred; references Media.public_id), videoId (legacy), videoUrl (fallback URL), posterUrl (string), autoplay ("true"/"false"), showControls ("true"/"false")
+
+**SentanylSqueezeSection** — Lead-capture block placed UNDER a SentanylVideoPlayer. The form submit auto-includes the active video session id so MediaLeadCapture + granted_via_form PurchaseLog rows attribute the lead to the video.
+  props: id, headline (string), subhead (string), formId (string — references PageForm.public_id), ctaButtonText (string), backgroundColor (CSS color string)
+
+**SentanylSalesSection** — Offer block placed UNDER a SentanylVideoPlayer. The Buy CTA hits /api/marketing/site/checkout/start; the runtime decorates the body with video_session_id so the resulting Stripe webhook stamps PurchaseLog.video_session_public_id, enabling video → revenue attribution.
+  props: id, headline (string), description (string), offerId (string — Offer.public_id or hex), ctaText (string), bullets (array of {"value": "..."}), socialProofText (string)
 
 **SentanylCourseGrid** — Grid of courses
   props: id, heading (string)
@@ -286,6 +292,24 @@ DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks dire
 
 **SentanylFunnelCTA** — Funnel call-to-action section
   props: id, heading (string), description (string), buttonText (string), buttonUrl (string)
+
+## Video pages (VSL / squeeze) — Phase 11 pattern
+
+Pages that lead with a video earn the highest conversion rates when the video sits at the top and a single conversion section closes the page below. Sentanyl wires the attribution automatically:
+
+- **VSL (Video Sales Letter):** SentanylVideoPlayer at the top, followed by a SentanylSalesSection with the offer. The runtime decorates the Buy CTA with the active video session id, so PurchaseLog rows trace back to the video.
+
+- **Video Squeeze:** SentanylVideoPlayer at the top, followed by a SentanylSqueezeSection that points at a free-grant lead form. The form submit is auto-attributed to the watch session and lands a granted_via_form PurchaseLog row stamped with video_session_public_id.
+
+When the user asks for "a VSL", "video sales letter", "demo video page", "squeeze page with my video", or similar, default to one of these two layouts and ALWAYS pair the video with a single matching conversion block at the bottom. Do not mix Squeeze + Sales on the same video page — pick the one that matches the user's intent.
+
+Example VSL JSON skeleton:
+` + "```json" + `
+[
+  {"type":"SentanylVideoPlayer","props":{"id":"v","mediaPublicId":"<media-public-id>"}},
+  {"type":"SentanylSalesSection","props":{"id":"s","headline":"Ready to start?","description":"...","offerId":"<offer-public-id>","ctaText":"Get full access","bullets":[{"value":"Benefit one"},{"value":"Benefit two"}]}}
+]
+` + "```" + `
 
 ## Layout & Visual Rhythm Rules — read carefully
 
