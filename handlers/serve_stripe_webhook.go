@@ -358,11 +358,13 @@ func grantOfferBadges(tenantID, contactID bson.ObjectId, badgeNames []string) er
 	)
 }
 
-// recordPurchaseLog inserts a PurchaseLog for a successful checkout. Idempotent
-// on (tenant, stripe_charge_id) — replays of the same Stripe event don't
-// double-count revenue. When the offer bundles multiple products, the row
-// captures the offer-level total; per-product entitlement is tracked
-// separately in CourseEnrollment.
+// recordPurchaseLog inserts one PurchaseLog row per included product on a
+// successful checkout. Idempotent on (tenant, stripe_charge_id) — replays of
+// the same Stripe event don't double-count revenue. The session's
+// amount_total is split evenly across included products so revenue rollups
+// in serve_revenue.go (by-product, by-contact) can attribute each line item
+// to the right entitlement. Offers with no IncludedProducts get a single
+// offer-level row (ProductId zero).
 func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *pkgmodels.Offer, session *stripeCheckoutSession) error {
 	chargeRef := session.PaymentIntent
 	if chargeRef == "" {
@@ -370,6 +372,8 @@ func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *p
 	}
 	col := db.GetCollection(pkgmodels.PurchaseLogCollection)
 	if chargeRef != "" {
+		// Even one row matching this charge means we already recorded the
+		// purchase — no-op for replays.
 		var existing pkgmodels.PurchaseLog
 		if err := col.Find(bson.M{
 			"tenant_id":        tenantID,
@@ -379,36 +383,46 @@ func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *p
 		}
 	}
 
-	// Prefer the actual Stripe-charged amount (handles coupons/proration).
-	amount := float64(session.AmountTotal) / 100
+	totalAmount := float64(session.AmountTotal) / 100
 	currency := strings.ToLower(strings.TrimSpace(session.Currency))
 	if currency == "" {
 		currency = strings.ToLower(strings.TrimSpace(offer.Currency))
 	}
-	if amount == 0 && offer.Amount > 0 {
-		amount = float64(offer.Amount) / 100
+	if totalAmount == 0 && offer.Amount > 0 {
+		totalAmount = float64(offer.Amount) / 100
+	}
+
+	productIDs := offer.IncludedProducts
+	if len(productIDs) == 0 {
+		// No bundle — write a single offer-level row.
+		productIDs = []bson.ObjectId{""}
+	}
+	share := totalAmount
+	if len(productIDs) > 1 {
+		share = totalAmount / float64(len(productIDs))
 	}
 
 	now := time.Now()
-	productID := bson.ObjectId("")
-	if len(offer.IncludedProducts) > 0 {
-		productID = offer.IncludedProducts[0]
+	for _, pid := range productIDs {
+		entry := pkgmodels.PurchaseLog{
+			Id:             bson.NewObjectId(),
+			PublicId:       utils.GeneratePublicId(),
+			TenantID:       tenantID,
+			SubscriberId:   tenantID.Hex(),
+			UserId:         contact.Id,
+			ProductId:      pid,
+			OfferID:        offer.Id,
+			Amount:         share,
+			Currency:       currency,
+			StripeChargeId: chargeRef,
+			Status:         "paid",
+		}
+		entry.SoftDeletes.CreatedAt = &now
+		if err := col.Insert(entry); err != nil {
+			return err
+		}
 	}
-	entry := pkgmodels.PurchaseLog{
-		Id:             bson.NewObjectId(),
-		PublicId:       utils.GeneratePublicId(),
-		TenantID:       tenantID,
-		SubscriberId:   tenantID.Hex(),
-		UserId:         contact.Id,
-		ProductId:      productID,
-		OfferID:        offer.Id,
-		Amount:         amount,
-		Currency:       currency,
-		StripeChargeId: chargeRef,
-		Status:         "paid",
-	}
-	entry.SoftDeletes.CreatedAt = &now
-	return col.Insert(entry)
+	return nil
 }
 
 // recordSubscription upserts a Subscription row. For recurring payments the

@@ -1,8 +1,14 @@
 package handlers
 
 import (
+	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +26,7 @@ import (
 func RegisterPurchasesRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.GET("/purchases", handleListPurchases)
 	tenantAPI.GET("/purchases/:id", handleGetPurchase)
+	tenantAPI.POST("/purchases/:id/refund", handleRefundPurchase)
 }
 
 // purchaseDTO is the row shape returned to the admin UI. It joins the
@@ -247,4 +254,134 @@ func parseUnixSeconds(v string) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+// handleRefundPurchase issues a Stripe refund for the given purchase row and
+// relies on the existing charge.refunded webhook (serve_stripe_webhook.go) to
+// flip the PurchaseLog row(s), revoke entitlements, and strip granted badges.
+// We intentionally don't pre-flip the row here — that would race with the
+// webhook callback and risk double-flipping if the refund actually fails on
+// Stripe's side. A pending column would be the cleanest UX upgrade.
+func handleRefundPurchase(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	id := c.Param("id")
+	q := bson.M{"tenant_id": tenantID}
+	if bson.IsObjectIdHex(id) {
+		q["_id"] = bson.ObjectIdHex(id)
+	} else {
+		q["public_id"] = id
+	}
+	var p pkgmodels.PurchaseLog
+	if err := db.GetCollection(pkgmodels.PurchaseLogCollection).Find(q).One(&p); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "purchase not found"})
+		return
+	}
+	if p.Status == "refunded" {
+		c.JSON(http.StatusConflict, gin.H{"error": "purchase already refunded"})
+		return
+	}
+	if p.StripeChargeId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "purchase has no stripe charge — cannot refund through Stripe"})
+		return
+	}
+
+	var tenant pkgmodels.Tenant
+	if err := db.GetCollection(pkgmodels.TenantCollection).FindId(tenantID).One(&tenant); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tenant lookup failed"})
+		return
+	}
+	stripeKey := tenant.StripeSecretKey
+	stripeAcct := ""
+	if stripeKey == "" && tenant.StripeConnectAccountID != "" {
+		stripeKey = os.Getenv("STRIPE_PLATFORM_SECRET_KEY")
+		stripeAcct = tenant.StripeConnectAccountID
+	}
+	if stripeKey == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stripe not configured for this tenant"})
+		return
+	}
+
+	refundID, err := createStripeRefund(stripeKey, stripeAcct, p.StripeChargeId, tenantID, p.OfferID, string(loadContactEmail(tenantID, p.UserId)))
+	if err != nil {
+		log.Printf("refund failed: charge=%s err=%v", p.StripeChargeId, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "stripe refund failed: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "ok",
+		"refund_id": refundID,
+		"note":      "Stripe will fire charge.refunded; the row will flip to refunded once the webhook lands.",
+	})
+}
+
+// createStripeRefund posts to Stripe's /v1/refunds API. Metadata mirrors what
+// the checkout session originally carried so processChargeRefunded can resolve
+// (offer, contact_email) without doing extra Stripe lookups.
+func createStripeRefund(stripeKey, stripeAccount, chargeOrPI string, tenantID bson.ObjectId, offerID bson.ObjectId, contactEmail string) (string, error) {
+	form := url.Values{}
+	// Stripe's /v1/refunds accepts either `charge` or `payment_intent`. The
+	// PurchaseLog stores either depending on which one the session payload
+	// surfaced — try payment_intent first since checkout sessions use it.
+	if strings.HasPrefix(chargeOrPI, "pi_") {
+		form.Set("payment_intent", chargeOrPI)
+	} else {
+		form.Set("charge", chargeOrPI)
+	}
+	form.Set("metadata[tenant_id]", tenantID.Hex())
+	if offerID.Valid() {
+		form.Set("metadata[offer_id]", offerID.Hex())
+	}
+	if contactEmail != "" {
+		form.Set("metadata[contact_email]", contactEmail)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.stripe.com/v1/refunds", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(stripeKey, "")
+	if stripeAccount != "" {
+		req.Header.Set("Stripe-Account", stripeAccount)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		ID    string `json:"id"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode refund response: %w", err)
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("stripe: %s", out.Error.Message)
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("stripe returned no refund id")
+	}
+	return out.ID, nil
+}
+
+// loadContactEmail returns the contact's email by id, blank on error. Used as
+// a best-effort metadata field on the Stripe Refund so the inbound webhook
+// can resolve the buyer without a separate User lookup.
+func loadContactEmail(tenantID, contactID bson.ObjectId) pkgmodels.EmailAddress {
+	var u pkgmodels.User
+	if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+		"_id":       contactID,
+		"tenant_id": tenantID,
+	}).One(&u); err != nil {
+		return ""
+	}
+	return u.Email
 }

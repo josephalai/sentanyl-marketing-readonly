@@ -280,42 +280,68 @@ body{font-family:Georgia,serif;color:#111;background:#fafafa;margin:0}
 </style>`
 }
 
-// resolveFunnelPageByDomain tries to find a funnel page by domain and path.
+// resolveFunnelPageByDomain finds the rendered HTML for a published funnel
+// page at the given domain + path. Each call to the materializer creates a
+// fresh Funnel keyed on its hostname, so a single domain can have many
+// Funnel rows. The resolver walks them most-recent-first and prefers a
+// stage whose Path exactly matches the request. A stage with path "/" or
+// "" acts as the catch-all when no exact match exists, mirroring how most
+// SPA fallbacks behave.
 func resolveFunnelPageByDomain(domain, path string) (string, error) {
-	var funnel pkgmodels.Funnel
+	if path == "" {
+		path = "/"
+	}
+	// Most recent funnel for this domain wins on path collision — that's
+	// the "publish replaces previous" behaviour tenants expect.
+	var funnels []pkgmodels.Funnel
 	err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
 		"domain":                domain,
 		"timestamps.deleted_at": nil,
-	}).One(&funnel)
-	if err != nil {
-		return "", err
+	}).Sort("-timestamps.created_at").All(&funnels)
+	if err != nil || len(funnels) == 0 {
+		return "", fmt.Errorf("no funnel for domain %s", domain)
 	}
-	// Find funnel routes for this funnel.
-	var routes []pkgmodels.FunnelRoute
-	err = db.GetCollection(pkgmodels.FunnelRouteCollection).Find(bson.M{
-		"funnel_id":             funnel.Id,
-		"timestamps.deleted_at": nil,
-	}).Sort("order").All(&routes)
-	if err != nil || len(routes) == 0 {
-		return "", fmt.Errorf("no funnel routes found")
-	}
-	// For the root path, serve the first route's first page.
-	// Find stage IDs from routes.
-	for _, route := range routes {
-		if route.StageIds != nil {
+
+	var fallbackHTML string
+	for _, funnel := range funnels {
+		var routes []pkgmodels.FunnelRoute
+		_ = db.GetCollection(pkgmodels.FunnelRouteCollection).Find(bson.M{
+			"funnel_id":             funnel.Id,
+			"timestamps.deleted_at": nil,
+		}).Sort("order").All(&routes)
+
+		for _, route := range routes {
+			if route.StageIds == nil {
+				continue
+			}
 			for _, stageID := range route.StageIds.Ids {
+				var stage pkgmodels.FunnelStage
+				if err := db.GetCollection(pkgmodels.FunnelStageCollection).FindId(stageID).One(&stage); err != nil {
+					continue
+				}
 				var page pkgmodels.FunnelPage
-				err = db.GetCollection(pkgmodels.FunnelPageCollection).Find(bson.M{
-					"stage_id":              stageID,
+				if err := db.GetCollection(pkgmodels.FunnelPageCollection).Find(bson.M{
+					"stage_id":              stage.Id,
 					"timestamps.deleted_at": nil,
-				}).One(&page)
-				if err == nil && page.RenderedHTML != "" {
+				}).One(&page); err != nil || page.RenderedHTML == "" {
+					continue
+				}
+				// Exact path hit — return immediately.
+				if stage.Path == path {
 					return page.RenderedHTML, nil
+				}
+				// Catch-all candidate — remember but keep looking for an
+				// exact match on a later funnel.
+				if fallbackHTML == "" && (stage.Path == "/" || stage.Path == "") {
+					fallbackHTML = page.RenderedHTML
 				}
 			}
 		}
 	}
-	return "", fmt.Errorf("funnel page has no rendered content")
+	if fallbackHTML != "" {
+		return fallbackHTML, nil
+	}
+	return "", fmt.Errorf("no funnel page for %s%s", domain, path)
 }
 
 // resolveOfferPageByPath tries to match a path segment to an offer public_id.
