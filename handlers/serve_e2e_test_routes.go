@@ -77,12 +77,13 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 // enroll → password-setup pipeline without a real Stripe round-trip. The
 // underlying processCheckoutSessionCompleted is reused unchanged.
 type simulatePurchaseRequest struct {
-	TenantID  string `json:"tenant_id" binding:"required"`
-	OfferID   string `json:"offer_id" binding:"required"`
-	Email     string `json:"email" binding:"required"`
-	Name      string `json:"name"`
-	Domain    string `json:"domain"`
-	SessionID string `json:"session_id"`
+	TenantID       string `json:"tenant_id" binding:"required"`
+	OfferID        string `json:"offer_id" binding:"required"`
+	Email          string `json:"email" binding:"required"`
+	Name           string `json:"name"`
+	Domain         string `json:"domain"`
+	SessionID      string `json:"session_id"`
+	VideoSessionID string `json:"video_session_id"`
 }
 
 func handleSimulatePurchase(c *gin.Context) {
@@ -116,15 +117,19 @@ func handleSimulatePurchase(c *gin.Context) {
 		domain = "localhost"
 	}
 
+	metadata := map[string]string{
+		"offer_id":  req.OfferID,
+		"tenant_id": req.TenantID,
+		"domain":    domain,
+	}
+	if req.VideoSessionID != "" {
+		metadata["video_session_id"] = req.VideoSessionID
+	}
 	session := stripeCheckoutSession{
 		ID:            sessionID,
 		Mode:          "payment",
 		CustomerEmail: strings.ToLower(strings.TrimSpace(req.Email)),
-		Metadata: map[string]string{
-			"offer_id":  req.OfferID,
-			"tenant_id": req.TenantID,
-			"domain":    domain,
-		},
+		Metadata:      metadata,
 	}
 	session.CustomerDetails.Email = session.CustomerEmail
 	session.CustomerDetails.Name = req.Name

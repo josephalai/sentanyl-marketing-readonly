@@ -476,14 +476,41 @@ func buildComponentRegistry() []ComponentDef {
 			Label:    "Video Player",
 			Category: CategorySentanyl,
 			Fields: []ComponentField{
-				{Name: "videoId", Label: "Sentanyl Video ID", Type: FieldTypeText},
+				{Name: "mediaPublicId", Label: "Sentanyl Media public_id", Type: FieldTypeText},
+				{Name: "videoId", Label: "Legacy Video ID", Type: FieldTypeText},
 				{Name: "videoUrl", Label: "Video URL (fallback)", Type: FieldTypeURL},
+				{Name: "posterUrl", Label: "Poster image URL", Type: FieldTypeURL},
 				{Name: "autoplay", Label: "Autoplay", Type: FieldTypeToggle, DefaultValue: false},
 				{Name: "showControls", Label: "Show Controls", Type: FieldTypeToggle, DefaultValue: true},
 			},
 			DefaultProps: map[string]any{
 				"autoplay":     false,
 				"showControls": true,
+			},
+		},
+		{
+			Type:     "SentanylSqueezeSection",
+			Label:    "Squeeze (lead capture under video)",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "headline", Label: "Headline", Type: FieldTypeText, DefaultValue: "Get the next chapter delivered to your inbox"},
+				{Name: "subhead", Label: "Subhead / benefit", Type: FieldTypeText},
+				{Name: "formId", Label: "Form public_id", Type: FieldTypeText},
+				{Name: "ctaButtonText", Label: "CTA button text", Type: FieldTypeText, DefaultValue: "Send me access"},
+				{Name: "backgroundColor", Label: "Background color (CSS)", Type: FieldTypeText, DefaultValue: "#0e0e10"},
+			},
+		},
+		{
+			Type:     "SentanylSalesSection",
+			Label:    "Sales (offer under video)",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "headline", Label: "Headline", Type: FieldTypeText, DefaultValue: "Ready to go further?"},
+				{Name: "description", Label: "Description", Type: FieldTypeText},
+				{Name: "offerId", Label: "Offer public_id", Type: FieldTypeText},
+				{Name: "ctaText", Label: "CTA button text", Type: FieldTypeText, DefaultValue: "Get full access"},
+				{Name: "bullets", Label: "Bullet points", Type: FieldTypeArray},
+				{Name: "socialProofText", Label: "Social proof line", Type: FieldTypeText},
 			},
 		},
 		{
