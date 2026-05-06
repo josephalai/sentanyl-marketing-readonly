@@ -67,6 +67,7 @@ func RegisterCustomerLibraryRoutes(rg *gin.RouterGroup) {
 	rg.GET("/library/products", handleGetLibraryProducts)
 	RegisterDigitalDownloadCustomerRoutes(rg)
 	RegisterServiceCustomerRoutes(rg)
+	RegisterCustomerLibrarySummaryRoutes(rg)
 }
 
 // --- Product CRUD (tenant-scoped) ---
