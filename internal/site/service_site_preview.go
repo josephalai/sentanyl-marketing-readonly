@@ -245,20 +245,57 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		}
 
 	case "VideoSection", "SentanylVideoPlayer":
+		// Phase 11A Step 2: emit the augmented <video data-sentanyl> tag so
+		// the runtime sentanyl-video.js (loaded once via the <script> tag
+		// at the end of the section) attaches and activates chapters,
+		// turnstile lead capture, end-CTA, and watch tracking.
 		videoURL, _ := props["videoUrl"].(string)
-		// Support Sentanyl asset pipeline: if videoId or assetId is provided, resolve asset URL.
-		if videoID, ok := props["videoId"].(string); ok && videoID != "" && bson.IsObjectIdHex(videoID) {
-			if assetURL := resolveAssetURL(videoID); assetURL != "" {
-				videoURL = assetURL
+		mediaPublicID, _ := props["mediaPublicId"].(string)
+		posterURL, _ := props["posterUrl"].(string)
+
+		// Legacy: videoId could be either a Sentanyl Media.public_id (short
+		// random string) or a raw GCS asset ObjectId. ObjectId hex resolves
+		// through the asset pipeline; otherwise treat as Media.public_id.
+		if videoID, ok := props["videoId"].(string); ok && videoID != "" {
+			if bson.IsObjectIdHex(videoID) {
+				if assetURL := resolveAssetURL(videoID); assetURL != "" {
+					videoURL = assetURL
+				}
+			} else if mediaPublicID == "" {
+				mediaPublicID = videoID
 			}
 		} else if assetID, ok := props["assetId"].(string); ok && assetID != "" && bson.IsObjectIdHex(assetID) {
 			if assetURL := resolveAssetURL(assetID); assetURL != "" {
 				videoURL = assetURL
 			}
 		}
-		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
-		sb.WriteString(fmt.Sprintf("<video controls style=\"max-width:100%%\"><source src=\"%s\"></video>\n", esc(videoURL)))
+
+		dataAttrs := ""
+		if mediaPublicID != "" && tenantID.Valid() {
+			configURL := fmt.Sprintf("/api/video/public/media/%s/config?tenant_id=%s",
+				esc(mediaPublicID), tenantID.Hex())
+			dataAttrs = fmt.Sprintf(
+				` data-sentanyl data-media-public-id="%s" data-config-url="%s" data-tenant-id="%s"`,
+				esc(mediaPublicID), esc(configURL), tenantID.Hex())
+		}
+		posterAttr := ""
+		if posterURL != "" {
+			posterAttr = fmt.Sprintf(` poster="%s"`, esc(posterURL))
+		}
+
+		sb.WriteString("<section class=\"section sntl-video-section\" style=\"text-align:center\">\n")
+		sb.WriteString(fmt.Sprintf(
+			"<video controls preload=\"metadata\" style=\"max-width:100%%\"%s%s><source src=\"%s\"></video>\n",
+			dataAttrs, posterAttr, esc(videoURL)))
 		sb.WriteString("</section>\n")
+		// One script tag per page is enough — the runtime guards itself
+		// against double-init via window.__sentanylVideoLoaded. Emitting
+		// it on every Sentanyl-flagged video block keeps the renderer
+		// stateless and the browser dedupes the asset fetch via
+		// Cache-Control: max-age.
+		if dataAttrs != "" {
+			sb.WriteString(`<script src="/static/sentanyl-video.js" defer></script>` + "\n")
+		}
 
 	case "CTASection":
 		renderCTASection(sb, props, esc)
