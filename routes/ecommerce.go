@@ -277,9 +277,23 @@ func handleCreateOffer(c *gin.Context) {
 	}
 	offer.GrantedBadges = req.GrantedBadges
 
+	// Accept both hex ObjectId and public_id for each included product.
+	// Frontend callers (and test harnesses) often hold the public_id for
+	// display and constructing URLs; resolving here keeps the API contract
+	// flexible and avoids silently dropping products.
 	for _, pid := range req.IncludedProducts {
 		if bson.IsObjectIdHex(pid) {
 			offer.IncludedProducts = append(offer.IncludedProducts, bson.ObjectIdHex(pid))
+			continue
+		}
+		var found pkgmodels.Product
+		err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+			"tenant_id":             tenantID,
+			"public_id":             pid,
+			"timestamps.deleted_at": nil,
+		}).One(&found)
+		if err == nil {
+			offer.IncludedProducts = append(offer.IncludedProducts, found.Id)
 		}
 	}
 
@@ -356,10 +370,21 @@ func handleUpdateOffer(c *gin.Context) {
 		update["granted_badges"] = req.GrantedBadges
 	}
 	if req.IncludedProducts != nil {
+		// Accept both hex ObjectId and public_id (mirrors create path).
 		included := make([]bson.ObjectId, 0, len(req.IncludedProducts))
 		for _, pid := range req.IncludedProducts {
 			if bson.IsObjectIdHex(pid) {
 				included = append(included, bson.ObjectIdHex(pid))
+				continue
+			}
+			var found pkgmodels.Product
+			err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+				"tenant_id":             tenantID,
+				"public_id":             pid,
+				"timestamps.deleted_at": nil,
+			}).One(&found)
+			if err == nil {
+				included = append(included, found.Id)
 			}
 		}
 		update["included_products"] = included

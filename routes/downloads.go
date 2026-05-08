@@ -581,21 +581,32 @@ func requireCustomer(c *gin.Context) (bson.ObjectId, bson.ObjectId, bool) {
 // includes the requested digital_download product. Reuses the badge-grant
 // resolution from handleGetLibraryProducts so the entitlement contract is
 // consistent across the library.
+//
+// productID may be a 24-char hex ObjectId OR a public_id string — the portal
+// Library component constructs URLs as `product.id || product.public_id` and
+// some library response shapes only include public_id, so both must resolve
+// to the same product.
 func loadEntitledDownloadProduct(c *gin.Context, tenantID, contactID bson.ObjectId, productID string) (*pkgmodels.Product, bool) {
-	if !bson.IsObjectIdHex(productID) {
+	productID = strings.TrimSpace(productID)
+	if productID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product id"})
 		return nil, false
 	}
-	pid := bson.ObjectIdHex(productID)
-	var product pkgmodels.Product
-	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-		"_id":                   pid,
+	query := bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
-	}).One(&product); err != nil {
+	}
+	if bson.IsObjectIdHex(productID) {
+		query["_id"] = bson.ObjectIdHex(productID)
+	} else {
+		query["public_id"] = productID
+	}
+	var product pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(query).One(&product); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
 		return nil, false
 	}
+	pid := product.Id
 	if product.ProductType != pkgmodels.ProductTypeDigitalDownload {
 		c.JSON(http.StatusConflict, gin.H{"error": "product is not a digital download"})
 		return nil, false
