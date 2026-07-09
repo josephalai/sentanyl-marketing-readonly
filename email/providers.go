@@ -1,9 +1,9 @@
 package email
 
 import (
-	"bytes"
-	"fmt"
-	"net/smtp"
+	"sync"
+
+	"github.com/josephalai/sentanyl/pkg/emailer"
 )
 
 // EmailProvider defines the interface for sending emails through various providers.
@@ -11,6 +11,20 @@ type EmailProvider interface {
 	SendEmail(from, to, subject, htmlBody, replyTo string) error
 	Name() string
 }
+
+// DefaultProvider returns the process-wide provider selected by
+// EMAIL_PROVIDER (mailhog | smtp | powermta | brevo | warmup).
+// "warmup" routes through PowerMTA within each domain's daily warmup cap
+// and overflows/falls back to Brevo.
+func DefaultProvider() EmailProvider {
+	defaultOnce.Do(func() { defaultProvider = emailer.FromEnv() })
+	return defaultProvider
+}
+
+var (
+	defaultOnce     sync.Once
+	defaultProvider EmailProvider
+)
 
 // MailgunProvider handles email sending via Mailgun.
 type MailgunProvider struct {
@@ -31,71 +45,63 @@ func (m *MailgunProvider) Name() string {
 	return "mailgun"
 }
 
-// BrevoProvider handles email sending via Brevo (Sendinblue).
+// BrevoProvider handles email sending via the Brevo (Sendinblue) API v3.
 type BrevoProvider struct {
-	APIKey string
+	brevo *emailer.Brevo
 }
 
 func NewBrevoProvider(apiKey string) *BrevoProvider {
-	return &BrevoProvider{APIKey: apiKey}
+	return &BrevoProvider{brevo: &emailer.Brevo{APIKey: apiKey}}
 }
 
 func (b *BrevoProvider) SendEmail(from, to, subject, htmlBody, replyTo string) error {
-	// TODO: Implement Brevo sending via Brevo API v3
-	return nil
+	return b.brevo.SendEmail(from, to, subject, htmlBody, replyTo)
 }
 
 func (b *BrevoProvider) Name() string {
 	return "brevo"
 }
 
-// PowerMTAProvider handles email sending via PowerMTA SMTP injection.
+// PowerMTAProvider handles email sending via PowerMTA SMTP injection with
+// per-domain VMTA routing (X-PMTA-VirtualMTA).
 type PowerMTAProvider struct {
-	Host     string
-	Port     int
-	Username string
-	Password string
+	pmta *emailer.PowerMTA
 }
 
 func NewPowerMTAProvider(host string, port int, username, password string) *PowerMTAProvider {
-	return &PowerMTAProvider{Host: host, Port: port, Username: username, Password: password}
+	return &PowerMTAProvider{pmta: emailer.NewPowerMTA(host, port, username, password)}
 }
 
 func (p *PowerMTAProvider) SendEmail(from, to, subject, htmlBody, replyTo string) error {
-	// TODO: Implement PowerMTA SMTP injection with virtual MTA support
-	return nil
+	return p.pmta.SendEmail(from, to, subject, htmlBody, replyTo)
 }
 
 func (p *PowerMTAProvider) Name() string {
 	return "powermta"
 }
 
-// SMTPProvider sends email via plain SMTP — works with MailHog (no auth required).
+// SMTPProvider sends email via plain SMTP with optional auth + STARTTLS.
+// With no credentials it behaves like before (MailHog dev).
 type SMTPProvider struct {
 	Host string
 	Port int
+	smtp *emailer.SMTP
 }
 
 func NewSMTPProvider(host string, port int) *SMTPProvider {
-	return &SMTPProvider{Host: host, Port: port}
+	return NewSMTPProviderAuth(host, port, "", "")
+}
+
+func NewSMTPProviderAuth(host string, port int, username, password string) *SMTPProvider {
+	return &SMTPProvider{
+		Host: host,
+		Port: port,
+		smtp: &emailer.SMTP{Cfg: emailer.SMTPConfig{Host: host, Port: port, Username: username, Password: password}},
+	}
 }
 
 func (s *SMTPProvider) SendEmail(from, to, subject, htmlBody, replyTo string) error {
-	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
-
-	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("From: %s\r\n", from))
-	buf.WriteString(fmt.Sprintf("To: %s\r\n", to))
-	if replyTo != "" {
-		buf.WriteString(fmt.Sprintf("Reply-To: %s\r\n", replyTo))
-	}
-	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
-	buf.WriteString("MIME-Version: 1.0\r\n")
-	buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
-	buf.WriteString("\r\n")
-	buf.WriteString(htmlBody)
-
-	return smtp.SendMail(addr, nil, from, []string{to}, buf.Bytes())
+	return s.smtp.SendEmail(from, to, subject, htmlBody, replyTo)
 }
 
 func (s *SMTPProvider) Name() string {
@@ -122,12 +128,12 @@ func (t *TwilioProvider) Name() string {
 	return "twilio"
 }
 
-// SendEmail dispatches an email through the configured provider.
-// TODO: Implement provider selection based on config (mailhog, powermta, brevo, mailgun).
+// SendEmail dispatches an email through the given provider, falling back to
+// the EMAIL_PROVIDER-selected default when provider is nil. vmta is legacy —
+// VMTA routing now derives from the from-address domain.
 func SendEmail(from, to, subject, htmlBody, replyTo, vmta string, provider EmailProvider) error {
 	if provider == nil {
-		// TODO: Select default provider from config
-		return nil
+		provider = DefaultProvider()
 	}
 	return provider.SendEmail(from, to, subject, htmlBody, replyTo)
 }

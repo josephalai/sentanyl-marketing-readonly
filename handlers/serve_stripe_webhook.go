@@ -538,18 +538,7 @@ func sendPasswordSetupEmail(tenant *pkgmodels.Tenant, toEmail, portalURL string)
 }
 
 func selectMailProvider(tenant *pkgmodels.Tenant) email.EmailProvider {
-	host := os.Getenv("SMTP_HOST")
-	portStr := os.Getenv("SMTP_PORT")
-	if host == "" {
-		host = "mailhog"
-	}
-	port := 1025
-	if portStr != "" {
-		if p, err := strconv.Atoi(portStr); err == nil {
-			port = p
-		}
-	}
-	return email.NewSMTPProvider(host, port)
+	return email.DefaultProvider()
 }
 
 func htmlEscape(s string) string {

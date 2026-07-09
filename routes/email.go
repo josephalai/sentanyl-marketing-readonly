@@ -4,7 +4,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
@@ -15,20 +14,12 @@ import (
 )
 
 // smtpProvider is initialised once from env vars at startup.
-var smtpProvider *email.SMTPProvider
+var smtpProvider email.EmailProvider
 
 func init() {
-	if os.Getenv("EMAIL_PROVIDER") == "smtp" {
-		host := os.Getenv("SMTP_HOST")
-		if host == "" {
-			host = "localhost"
-		}
-		port := 1025
-		if p, err := strconv.Atoi(os.Getenv("SMTP_PORT")); err == nil {
-			port = p
-		}
-		smtpProvider = email.NewSMTPProvider(host, port)
-		log.Printf("email: SMTP provider configured → %s:%d", host, port)
+	if os.Getenv("EMAIL_PROVIDER") != "" {
+		smtpProvider = email.DefaultProvider()
+		log.Printf("email: provider configured → %s", smtpProvider.Name())
 	}
 }
 

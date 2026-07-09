@@ -40,23 +40,15 @@ var (
 	inMemSet = make(map[string]struct{})
 )
 
-// smtp is the SMTPProvider the in-process scheduler uses for drip sends.
+// smtp is the provider the in-process scheduler uses for drip sends.
 // Same constructor pattern as routes/email.go's init.
-var smtp *email.SMTPProvider
+var smtp email.EmailProvider
 
 // Start launches the newsletter ticker goroutine. Interval defaults to 60s
 // and is overridable with NEWSLETTER_SCHEDULER_INTERVAL (seconds).
 func Start() {
-	if os.Getenv("EMAIL_PROVIDER") == "smtp" {
-		host := os.Getenv("SMTP_HOST")
-		if host == "" {
-			host = "localhost"
-		}
-		port := 1025
-		if p, err := strconv.Atoi(os.Getenv("SMTP_PORT")); err == nil {
-			port = p
-		}
-		smtp = email.NewSMTPProvider(host, port)
+	if os.Getenv("EMAIL_PROVIDER") != "" {
+		smtp = email.DefaultProvider()
 	}
 
 	interval := 60 * time.Second

@@ -10,7 +10,6 @@ import (
 	htmlpkg "html"
 	"log"
 	"net/smtp"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -513,16 +512,6 @@ func sendDownloadDeliveryEmail(tenantID bson.ObjectId, contact *pkgmodels.User, 
 // Mirrors the helper in serve_stripe_webhook.go (kept duplicated rather than
 // exported to avoid a marketing-service/handlers → internal/forms cycle).
 func selectEmailProvider(tenantID bson.ObjectId) (email.EmailProvider, string) {
-	host := os.Getenv("SMTP_HOST")
-	if host == "" {
-		host = "mailhog"
-	}
-	port := 1025
-	if v := os.Getenv("SMTP_PORT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			port = n
-		}
-	}
 	from := "no-reply@sentanyl.local"
 	var tenant pkgmodels.Tenant
 	if err := db.GetCollection(pkgmodels.TenantCollection).FindId(tenantID).One(&tenant); err == nil {
@@ -530,7 +519,7 @@ func selectEmailProvider(tenantID bson.ObjectId) (email.EmailProvider, string) {
 			from = "no-reply@" + tenant.MailgunDomain
 		}
 	}
-	return email.NewSMTPProvider(host, port), from
+	return email.DefaultProvider(), from
 }
 
 func humanizeDuration(d time.Duration) string {
