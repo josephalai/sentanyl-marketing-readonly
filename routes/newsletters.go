@@ -83,16 +83,21 @@ func RegisterNewsletterPublicRoutes(rg *gin.RouterGroup) {
 // ---------- helpers ----------
 
 func loadNewsletter(tenantID bson.ObjectId, productIDParam string) (*pkgmodels.Product, int, string) {
-	if !bson.IsObjectIdHex(productIDParam) {
+	productIDParam = strings.TrimSpace(productIDParam)
+	if productIDParam == "" {
 		return nil, http.StatusBadRequest, "invalid product id"
 	}
-	pid := bson.ObjectIdHex(productIDParam)
-	var p pkgmodels.Product
-	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-		"_id":                   pid,
+	q := bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
-	}).One(&p); err != nil {
+	}
+	if bson.IsObjectIdHex(productIDParam) {
+		q["_id"] = bson.ObjectIdHex(productIDParam)
+	} else {
+		q["public_id"] = productIDParam
+	}
+	var p pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(q).One(&p); err != nil {
 		return nil, http.StatusNotFound, "newsletter not found"
 	}
 	if p.ProductType != pkgmodels.ProductTypeNewsletter {
@@ -908,7 +913,8 @@ func handleCustomerGetNewsletter(c *gin.Context) {
 		"tenant_id":             tenantID,
 		"product_id":            p.Id,
 		"status":                pkgmodels.NewsletterPostStatusPublished,
-		"hide_from_web":         false,
+		// hide_from_web is `omitempty` so absent == false. Match either.
+		"hide_from_web":         bson.M{"$ne": true},
 		"timestamps.deleted_at": nil,
 	}).Sort("-published_at").All(&posts)
 

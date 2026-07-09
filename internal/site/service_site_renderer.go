@@ -93,7 +93,7 @@ func resolveNewsletterPageByPath(domain, path string) (string, error) {
 			"tenant_id":             s.TenantID,
 			"product_id":            product.Id,
 			"status":                pkgmodels.NewsletterPostStatusPublished,
-			"hide_from_web":         false,
+			"hide_from_web":         bson.M{"$ne": true},
 			"timestamps.deleted_at": nil,
 		}).Sort("-published_at").Limit(50).All(&posts)
 		return renderNewsletterHome(&product, posts), nil

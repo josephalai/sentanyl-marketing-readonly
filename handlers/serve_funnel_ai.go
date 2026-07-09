@@ -114,13 +114,22 @@ func handleMaterializeFunnelTemplate(c *gin.Context) {
 		return
 	}
 	var tmpl pkgmodels.FunnelTemplate
-	if err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+	// Tenant-scoped first; fall back to system templates so the seeded
+	// corpus (loaded with the system tenant id) materializes for every
+	// tenant. Mirrors handleGetDefaultTemplate's resolution order.
+	err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
 		"public_id":             req.TemplateID,
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
-	}).One(&tmpl); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
-		return
+	}).One(&tmpl)
+	if err != nil {
+		if err = db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+			"public_id":             req.TemplateID,
+			"timestamps.deleted_at": nil,
+		}).One(&tmpl); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+			return
+		}
 	}
 	res, err := funnel.Materialize(tenantID, funnel.MaterializeRequest{
 		Template:         &tmpl,
