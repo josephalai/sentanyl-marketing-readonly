@@ -100,6 +100,13 @@ func main() {
 	// confined to /api/marketing.
 	routes.RegisterCampaignTrackingRoutes(r)
 
+	// Tenant send API — accepts per-tenant X-API-Key OR tenant JWT. Sibling
+	// group on the same prefix as tenantAPI below (gin allows both); external
+	// apps authenticate here with their tenant API key.
+	tenantSendAPI := r.Group("/api/marketing/tenant")
+	tenantSendAPI.Use(auth.RequireTenantAuthOrAPIKey())
+	routes.RegisterTenantEmailRoutes(tenantSendAPI)
+
 	// Protected tenant routes (require JWT).
 	// Scoped under /api/marketing/tenant/* to avoid collisions with public routes above.
 	// Caddy routes all /api/marketing/* to this service, so both are reachable.

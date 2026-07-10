@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
@@ -24,24 +25,53 @@ func init() {
 }
 
 // RegisterEmailRoutes registers all email-related endpoints.
+// These routes are unauthenticated and therefore only registered when
+// PUBLIC_EMAIL_ROUTES=true (dev). Production callers use the tenant-scoped
+// routes in email_tenant.go.
 func RegisterEmailRoutes(rg *gin.RouterGroup) {
+	if os.Getenv("PUBLIC_EMAIL_ROUTES") != "true" {
+		log.Printf("email: public email routes disabled (PUBLIC_EMAIL_ROUTES != true)")
+		return
+	}
 	rg.POST("/email", handleInsertEmail)
 	rg.DELETE("/emails", handleClearUnsentEmails)
 }
 
+// sendEmailRequest is the shared payload for the public and tenant send routes.
+type sendEmailRequest struct {
+	From        string `json:"from"         binding:"required"`
+	To          string `json:"to"           binding:"required"`
+	SubjectLine string `json:"subject_line" binding:"required"`
+	Html        string `json:"html"         binding:"required"`
+	ReplyTo     string `json:"reply_to"`
+}
+
 func handleInsertEmail(c *gin.Context) {
-	var req struct {
-		From        string `json:"from"         binding:"required"`
-		To          string `json:"to"           binding:"required"`
-		SubjectLine string `json:"subject_line" binding:"required"`
-		Html        string `json:"html"         binding:"required"`
-		ReplyTo     string `json:"reply_to"`
-	}
+	var req sendEmailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
+	insertAndSendEmail(c, req)
+}
 
+// nonRoutableTLDs are RFC-reserved TLDs that can never receive mail. Sends to
+// them (e.g. e2e fixtures like user@e2e.local) are accepted and dropped so
+// test flows stay green without generating hard bounces on the real MTA.
+var nonRoutableTLDs = map[string]bool{
+	"local": true, "localhost": true, "test": true, "invalid": true, "example": true,
+}
+
+func isNonRoutableRecipient(to string) bool {
+	if i := strings.LastIndex(to, "."); i >= 0 && i < len(to)-1 {
+		return nonRoutableTLDs[strings.ToLower(to[i+1:])]
+	}
+	return false
+}
+
+// insertAndSendEmail persists the message and dispatches it through the
+// configured provider, then writes the API response.
+func insertAndSendEmail(c *gin.Context, req sendEmailRequest) {
 	msg := pkgmodels.NewInstantEmail()
 	msg.From = req.From
 	msg.To = req.To
@@ -54,7 +84,16 @@ func handleInsertEmail(c *gin.Context) {
 		return
 	}
 
-	// Send immediately via SMTP (MailHog in dev).
+	if isNonRoutableRecipient(req.To) {
+		log.Printf("email: suppressed non-routable recipient %s (reserved TLD)", req.To)
+		c.JSON(http.StatusCreated, gin.H{
+			"status": "OK", "id": msg.GetIdHex(), "public_id": msg.PublicId,
+			"sent": false, "suppressed": true,
+		})
+		return
+	}
+
+	// Send immediately via the configured provider (MailHog in dev).
 	sent := false
 	if smtpProvider != nil {
 		if err := smtpProvider.SendEmail(req.From, req.To, req.SubjectLine, req.Html, req.ReplyTo); err != nil {
