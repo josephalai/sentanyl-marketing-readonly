@@ -80,6 +80,7 @@ func insertAndSendEmail(c *gin.Context, req sendEmailRequest) {
 	msg.ReplyTo = req.ReplyTo
 
 	if err := db.GetCollection(pkgmodels.InstantEmailCollection).Insert(msg); err != nil {
+		log.Printf("email: status=500 reason=insert_failed to=%s err=%v", req.To, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert email"})
 		return
 	}
