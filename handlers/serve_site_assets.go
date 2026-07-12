@@ -19,12 +19,24 @@ import (
 // end-of-video CTAs, and watch-event ingestion via /api/video/events.
 func RegisterPublicSiteAssetRoutes(r *gin.Engine) {
 	r.GET("/static/sentanyl-video.js", handleSentanylVideoJS)
+	r.GET("/static/sentanyl.js", handleSentanylJS)
 }
 
 func handleSentanylVideoJS(c *gin.Context) {
+	serveEmbeddedJS(c, assets.SentanylVideoJS())
+}
+
+// handleSentanylJS serves the frontend-channel browser SDK used by coded
+// (tenant-hosted) websites: Sentanyl.init/mountAll + data-sentanyl-*
+// declarative embeds over the /api/public/* contract.
+func handleSentanylJS(c *gin.Context) {
+	serveEmbeddedJS(c, assets.SentanylJS())
+}
+
+func serveEmbeddedJS(c *gin.Context, body []byte) {
 	c.Header("Content-Type", "application/javascript; charset=utf-8")
 	c.Header("Cache-Control", "public, max-age=86400")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Status(http.StatusOK)
-	_, _ = c.Writer.Write(assets.SentanylVideoJS())
+	_, _ = c.Writer.Write(body)
 }

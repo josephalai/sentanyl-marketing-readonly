@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 )
-
 
 // RegisterCheckoutLookupRoute registers the public post-checkout lookup
 // endpoint. Called by /portal/welcome to determine what to do with the buyer
@@ -40,21 +41,27 @@ func handleCheckoutLookup(c *gin.Context) {
 		hostname = forwarded
 	}
 
-	// Resolve the tenant from the hostname.  Try attached-domain lookup first
-	// (prod path), then the *.site.lvh.me dev pattern via the shared site
-	// resolver — which is the same logic used to serve the website itself.
+	// Resolve the tenant from the hostname. Prefer the shared resolver
+	// (verified tenant_domains → active frontend channel → published-site
+	// fallback); keep the legacy unverified tenant_domains lookup as a last
+	// resort so existing installs without is_verified don't break.
 	var tenantID bson.ObjectId
-	var tenantDomain pkgmodels.TenantDomain
-	if err := db.GetCollection(pkgmodels.DomainCollection).Find(bson.M{
-		"hostname":              hostname,
-		"timestamps.deleted_at": nil,
-	}).One(&tenantDomain); err == nil {
-		tenantID = tenantDomain.TenantID
-	} else if s, err := site.FindSiteByDomain(hostname); err == nil {
-		tenantID = s.TenantID
+	if pubCtx, err := publicchannel.ResolvePublicRequestWithDomain(c, hostname); err == nil {
+		tenantID = pubCtx.TenantID
 	} else {
-		c.JSON(http.StatusNotFound, gin.H{"error": "domain not found"})
-		return
+		var tenantDomain pkgmodels.TenantDomain
+		if err := db.GetCollection(pkgmodels.DomainCollection).Find(bson.M{
+			"hostname":              hostname,
+			"timestamps.deleted_at": nil,
+		}).One(&tenantDomain); err == nil {
+			log.Printf("checkout lookup: resolved %s via UNVERIFIED tenant_domains row — verify this domain", hostname)
+			tenantID = tenantDomain.TenantID
+		} else if s, err := site.FindSiteByDomain(hostname); err == nil {
+			tenantID = s.TenantID
+		} else {
+			c.JSON(http.StatusNotFound, gin.H{"error": "domain not found"})
+			return
+		}
 	}
 
 	var sub pkgmodels.Subscription

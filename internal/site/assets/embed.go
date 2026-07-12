@@ -12,3 +12,11 @@ var sentanylVideoJS []byte
 // caller (marketing-service/handlers) serves these at
 // GET /static/sentanyl-video.js.
 func SentanylVideoJS() []byte { return sentanylVideoJS }
+
+//go:embed sentanyl.js
+var sentanylJS []byte
+
+// SentanylJS returns the bytes of the frontend-channel browser SDK, served
+// at GET /static/sentanyl.js. packages/js/browser ships the same file for
+// npm consumers (kept in sync by its check-sync script).
+func SentanylJS() []byte { return sentanylJS }

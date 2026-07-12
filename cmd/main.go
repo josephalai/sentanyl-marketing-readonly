@@ -9,6 +9,7 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/handlers"
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/marketing-service/internal/channel"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/marketing-service/internal/scheduler"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
@@ -47,6 +48,9 @@ func main() {
 
 	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
 	routes.EnsureEcommerceIndexes()
+
+	// Ensure MongoDB indexes for frontend channels (coded websites, etc).
+	channel.EnsureIndexes()
 
 	// Ensure MongoDB indexes for Inbox Closer AI queues and tenant records.
 	routes.EnsureInboxIndexes()
@@ -159,6 +163,9 @@ func main() {
 	// Site themes and starter kits.
 	handlers.RegisterSiteThemeRoutes(legacyTenantAPI)
 
+	// Frontend channels (coded websites) tenant CRUD.
+	handlers.RegisterFrontendChannelRoutes(legacyTenantAPI)
+
 	// Website builder tenant routes (require JWT).
 	// Scoped under /api/tenant/sites* — Caddy routes these to marketing-service.
 	handlers.RegisterSiteRoutes(legacyTenantAPI)
@@ -183,6 +190,12 @@ func main() {
 
 	// Public form submission and checkout routes (no auth — for published websites).
 	handlers.RegisterPublicFormRoutes(api)
+
+	// Frontend-channel public integration surface (no auth — for coded
+	// websites and other frontend channels). Stable contract under
+	// /api/public/*; reuses the same form/checkout/newsletter internals as
+	// the builder routes above.
+	handlers.RegisterPublicChannelRoutes(r.Group("/api/public"))
 
 	// Public newsletter subscribe / confirm / unsubscribe routes (no auth).
 	routes.RegisterNewsletterPublicRoutes(api)

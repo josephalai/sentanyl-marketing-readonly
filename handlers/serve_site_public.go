@@ -17,6 +17,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -108,57 +109,7 @@ func handlePublicFormSubmit(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 			return
 		}
-		var form pkgmodels.PageForm
-		if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
-			"public_id":             req.FormID,
-			"tenant_id":             tenantID,
-			"timestamps.deleted_at": nil,
-		}).One(&form); err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "form not found"})
-			return
-		}
-
-		values := mergeFormValues(&req)
-		if missing := validateRequiredFields(&form, values); len(missing) > 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":           "missing required fields",
-				"missing_fields":  missing,
-			})
-			return
-		}
-
-		result := forms.Execute(&form, forms.Submission{
-			FieldValues:          values,
-			VideoSessionPublicId: req.VideoSessionID,
-		})
-
-		// Browser form posts that include a redirect get a 303 to the
-		// configured URL; the next_url body field still wins over the
-		// stored OnSubmit.RedirectURL so handcrafted forms can override.
-		redirect := strings.TrimSpace(req.NextURL)
-		if redirect == "" {
-			redirect = result.RedirectURL
-		}
-		if redirect != "" && !strings.Contains(contentType, "application/json") {
-			c.Redirect(http.StatusSeeOther, redirect)
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":            "ok",
-			"contact_id":        result.ContactID,
-			"contact_public_id": result.ContactPublicID,
-			"redirect_url":      redirect,
-			"downloads":         result.Downloads,
-			"badges_assigned":   result.BadgesAssigned,
-			"badges_removed":    result.BadgesRemoved,
-			"lists_added":       result.ListsAdded,
-			"lists_removed":     result.ListsRemoved,
-			"stories_started":   result.StoriesStarted,
-			"products_granted":  result.ProductsGranted,
-			"offer_attached":    result.OfferAttached,
-			"warnings":          result.Warnings,
-		})
+		runFormSubmission(c, tenantID, req.FormID, &req, strings.Contains(contentType, "application/json"))
 		return
 	}
 
@@ -187,6 +138,65 @@ func handlePublicFormSubmit(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "ok",
 		"contact_id": contact.Id.Hex(),
+	})
+}
+
+// runFormSubmission is the shared post-resolution form path: loads the form
+// by public_id scoped to the resolved tenant, validates required fields, runs
+// the OnSubmit executor, and writes the response (303 redirect for browser
+// posts, JSON otherwise). Shared by the legacy builder route and the
+// /api/public/forms/:formId channel route.
+func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID string, req *publicFormRequest, isJSON bool) {
+	var form pkgmodels.PageForm
+	if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
+		"public_id":             formPublicID,
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&form); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "form not found"})
+		return
+	}
+
+	values := mergeFormValues(req)
+	if missing := validateRequiredFields(&form, values); len(missing) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":          "missing required fields",
+			"missing_fields": missing,
+		})
+		return
+	}
+
+	result := forms.Execute(&form, forms.Submission{
+		FieldValues:          values,
+		VideoSessionPublicId: req.VideoSessionID,
+	})
+
+	// Browser form posts that include a redirect get a 303 to the
+	// configured URL; the next_url body field still wins over the
+	// stored OnSubmit.RedirectURL so handcrafted forms can override.
+	redirect := strings.TrimSpace(req.NextURL)
+	if redirect == "" {
+		redirect = result.RedirectURL
+	}
+	if redirect != "" && !isJSON {
+		c.Redirect(http.StatusSeeOther, redirect)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":            "ok",
+		"contact_id":        result.ContactID,
+		"contact_public_id": result.ContactPublicID,
+		"redirect_url":      redirect,
+		"downloads":         result.Downloads,
+		"badges_assigned":   result.BadgesAssigned,
+		"badges_removed":    result.BadgesRemoved,
+		"lists_added":       result.ListsAdded,
+		"lists_removed":     result.ListsRemoved,
+		"stories_started":   result.StoriesStarted,
+		"products_granted":  result.ProductsGranted,
+		"offer_attached":    result.OfferAttached,
+		"warnings":          result.Warnings,
 	})
 }
 
@@ -327,18 +337,26 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		return
 	}
 
-	// Resolve the site to find the tenant.
-	s, err := site.FindSiteByDomain(domain)
+	// Resolve the tenant. The shared resolver checks verified tenant_domains
+	// and active frontend channels first, then falls back to the published
+	// builder Site — so builder pages keep working, and a verified domain
+	// with no published Site (BYO coded website) can now start checkout.
+	pubCtx, err := publicchannel.ResolvePublicRequestWithDomain(c, req.Domain)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 		return
 	}
+	if err := publicchannel.EnforceOrigin(pubCtx); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	domain = pubCtx.Domain
 
 	// Fetch the offer.
 	var offer pkgmodels.Offer
 	err = db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"_id":                   bson.ObjectIdHex(req.OfferID),
-		"tenant_id":             s.TenantID,
+		"tenant_id":             pubCtx.TenantID,
 		"timestamps.deleted_at": nil,
 	}).One(&offer)
 	if err != nil {
@@ -346,12 +364,24 @@ func handlePublicCheckoutStart(c *gin.Context) {
 		return
 	}
 
+	startCheckoutSession(c, pubCtx, &offer, req.Email, req.SuccessURL, req.CancelURL, req.VideoSessionID)
+}
+
+// startCheckoutSession runs the shared post-resolution checkout flow:
+// duplicate-purchase guard, success/cancel URL defaulting (request body →
+// channel defaults → portal welcome), tenant Stripe credential selection,
+// and Stripe Checkout session creation. Shared by the legacy builder route
+// and the /api/public/checkout/:offerId channel route.
+func startCheckoutSession(c *gin.Context, pubCtx *publicchannel.PublicRequestContext, offer *pkgmodels.Offer, email, successURL, cancelURL, videoSessionID string) {
+	tenantID := pubCtx.TenantID
+	domain := pubCtx.Domain
+
 	// Duplicate-course guard: if the buyer already owns every product in
 	// this offer (via a prior purchase), don't start a second Stripe charge.
 	// The returned redirect sends them to the portal login, where a flash
 	// tells them they already have access.
-	if email := strings.ToLower(strings.TrimSpace(req.Email)); email != "" {
-		if alreadyOwnsAllProductsInOffer(s.TenantID, email, &offer) {
+	if email := strings.ToLower(strings.TrimSpace(email)); email != "" {
+		if alreadyOwnsAllProductsInOffer(tenantID, email, offer) {
 			scheme := "https"
 			if strings.Contains(domain, "lvh.me") || strings.Contains(domain, "localhost") {
 				scheme = "http"
@@ -369,12 +399,17 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	// Default to our Welcome landing page which polls the checkout lookup
 	// endpoint and routes the buyer to set-password (new account) or login
 	// (returning buyer) without needing to check email. Stripe substitutes
-	// {CHECKOUT_SESSION_ID} into the URL it redirects to.
-	successURL := req.SuccessURL
+	// {CHECKOUT_SESSION_ID} into the URL it redirects to. Channel-level
+	// defaults sit between the request body and the hardcoded fallback.
+	if successURL == "" && pubCtx.Channel != nil {
+		successURL = pubCtx.Channel.DefaultSuccessURL
+	}
 	if successURL == "" {
 		successURL = "/portal/welcome?session_id={CHECKOUT_SESSION_ID}"
 	}
-	cancelURL := req.CancelURL
+	if cancelURL == "" && pubCtx.Channel != nil {
+		cancelURL = pubCtx.Channel.DefaultCancelURL
+	}
 	if cancelURL == "" {
 		cancelURL = "/"
 	}
@@ -384,7 +419,7 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	// (StripeConnectAccountID + platform secret). Manual keys take precedence
 	// so a tenant can override without disconnecting.
 	var tenant pkgmodels.Tenant
-	err = db.GetCollection(pkgmodels.TenantCollection).FindId(s.TenantID).One(&tenant)
+	err := db.GetCollection(pkgmodels.TenantCollection).FindId(tenantID).One(&tenant)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error":    "payment processing is not configured for this business",
@@ -414,10 +449,10 @@ func handlePublicCheckoutStart(c *gin.Context) {
 
 	// Create a Stripe Checkout Session using the tenant's Stripe key.
 	extras := map[string]string{}
-	if v := strings.TrimSpace(req.VideoSessionID); v != "" {
+	if v := strings.TrimSpace(videoSessionID); v != "" {
 		extras["video_session_id"] = v
 	}
-	stripeSessionURL, err := checkout.CreateStripeCheckoutSessionWithExtras(stripeKey, stripeAcct, &offer, s.TenantID, successURL, cancelURL, domain, strings.TrimSpace(req.Email), extras)
+	stripeSessionURL, err := checkout.CreateStripeCheckoutSessionWithExtras(stripeKey, stripeAcct, offer, tenantID, successURL, cancelURL, domain, strings.TrimSpace(email), extras)
 	if err != nil {
 		log.Printf("Stripe checkout session creation failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
@@ -425,12 +460,13 @@ func handlePublicCheckoutStart(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":       "ok",
-		"checkout_url": stripeSessionURL,
-		"offer_id":     offer.Id.Hex(),
-		"title":        offer.Title,
-		"amount":       offer.Amount,
-		"currency":     offer.Currency,
+		"status":          "ok",
+		"checkout_url":    stripeSessionURL,
+		"offer_id":        offer.Id.Hex(),
+		"offer_public_id": offer.PublicId,
+		"title":           offer.Title,
+		"amount":          offer.Amount,
+		"currency":        offer.Currency,
 	})
 }
 

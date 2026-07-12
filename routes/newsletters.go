@@ -1136,16 +1136,33 @@ func handlePublicNewsletterSubscribe(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 		return
 	}
-	tenantID := s.TenantID
 
-	// Resolve product. Either explicit product_id or first newsletter on tenant.
+	RunPublicNewsletterSubscribe(c, s.TenantID, domain, req.ProductID, email, req.TierID, req.Source)
+}
+
+// RunPublicNewsletterSubscribe is the shared post-resolution newsletter
+// subscribe path (contact upsert, idempotent subscription row, double-opt-in
+// email). productIDParam may be an ObjectId hex, a product public_id, or
+// empty (first newsletter product on the tenant). Shared by the legacy
+// builder route and the /api/public/newsletters/:productId/subscribe
+// channel route.
+func RunPublicNewsletterSubscribe(c *gin.Context, tenantID bson.ObjectId, domain, productIDParam, email, tierID, source string) {
+	// Resolve product. Either explicit product id/public_id or first
+	// newsletter on tenant.
 	var product pkgmodels.Product
-	if req.ProductID != "" && bson.IsObjectIdHex(req.ProductID) {
-		_ = db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-			"_id":          bson.ObjectIdHex(req.ProductID),
-			"tenant_id":    tenantID,
-			"product_type": pkgmodels.ProductTypeNewsletter,
-		}).One(&product)
+	productIDParam = strings.TrimSpace(productIDParam)
+	if productIDParam != "" {
+		q := bson.M{
+			"tenant_id":             tenantID,
+			"product_type":          pkgmodels.ProductTypeNewsletter,
+			"timestamps.deleted_at": nil,
+		}
+		if bson.IsObjectIdHex(productIDParam) {
+			q["_id"] = bson.ObjectIdHex(productIDParam)
+		} else {
+			q["public_id"] = productIDParam
+		}
+		_ = db.GetCollection(pkgmodels.ProductCollection).Find(q).One(&product)
 	} else {
 		_ = db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
 			"tenant_id":             tenantID,
@@ -1167,7 +1184,6 @@ func handlePublicNewsletterSubscribe(c *gin.Context) {
 		return
 	}
 
-	tierID := req.TierID
 	if tierID == "" {
 		tierID = pkgmodels.NewsletterFreeTierID
 	}
@@ -1196,7 +1212,7 @@ func handlePublicNewsletterSubscribe(c *gin.Context) {
 		sub.UnsubscribeToken = newOptInToken()
 		exp := now.Add(7 * 24 * time.Hour)
 		sub.OptInExpiresAt = &exp
-		sub.Source = req.Source
+		sub.Source = source
 		_ = db.GetCollection(pkgmodels.NewsletterSubscriptionCollection).Update(
 			bson.M{"_id": sub.Id},
 			bson.M{"$set": bson.M{
@@ -1213,7 +1229,7 @@ func handlePublicNewsletterSubscribe(c *gin.Context) {
 		sub.UnsubscribeToken = newOptInToken()
 		exp := now.Add(7 * 24 * time.Hour)
 		sub.OptInExpiresAt = &exp
-		sub.Source = req.Source
+		sub.Source = source
 		if !requireOptIn {
 			sub.Status = pkgmodels.NewsletterSubscriptionStatusActive
 			sub.ConfirmedAt = &now
