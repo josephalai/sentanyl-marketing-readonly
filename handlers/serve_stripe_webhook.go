@@ -2,9 +2,7 @@ package handlers
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +18,7 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
 	"github.com/josephalai/sentanyl/pkg/db"
+	httputil "github.com/josephalai/sentanyl/pkg/http"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
@@ -31,9 +29,6 @@ import (
 func RegisterStripeWebhookRoute(publicAPI *gin.RouterGroup) {
 	publicAPI.POST("/stripe/webhook", handleStripeWebhook)
 }
-
-// Tolerance for Stripe timestamp skew, matching the Stripe SDK default.
-const stripeSignatureTolerance = 5 * time.Minute
 
 // stripeEvent is the minimal shape we care about.
 type stripeEvent struct {
@@ -136,47 +131,9 @@ func handleStripeWebhook(c *gin.Context) {
 }
 
 // verifyStripeSignature checks a Stripe-Signature header against the request body.
-// Format: "t=<timestamp>,v1=<sig>,v1=<sig>..."; we verify at least one v1 signature.
+// Delegates to the shared verifier also used by the platform billing webhook.
 func verifyStripeSignature(header string, body []byte, secret string) error {
-	if header == "" {
-		return fmt.Errorf("missing signature header")
-	}
-	var tsStr string
-	var sigs []string
-	for _, part := range strings.Split(header, ",") {
-		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		switch kv[0] {
-		case "t":
-			tsStr = kv[1]
-		case "v1":
-			sigs = append(sigs, kv[1])
-		}
-	}
-	if tsStr == "" || len(sigs) == 0 {
-		return fmt.Errorf("malformed signature header")
-	}
-	ts, err := strconv.ParseInt(tsStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("bad timestamp")
-	}
-	if age := time.Since(time.Unix(ts, 0)); age > stripeSignatureTolerance || age < -stripeSignatureTolerance {
-		return fmt.Errorf("timestamp outside tolerance")
-	}
-
-	signedPayload := tsStr + "." + string(body)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(signedPayload))
-	expected := hex.EncodeToString(mac.Sum(nil))
-
-	for _, s := range sigs {
-		if hmac.Equal([]byte(expected), []byte(s)) {
-			return nil
-		}
-	}
-	return fmt.Errorf("no matching signature")
+	return httputil.VerifyStripeSignature(header, body, secret)
 }
 
 func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.Tenant, raw json.RawMessage) error {

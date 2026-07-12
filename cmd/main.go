@@ -108,21 +108,21 @@ func main() {
 	// group on the same prefix as tenantAPI below (gin allows both); external
 	// apps authenticate here with their tenant API key.
 	tenantSendAPI := r.Group("/api/marketing/tenant")
-	tenantSendAPI.Use(auth.RequireTenantAuthOrAPIKey())
+	tenantSendAPI.Use(auth.RequireTenantAuthOrAPIKey(), auth.RequirePlatformSubscription())
 	routes.RegisterTenantEmailRoutes(tenantSendAPI)
 
 	// Protected tenant routes (require JWT).
 	// Scoped under /api/marketing/tenant/* to avoid collisions with public routes above.
 	// Caddy routes all /api/marketing/* to this service, so both are reachable.
 	tenantAPI := r.Group("/api/marketing/tenant")
-	tenantAPI.Use(auth.RequireTenantAuth())
+	tenantAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
 	routes.RegisterEcommerceRoutes(tenantAPI)
 	routes.RegisterInboxCloserRoutes(tenantAPI)
 
 	// Legacy /api/tenant/* paths — frontend pages call these directly (pre-refactor paths).
 	// Caddy now routes /api/tenant/products*, /api/tenant/offers*, etc. to this service.
 	legacyTenantAPI := r.Group("/api/tenant")
-	legacyTenantAPI.Use(auth.RequireTenantAuth())
+	legacyTenantAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
 	routes.RegisterEcommerceRoutes(legacyTenantAPI)
 	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
 	routes.RegisterNewsletterTenantRoutes(legacyTenantAPI)
@@ -130,7 +130,7 @@ func main() {
 
 	// Legacy /api/funnel/* path — FunnelTemplatesPage calls /api/funnel/template.
 	legacyFunnelAPI := r.Group("/api/funnel")
-	legacyFunnelAPI.Use(auth.RequireTenantAuth())
+	legacyFunnelAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
 	routes.RegisterLegacyFunnelTemplateRoutes(legacyFunnelAPI)
 
 	// Customer-facing routes (require customer JWT).
