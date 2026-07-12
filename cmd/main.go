@@ -194,8 +194,11 @@ func main() {
 	// Frontend-channel public integration surface (no auth — for coded
 	// websites and other frontend channels). Stable contract under
 	// /api/public/*; reuses the same form/checkout/newsletter internals as
-	// the builder routes above.
-	handlers.RegisterPublicChannelRoutes(r.Group("/api/public"))
+	// the builder routes above. Rate-limited per IP (public/unauth surface:
+	// checkout-session spam, form/newsletter abuse).
+	publicGroup := r.Group("/api/public")
+	publicGroup.Use(httputil.RateLimit(60, 30))
+	handlers.RegisterPublicChannelRoutes(publicGroup)
 
 	// Public newsletter subscribe / confirm / unsubscribe routes (no auth).
 	routes.RegisterNewsletterPublicRoutes(api)
