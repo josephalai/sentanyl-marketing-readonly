@@ -80,6 +80,7 @@ func RegisterLegacyTenantFunnelRoutes(rg *gin.RouterGroup) {
 	rg.GET("/funnels", handleGetFunnels)
 	rg.GET("/funnels/:funnelId", handleGetFunnel)
 	rg.POST("/funnels", handleCreateFunnel)
+	rg.PUT("/funnels/:funnelId", handleUpdateFunnel)
 	rg.DELETE("/funnels/:funnelId", handleDeleteFunnel)
 }
 
@@ -181,6 +182,42 @@ func handleGetFunnel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "funnel": funnel})
 }
 
+// normalizeFunnelTree gives every embedded route/stage real ids, ownership,
+// and 1-based order. Without this, docs with empty nested _id fields fail
+// bson marshalling ("ObjectIDs must be exactly 12 bytes long").
+func normalizeFunnelTree(funnel *pkgmodels.Funnel) {
+	for ri, route := range funnel.Routes {
+		if route == nil {
+			continue
+		}
+		if route.Id == "" {
+			route.Id = bson.NewObjectId()
+		}
+		if route.PublicId == "" {
+			route.PublicId = utils.GeneratePublicId()
+		}
+		route.FunnelId = funnel.Id
+		route.TenantID = funnel.TenantID
+		route.SubscriberId = funnel.SubscriberId
+		route.Order = ri + 1
+		for si, stage := range route.Stages {
+			if stage == nil {
+				continue
+			}
+			if stage.Id == "" {
+				stage.Id = bson.NewObjectId()
+			}
+			if stage.PublicId == "" {
+				stage.PublicId = utils.GeneratePublicId()
+			}
+			stage.RouteId = route.Id
+			stage.TenantID = funnel.TenantID
+			stage.SubscriberId = funnel.SubscriberId
+			stage.Order = si + 1
+		}
+	}
+}
+
 func handleCreateFunnel(c *gin.Context) {
 	var funnel pkgmodels.Funnel
 	if err := c.ShouldBindJSON(&funnel); err != nil {
@@ -190,9 +227,69 @@ func handleCreateFunnel(c *gin.Context) {
 	now := time.Now()
 	funnel.Id = bson.NewObjectId()
 	funnel.PublicId = utils.GeneratePublicId()
+	if funnel.TenantID == "" {
+		funnel.TenantID = pkgauth.GetTenantObjectID(c)
+	}
+	if funnel.SubscriberId == "" {
+		funnel.SubscriberId = pkgauth.GetTenantID(c)
+	}
+	normalizeFunnelTree(&funnel)
 	funnel.SoftDeletes.CreatedAt = &now
-	db.GetCollection(pkgmodels.FunnelCollection).Insert(funnel)
+	if err := db.GetCollection(pkgmodels.FunnelCollection).Insert(funnel); err != nil {
+		log.Printf("create funnel: insert failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create funnel"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "funnel": funnel})
+}
+
+// handleUpdateFunnel persists the funnel builder's structure edits: name and
+// the routes[]/stages[] tree (rename, reorder, add, remove). Stage pages and
+// triggers ride through untouched — the UI round-trips them from GET.
+// Scoped to the caller's tenant (tenant_id or the legacy subscriber_id key).
+func handleUpdateFunnel(c *gin.Context) {
+	var req struct {
+		Name   string                   `json:"name"`
+		Routes []*pkgmodels.FunnelRoute `json:"routes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid funnel data"})
+		return
+	}
+
+	scope := bson.M{
+		"public_id":             c.Param("funnelId"),
+		"timestamps.deleted_at": nil,
+		"$or": []bson.M{
+			{"tenant_id": pkgauth.GetTenantObjectID(c)},
+			{"subscriber_id": pkgauth.GetTenantID(c)},
+		},
+	}
+	var funnel pkgmodels.Funnel
+	if err := db.GetCollection(pkgmodels.FunnelCollection).Find(scope).One(&funnel); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "funnel not found"})
+		return
+	}
+
+	set := bson.M{"timestamps.updated_at": time.Now()}
+	if req.Name != "" {
+		set["name"] = req.Name
+	}
+	if req.Routes != nil {
+		tree := funnel
+		tree.Routes = req.Routes
+		normalizeFunnelTree(&tree)
+		set["routes"] = tree.Routes
+	}
+	if err := db.GetCollection(pkgmodels.FunnelCollection).UpdateId(funnel.Id, bson.M{"$set": set}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update funnel"})
+		return
+	}
+	if err := db.GetCollection(pkgmodels.FunnelCollection).FindId(funnel.Id).One(&funnel); err == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "funnel": funnel})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func handleDeleteFunnel(c *gin.Context) {
