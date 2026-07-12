@@ -17,6 +17,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/plans"
 	"github.com/josephalai/sentanyl/pkg/utils"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -954,9 +955,11 @@ func findOrCreateInboxContact(tenantID bson.ObjectId, emailAddress, name string)
 		contact.Name.Last = strings.Join(parts[1:], " ")
 	}
 	contact.SetCreated()
+	plans.ApplyHold(&contact)
 	if err := db.GetCollection(pkgmodels.UserCollection).Insert(&contact); err != nil {
 		return nil, err
 	}
+	plans.Invalidate(tenantID)
 	return &contact, nil
 }
 

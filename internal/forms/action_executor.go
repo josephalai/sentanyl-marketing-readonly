@@ -20,6 +20,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/plans"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -220,9 +221,11 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, e
 	}
 	contact.Subscribed = true
 	contact.SoftDeletes.CreatedAt = &now
+	plans.ApplyHold(&contact)
 	if err := col.Insert(contact); err != nil {
 		return nil, err
 	}
+	plans.Invalidate(form.TenantID)
 	return &contact, nil
 }
 
