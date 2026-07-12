@@ -30,6 +30,8 @@ func RegisterPublicChannelRoutes(public *gin.RouterGroup) {
 	public.POST("/forms/:formId", handlePublicChannelFormSubmit)
 	public.POST("/checkout/:offerId", handlePublicChannelCheckout)
 	public.POST("/newsletters/:productId/subscribe", handlePublicChannelNewsletterSubscribe)
+	public.GET("/quizzes/:quizId", handlePublicQuizGet)
+	public.POST("/quizzes/:quizId/submit", handlePublicQuizSubmit)
 }
 
 // resolvePublicChannelRequest resolves + enforces origin, writing the error

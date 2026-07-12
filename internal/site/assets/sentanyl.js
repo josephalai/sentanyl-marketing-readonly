@@ -22,6 +22,8 @@
  *   <div data-sentanyl-offers></div>
  *   <div data-sentanyl-coaching="program_public_id"></div>
  *   <video data-sentanyl-video="media_public_id" src="…"></video>
+ *   <div data-sentanyl-quiz="quiz_public_id" data-sentanyl-lead></div>
+ *   <a data-sentanyl-portal-link>My account</a>
  *
  * Programmatic API:
  *   Sentanyl.forms.submit(formId, payload)
@@ -38,6 +40,7 @@
  *   sentanyl:checkout:redirect / sentanyl:checkout:error
  *   sentanyl:newsletter:success / sentanyl:newsletter:error
  *   sentanyl:coaching:booked / sentanyl:coaching:error
+ *   sentanyl:quiz:submitted / sentanyl:quiz:error
  *
  * No deps. No build step. ES2018. Strict mode. Hand-written.
  */
@@ -215,6 +218,27 @@
       },
       book: function (programId, payload) {
         return post('/api/public/coaching/' + encodeURIComponent(programId) + '/book', payload);
+      },
+    },
+
+    quizzes: {
+      get: function (quizId) {
+        return get('/api/public/quizzes/' + encodeURIComponent(quizId)).then(function (b) { return b.quiz; });
+      },
+      submit: function (quizId, payload) {
+        return post('/api/public/quizzes/' + encodeURIComponent(quizId) + '/submit', payload);
+      },
+    },
+
+    portal: {
+      // Resolves the customer-portal URL for this channel (course/library
+      // handoff from a coded site). Falls back to /portal on the channel's
+      // domain when no explicit portal base is configured.
+      url: function (path) {
+        return channel().then(function (ch) {
+          var base = ch.portal_base_url || ('https://' + (ch.domain || cfg.domain || location.host) + '/portal');
+          return base.replace(/\/$/, '') + (path || '');
+        });
       },
     },
 
@@ -408,6 +432,99 @@
     }).catch(function () {});
   }
 
+  function mountQuizzes(root) {
+    each(root, '[data-sentanyl-quiz]', function (host) {
+      var quizId = host.getAttribute('data-sentanyl-quiz');
+      var wantLead = host.hasAttribute('data-sentanyl-lead');
+      api.quizzes.get(quizId).then(function (quiz) {
+        host.innerHTML = '';
+        var form = document.createElement('form');
+        form.className = 'sntl-quiz';
+        form.appendChild(textDiv('sntl-quiz-title', quiz.title || 'Quiz'));
+        (quiz.questions || []).forEach(function (q, qi) {
+          var block = document.createElement('div');
+          block.className = 'sntl-quiz-question';
+          block.appendChild(textDiv('sntl-quiz-question-title', (qi + 1) + '. ' + q.title));
+          if (q.type === 'text' || !(q.options || []).length) {
+            var input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'sntl-quiz-text';
+            input.setAttribute('data-sntl-q', q.slug);
+            block.appendChild(input);
+          } else {
+            q.options.forEach(function (opt, oi) {
+              var label = document.createElement('label');
+              label.className = 'sntl-quiz-option';
+              var radio = document.createElement('input');
+              radio.type = 'radio';
+              radio.name = 'sntl-q-' + q.slug;
+              radio.value = String(oi);
+              label.appendChild(radio);
+              label.appendChild(document.createTextNode(' ' + opt));
+              block.appendChild(label);
+            });
+          }
+          form.appendChild(block);
+        });
+        var emailInput = null;
+        if (wantLead) {
+          emailInput = document.createElement('input');
+          emailInput.type = 'email';
+          emailInput.required = true;
+          emailInput.placeholder = host.getAttribute('data-sentanyl-email-placeholder') || 'Your email to get your results';
+          emailInput.className = 'sntl-quiz-email';
+          form.appendChild(emailInput);
+        }
+        var submit = document.createElement('button');
+        submit.type = 'submit';
+        submit.className = 'sntl-quiz-submit';
+        submit.textContent = host.getAttribute('data-sentanyl-cta') || 'See my results';
+        form.appendChild(submit);
+
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var answers = (quiz.questions || []).map(function (q) {
+            if (q.type === 'text' || !(q.options || []).length) {
+              var t = form.querySelector('[data-sntl-q="' + q.slug + '"]');
+              return { question_slug: q.slug, answer_text: t ? t.value : '' };
+            }
+            var checked = form.querySelector('input[name="sntl-q-' + q.slug + '"]:checked');
+            return { question_slug: q.slug, answer_index: checked ? parseInt(checked.value, 10) : -1 };
+          });
+          submit.disabled = true;
+          api.quizzes.submit(quizId, {
+            email: emailInput ? emailInput.value : undefined,
+            answers: answers,
+          }).then(function (resp) {
+            emit(host, 'sentanyl:quiz:submitted', resp);
+            form.innerHTML = '';
+            var result = textDiv('sntl-quiz-result' + (resp.passed ? ' sntl-quiz-passed' : ' sntl-quiz-failed'),
+              'You scored ' + resp.score + '% (' + resp.correct + '/' + resp.total + ')' +
+              (resp.pass_threshold ? (resp.passed ? ' — passed!' : ' — ' + resp.pass_threshold + '% needed to pass.') : ''));
+            form.appendChild(result);
+          }).catch(function (err) {
+            submit.disabled = false;
+            emit(host, 'sentanyl:quiz:error', err);
+            showInlineNote(form, (err.body && err.body.error) || 'Could not submit the quiz — try again.', true);
+          });
+        });
+        host.appendChild(form);
+      }).catch(function () {
+        host.appendChild(textDiv('sntl-quiz-empty', 'Quiz unavailable right now.'));
+      });
+    });
+  }
+
+  function mountPortalLinks(root) {
+    each(root, '[data-sentanyl-portal-link]', function (a) {
+      var path = a.getAttribute('data-sentanyl-portal-link') || '';
+      api.portal.url(path.charAt(0) === '/' ? path : (path ? '/' + path : '')).then(function (url) {
+        if (a.tagName === 'A') a.href = url;
+        else a.addEventListener('click', function () { location.href = url; });
+      }).catch(function () {});
+    });
+  }
+
   function mountAll(root) {
     mountForms(root);
     mountCheckout(root);
@@ -415,6 +532,8 @@
     mountProducts(root);
     mountCoaching(root);
     mountVideos(root);
+    mountQuizzes(root);
+    mountPortalLinks(root);
     return api;
   }
 

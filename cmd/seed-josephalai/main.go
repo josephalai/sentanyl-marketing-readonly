@@ -147,6 +147,11 @@ func main() {
 	form := upsertApplicationForm(tenantID)
 	cfg["coaching_form_public_id"] = form.PublicId
 
+	// Manifesting readiness quiz — the /research page's embedded assessment
+	// (data-sentanyl-quiz), doubling as a lead magnet.
+	quiz := upsertReadinessQuiz(tenantID)
+	cfg["quiz_public_id"] = quiz.PublicId
+
 	// Portal handoff domain — a tenant domain served by the Sentanyl edge
 	// (the proxy CNAME model). Buyers land here after Stripe checkout.
 	if portalDomain != "" {
@@ -348,6 +353,52 @@ func upsertAvailability(tenantID bson.ObjectId) {
 		log.Fatalf("seed-josephalai: insert availability: %v", err)
 	}
 	log.Printf("  + coach availability (Mon-Fri 9-5 ET)")
+}
+
+func upsertReadinessQuiz(tenantID bson.ObjectId) *pkgmodels.LMSQuiz {
+	const title = "Manifesting Readiness Assessment"
+	col := db.GetCollection(pkgmodels.LMSQuizCollection)
+	var existing pkgmodels.LMSQuiz
+	if err := col.Find(bson.M{
+		"tenant_id":             tenantID,
+		"title":                 title,
+		"timestamps.deleted_at": nil,
+	}).One(&existing); err == nil {
+		return &existing
+	}
+	now := time.Now()
+	q := pkgmodels.NewLMSQuiz()
+	q.TenantID = tenantID
+	q.SubscriberId = tenantID.Hex()
+	q.Slug = "manifesting-readiness"
+	q.Title = title
+	q.PassThreshold = 67
+	q.Questions = []*pkgmodels.LMSQuizQuestion{
+		{
+			Slug: "state", Type: "multiple_choice", Order: 1,
+			Title:         "In the SATS method, what matters most about the scene you construct?",
+			Options:       []string{"Its length", "That it implies the wish fulfilled", "Its visual detail", "Repeating it aloud"},
+			CorrectAnswer: 1,
+		},
+		{
+			Slug: "denominator", Type: "multiple_choice", Order: 2,
+			Title:         "Common Denominator Analysis isolates what?",
+			Options:       []string{"Your fastest technique", "The shared element across your past successes", "Your ideal bedtime", "The best affirmation wording"},
+			CorrectAnswer: 1,
+		},
+		{
+			Slug: "persistence", Type: "multiple_choice", Order: 3,
+			Title:         "When results lag, the systematic response is to…",
+			Options:       []string{"Switch goals", "Abandon the scene", "Return to the state nightly until it feels natural", "Add more techniques"},
+			CorrectAnswer: 2,
+		},
+	}
+	q.SoftDeletes.CreatedAt = &now
+	if err := col.Insert(q); err != nil {
+		log.Fatalf("seed-josephalai: insert quiz: %v", err)
+	}
+	log.Printf("  + quiz %s", q.PublicId)
+	return q
 }
 
 func upsertNewsletter(tenantID bson.ObjectId) *pkgmodels.Product {
