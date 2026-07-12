@@ -125,6 +125,15 @@
     if (configUrl) {
       fetchJSON(configUrl).then(function (cfg) {
         config = Object.assign(config, cfg || {});
+        // The renderer emits an empty <source> when only mediaPublicId is
+        // known server-side — adopt the config's playback_url so the video
+        // actually has a playable source.
+        if (config.playback_url && !video.currentSrc) {
+          video.src = config.playback_url;
+        }
+        if (config.poster_url && !video.poster) {
+          video.poster = config.poster_url;
+        }
         renderChrome();
       }).catch(function () { /* swallow — degrade to bare player */ });
     }
