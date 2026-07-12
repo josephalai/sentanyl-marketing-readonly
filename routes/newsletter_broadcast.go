@@ -2,6 +2,7 @@ package routes
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -10,9 +11,33 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/emailer"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
 )
+
+// publicBaseURL is the absolute origin used to build links that must work
+// outside a browser request (email List-Unsubscribe headers, footer links).
+func publicBaseURL() string {
+	if v := os.Getenv("PUBLIC_BASE_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://localhost"
+}
+
+// newsletterUnsubURL is the absolute one-click unsubscribe URL for a token.
+func newsletterUnsubURL(token string) string {
+	return publicBaseURL() + "/api/marketing/newsletters/unsubscribe?token=" + token
+}
+
+// listUnsubHeaders returns RFC 8058 one-click unsubscribe headers for a bulk
+// send. The URL must accept POST (registered alongside the GET route).
+func listUnsubHeaders(unsubURL string) map[string]string {
+	return map[string]string{
+		"List-Unsubscribe":      "<" + unsubURL + ">",
+		"List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+	}
+}
 
 // broadcastNewsletterPost fans a published post out to its target audience by
 // inserting one Email document per recipient. Instant rows go through the
@@ -136,10 +161,17 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		}
 		count++
 
-		// Send instant rows immediately via SMTP (MailHog in dev). Scheduled
-		// rows are picked up by the in-process scheduler at Scheduled time.
+		// Send instant rows immediately. Scheduled rows are picked up by the
+		// in-process scheduler at Scheduled time. Attach RFC 8058 one-click
+		// unsubscribe headers (Gmail/Yahoo bulk-sender compliance) when the
+		// provider supports custom headers.
 		if !scheduled && smtpProvider != nil {
-			_ = smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo)
+			headers := listUnsubHeaders(newsletterUnsubURL(sub.UnsubscribeToken))
+			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
+				_ = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo, headers)
+			} else {
+				_ = smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo)
+			}
 		}
 	}
 
@@ -229,7 +261,7 @@ func personalizeEmail(html string, sub pkgmodels.NewsletterSubscription) string 
 	// Build the unsubscribe URL using a stable host hint. In v1 this is just
 	// path-only; the Caddyfile rewrites Host so the host header is always
 	// the tenant domain when serving public mail-action endpoints.
-	unsub := fmt.Sprintf("/api/marketing/newsletters/unsubscribe?token=%s", sub.UnsubscribeToken)
+	unsub := newsletterUnsubURL(sub.UnsubscribeToken)
 	out := strings.ReplaceAll(html, "{{UNSUBSCRIBE_URL}}", unsub)
 	out = strings.ReplaceAll(out, "{{SUB_PUBLIC_ID}}", sub.PublicId)
 	return out

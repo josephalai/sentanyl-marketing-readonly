@@ -75,6 +75,8 @@ func RegisterNewsletterPublicRoutes(rg *gin.RouterGroup) {
 	rg.POST("/newsletters/subscribe", handlePublicNewsletterSubscribe)
 	rg.GET("/newsletters/confirm", handlePublicNewsletterConfirm)
 	rg.GET("/newsletters/unsubscribe", handlePublicNewsletterUnsubscribe)
+	// RFC 8058 one-click: mailbox providers POST to the List-Unsubscribe URL.
+	rg.POST("/newsletters/unsubscribe", handlePublicNewsletterUnsubscribe)
 	rg.GET("/newsletters/track/open", handleNewsletterTrackOpen)
 	rg.GET("/newsletters/track/click", handleNewsletterTrackClick)
 	rg.POST("/newsletters/webhook/:provider", handleNewsletterDeliveryWebhook)
