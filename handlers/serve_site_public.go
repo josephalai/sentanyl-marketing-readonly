@@ -430,7 +430,7 @@ func startCheckoutSession(c *gin.Context, pubCtx *publicchannel.PublicRequestCon
 		})
 		return
 	}
-	stripeKey := tenant.StripeSecretKey
+	stripeKey := utils.DecryptSecret(tenant.StripeSecretKey)
 	stripeAcct := ""
 	if stripeKey == "" && tenant.StripeConnectAccountID != "" {
 		stripeKey = os.Getenv("STRIPE_PLATFORM_SECRET_KEY")

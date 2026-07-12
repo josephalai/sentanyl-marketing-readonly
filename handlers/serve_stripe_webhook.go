@@ -97,7 +97,7 @@ func handleStripeWebhook(c *gin.Context) {
 		return
 	}
 
-	if err := verifyStripeSignature(c.GetHeader("Stripe-Signature"), rawBody, tenant.StripeWebhookSecret); err != nil {
+	if err := verifyStripeSignature(c.GetHeader("Stripe-Signature"), rawBody, utils.DecryptSecret(tenant.StripeWebhookSecret)); err != nil {
 		log.Printf("[stripe webhook] signature verify failed: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid signature"})
 		return

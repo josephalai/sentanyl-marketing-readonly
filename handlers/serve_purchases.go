@@ -17,6 +17,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
 // RegisterPurchasesRoutes wires the tenant-scoped purchase log endpoints used
@@ -294,7 +295,7 @@ func handleRefundPurchase(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "tenant lookup failed"})
 		return
 	}
-	stripeKey := tenant.StripeSecretKey
+	stripeKey := utils.DecryptSecret(tenant.StripeSecretKey)
 	stripeAcct := ""
 	if stripeKey == "" && tenant.StripeConnectAccountID != "" {
 		stripeKey = os.Getenv("STRIPE_PLATFORM_SECRET_KEY")

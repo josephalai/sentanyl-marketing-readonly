@@ -1038,7 +1038,7 @@ func handleCustomerNewsletterCheckoutStart(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payment processing is not configured for this business"})
 		return
 	}
-	stripeKey := tenant.StripeSecretKey
+	stripeKey := utils.DecryptSecret(tenant.StripeSecretKey)
 	stripeAcct := ""
 	if stripeKey == "" && tenant.StripeConnectAccountID != "" {
 		stripeKey = os.Getenv("STRIPE_PLATFORM_SECRET_KEY")
