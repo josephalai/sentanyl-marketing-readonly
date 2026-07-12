@@ -7,6 +7,7 @@ COPY lms-service/ lms-service/
 COPY marketing-service/ marketing-service/
 COPY video-service/ video-service/
 COPY coaching-service/ coaching-service/
+COPY mcp-service/ mcp-service/
 RUN cd marketing-service && go build -o /app/marketing-service ./cmd
 
 FROM alpine:3.19
