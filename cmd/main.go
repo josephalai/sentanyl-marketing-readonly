@@ -93,11 +93,10 @@ func main() {
 	r := gin.Default()
 	r.Use(httputil.CORSMiddleware())
 
-	// Public marketing routes (page serving, events, subscriber-scoped product reads).
+	// Public marketing routes (page serving, events).
 	api := r.Group("/api/marketing")
 	routes.RegisterFunnelRoutes(api)
 	routes.RegisterEmailRoutes(api)
-	routes.RegisterOutboundWebhookRoutes(api)
 
 	// Public campaign click tracker — recipients have no JWT, so this lives
 	// outside the tenant-auth group. Engine-level register since it's not
@@ -110,7 +109,20 @@ func main() {
 	// group on the same prefix as tenantAPI below (gin allows both); external
 	// apps authenticate here with their tenant API key.
 	tenantSendAPI := r.Group("/api/marketing/tenant")
-	tenantSendAPI.Use(auth.RequireTenantAuthOrAPIKey(), auth.RequirePlatformSubscription())
+	// Throttle per credential (API key, else JWT tenant, else IP) AFTER auth so
+	// the JWT tenant id is resolved. A leaked API key is bounded to one bucket
+	// no matter how many hosts replay it.
+	sendKeyFn := func(c *gin.Context) string {
+		if k := c.GetHeader("X-API-Key"); k != "" {
+			return "key:" + k
+		}
+		if t := auth.GetTenantID(c); t != "" {
+			return "tenant:" + t
+		}
+		return ""
+	}
+	tenantSendAPI.Use(auth.RequireTenantAuthOrAPIKey(), auth.RequirePlatformSubscription(),
+		httputil.RateLimitByKey(sendKeyFn, 120, 60))
 	routes.RegisterTenantEmailRoutes(tenantSendAPI)
 
 	// Protected tenant routes (require JWT).
@@ -120,6 +132,9 @@ func main() {
 	tenantAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
 	routes.RegisterEcommerceRoutes(tenantAPI)
 	routes.RegisterInboxCloserRoutes(tenantAPI)
+	// Outbound webhook CRUD — was on the public group scoped by a trusted
+	// subscriber_id query param; now JWT-scoped and tenant-authed.
+	routes.RegisterOutboundWebhookRoutes(tenantAPI)
 
 	// A/B broadcast testing — tenant-authed, mounted at /api/ab to match the
 	// admin abService contract (Caddy routes /api/ab/* here).
@@ -196,8 +211,12 @@ func main() {
 	// so the URL `/static/sentanyl-video.js` is stable across tenant hosts.
 	handlers.RegisterPublicSiteAssetRoutes(r)
 
-	// Public form submission and checkout routes (no auth — for published websites).
-	handlers.RegisterPublicFormRoutes(api)
+	// Public form submission and checkout routes (no auth — for published
+	// websites). Same per-IP throttle as /api/public/* below: unauth surface
+	// that triggers writes and emails (double-opt-in, autoresponders).
+	publicFormGroup := r.Group("/api/marketing")
+	publicFormGroup.Use(httputil.RateLimit(60, 30))
+	handlers.RegisterPublicFormRoutes(publicFormGroup)
 
 	// Frontend-channel public integration surface (no auth — for coded
 	// websites and other frontend channels). Stable contract under
@@ -209,7 +228,8 @@ func main() {
 	handlers.RegisterPublicChannelRoutes(publicGroup)
 
 	// Public newsletter subscribe / confirm / unsubscribe routes (no auth).
-	routes.RegisterNewsletterPublicRoutes(api)
+	// Throttled per IP — subscribe fires a double-opt-in email per request.
+	routes.RegisterNewsletterPublicRoutes(publicFormGroup)
 
 	// Stripe webhook receiver (platform-wide endpoint, dispatched per-tenant via ?tenant_id=).
 	handlers.RegisterStripeWebhookRoute(api)
