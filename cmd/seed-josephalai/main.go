@@ -130,14 +130,25 @@ func main() {
 	}
 	seedCatalog(workshops)
 	seedCatalog(sceneTiers)
-	seedCatalog(coachingPackages)
 
 	// Coaching program (native scheduling, 45-minute sessions) — the booking
-	// surface behind /coaching and /client-packages. Attach it to the single
-	// deep-dive product so a purchase grants program access.
+	// surface behind /coaching and /client-packages.
 	program := upsertCoachingProgram(tenantID)
 	cfg["coaching_program_public_id"] = program.PublicId
 	upsertAvailability(tenantID)
+
+	// Coaching packs are OFFERS ON THE PROGRAM carrying session entitlement
+	// terms (count + per-session length). Buying "5 × 30min" enrolls the
+	// buyer in the program with a balance of 5 thirty-minute sessions. The
+	// pack products remain in the catalog for display/store purposes.
+	for _, spec := range coachingPackages {
+		p := upsertProduct(tenantID, spec)
+		terms := coachingPackTerms[spec.ConfigKey]
+		o := upsertCoachingPackOffer(tenantID, spec, program, terms)
+		offerIds[spec.ConfigKey] = o.PublicId
+		productIds[spec.ConfigKey] = p.PublicId
+		offerHexIds[spec.ConfigKey] = o.Id.Hex()
+	}
 
 	// Newsletter product.
 	newsletter := upsertNewsletter(tenantID)
@@ -284,6 +295,53 @@ func upsertOffer(tenantID bson.ObjectId, spec offerSpec, product *pkgmodels.Prod
 		log.Fatalf("seed-josephalai: insert offer %q: %v", spec.Name, err)
 	}
 	log.Printf("  + offer   %-60s %s ($%.2f)", spec.Name, o.PublicId, float64(o.Amount)/100)
+	return o
+}
+
+// coachingPackTerms maps pack config keys to their session entitlement.
+var coachingPackTerms = map[string]pkgmodels.OfferCoaching{
+	"coach_3x30":      {SessionCount: 3, SessionDurationMin: 30},
+	"coach_5x30":      {SessionCount: 5, SessionDurationMin: 30},
+	"coach_10x30":     {SessionCount: 10, SessionDurationMin: 30},
+	"coach_3x45":      {SessionCount: 3, SessionDurationMin: 45},
+	"coach_5x45":      {SessionCount: 5, SessionDurationMin: 45},
+	"coach_10x45":     {SessionCount: 10, SessionDurationMin: 45},
+	"coach_45_single": {SessionCount: 1, SessionDurationMin: 45},
+}
+
+// upsertCoachingPackOffer creates (or upgrades) a pack offer: it includes the
+// PROGRAM product (so provisioning enrolls against the bookable program) and
+// carries the pack's session terms.
+func upsertCoachingPackOffer(tenantID bson.ObjectId, spec offerSpec, program *pkgmodels.Product, terms pkgmodels.OfferCoaching) *pkgmodels.Offer {
+	col := db.GetCollection(pkgmodels.OfferCollection)
+	var existing pkgmodels.Offer
+	if err := col.Find(bson.M{
+		"tenant_id":             tenantID,
+		"title":                 spec.Name,
+		"timestamps.deleted_at": nil,
+	}).One(&existing); err == nil {
+		// Upgrade pre-existing pack offers in place: point at the program and
+		// stamp the terms (idempotent reruns fix the legacy wiring).
+		_ = col.UpdateId(existing.Id, bson.M{"$set": bson.M{
+			"included_products": []bson.ObjectId{program.Id},
+			"coaching":          terms,
+		}})
+		existing.IncludedProducts = []bson.ObjectId{program.Id}
+		existing.Coaching = &terms
+		return &existing
+	}
+	now := time.Now()
+	o := pkgmodels.NewOffer(spec.Name, tenantID)
+	o.PricingModel = "one_time"
+	o.Amount = spec.AmountCents
+	o.GrantedBadges = []string{spec.Badge}
+	o.IncludedProducts = []bson.ObjectId{program.Id}
+	o.Coaching = &terms
+	o.SoftDeletes.CreatedAt = &now
+	if err := col.Insert(o); err != nil {
+		log.Fatalf("seed-josephalai: insert coaching pack offer %q: %v", spec.Name, err)
+	}
+	log.Printf("  + pack offer %-55s %s (%d × %dmin, $%.2f)", spec.Name, o.PublicId, terms.SessionCount, terms.SessionDurationMin, float64(o.Amount)/100)
 	return o
 }
 

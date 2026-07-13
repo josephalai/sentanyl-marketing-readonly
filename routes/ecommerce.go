@@ -261,8 +261,9 @@ func handleCreateOffer(c *gin.Context) {
 		PricingModel     string   `json:"pricing_model" binding:"required"`
 		Amount           int64    `json:"amount"`
 		Currency         string   `json:"currency"`
-		GrantedBadges    []string `json:"granted_badges"`
-		IncludedProducts []string `json:"included_products"`
+		GrantedBadges    []string                  `json:"granted_badges"`
+		IncludedProducts []string                  `json:"included_products"`
+		Coaching         *pkgmodels.OfferCoaching  `json:"coaching"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title and pricing_model are required"})
@@ -276,6 +277,9 @@ func handleCreateOffer(c *gin.Context) {
 		offer.Currency = req.Currency
 	}
 	offer.GrantedBadges = req.GrantedBadges
+	if req.Coaching != nil && req.Coaching.SessionCount > 0 {
+		offer.Coaching = req.Coaching
+	}
 
 	// Accept both hex ObjectId and public_id for each included product.
 	// Frontend callers (and test harnesses) often hold the public_id for
@@ -345,8 +349,9 @@ func handleUpdateOffer(c *gin.Context) {
 		PricingModel     string   `json:"pricing_model"`
 		Amount           *int64   `json:"amount"`
 		Currency         string   `json:"currency"`
-		GrantedBadges    []string `json:"granted_badges"`
-		IncludedProducts []string `json:"included_products"`
+		GrantedBadges    []string                 `json:"granted_badges"`
+		IncludedProducts []string                 `json:"included_products"`
+		Coaching         *pkgmodels.OfferCoaching `json:"coaching"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -368,6 +373,13 @@ func handleUpdateOffer(c *gin.Context) {
 	}
 	if req.GrantedBadges != nil {
 		update["granted_badges"] = req.GrantedBadges
+	}
+	if req.Coaching != nil {
+		if req.Coaching.SessionCount > 0 {
+			update["coaching"] = req.Coaching
+		} else {
+			update["coaching"] = nil
+		}
 	}
 	if req.IncludedProducts != nil {
 		// Accept both hex ObjectId and public_id (mirrors create path).
