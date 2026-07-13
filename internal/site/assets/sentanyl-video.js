@@ -121,10 +121,18 @@
     var firedCTAs = {};
     var inTurnstile = false;
 
-    /* config fetch — non-blocking; the player still works without it */
+    /* config fetch — non-blocking; the player still works without it.
+       The config response carries a signed player_token that the events
+       endpoint requires (it derives tenant/media identity from the token),
+       so event posts wait for the fetch to settle before sending. */
+    var playerToken = '';
+    var configSettled = Promise.resolve();
     if (configUrl) {
-      fetchJSON(configUrl).then(function (cfg) {
+      configSettled = fetchJSON(configUrl).then(function (cfg) {
         config = Object.assign(config, cfg || {});
+        if (config.player_token) {
+          playerToken = config.player_token;
+        }
         // The renderer emits an empty <source> when only mediaPublicId is
         // known server-side — adopt the config's playback_url so the video
         // actually has a playable source.
@@ -155,12 +163,16 @@
       };
       if (funnelId) body.data.funnel_public_id = funnelId;
       if (stageId) body.data.stage_public_id = stageId;
-      // Use fetch with keepalive so unload events still fire.
-      return fetch(EVENT_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        keepalive: true,
+      // Wait for the config fetch so the signed player_token rides along;
+      // use fetch with keepalive so unload events still fire.
+      return configSettled.then(function () {
+        if (playerToken) body.player_token = playerToken;
+        return fetch(EVENT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          keepalive: true,
+        });
       }).then(function (r) {
         if (!r.ok) return null;
         return r.json();
