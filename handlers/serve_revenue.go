@@ -24,75 +24,190 @@ func RegisterRevenueRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.GET("/revenue/contact/:contactId", handleRevenueForContact)
 }
 
-// handleRevenueSummary returns aggregate paid totals across the optional
-// from/to date window plus a per-day series suitable for a small chart.
-// Refunded purchases are excluded from totals but counted separately.
+// revenueGroup is one currency's aggregation output from the DB pipeline.
+type revenueGroup struct {
+	Currency      string `bson:"_id"`
+	GrossMinor    int64  `bson:"gross_minor"`
+	RefundedMinor int64  `bson:"refunded_minor"`
+	PaidCount     int    `bson:"paid_count"`
+	RefundedCount int    `bson:"refunded_count"`
+}
+
+// rollupRevenue converts per-currency aggregation groups into the response
+// rollup, computing net = gross − refunded per currency (never across
+// currencies) and ordering by net descending. Pure — testable without a DB.
+func rollupRevenue(groups []revenueGroup) []currencyRevenue {
+	out := make([]currencyRevenue, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, currencyRevenue{
+			Currency:      g.Currency,
+			GrossMinor:    g.GrossMinor,
+			RefundedMinor: g.RefundedMinor,
+			NetMinor:      g.GrossMinor - g.RefundedMinor,
+			PaidCount:     g.PaidCount,
+			RefundedCount: g.RefundedCount,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NetMinor > out[j].NetMinor })
+	return out
+}
+
+// currencyRevenue is the per-currency rollup in integer minor units (ANA-003).
+type currencyRevenue struct {
+	Currency      string `json:"currency"`
+	GrossMinor    int64  `json:"gross_minor"`    // every sale that happened
+	RefundedMinor int64  `json:"refunded_minor"` // refunded portion
+	NetMinor      int64  `json:"net_minor"`      // gross - refunded
+	PaidCount     int    `json:"paid_count"`
+	RefundedCount int    `json:"refunded_count"`
+	UniqueBuyers  int    `json:"unique_buyers"`
+}
+
+// handleRevenueSummary returns revenue rolled up per currency in integer minor
+// units, computed by a database aggregation over the full window (no silent row
+// cap). Correct net accounting (ANA-001): a refund of a $100 sale nets to $0,
+// because the sale is counted in gross and the refund is subtracted — the old
+// code excluded refunded sales from gross while still subtracting them, so a
+// refund read as −$100.
 func handleRevenueSummary(c *gin.Context) {
 	tenantID := auth.GetTenantObjectID(c)
 	if tenantID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	rows := loadPurchasesForRevenue(tenantID, c)
 
-	var paidCount, refundedCount int
-	var paidTotal, refundedTotal float64
-	currency := ""
-	uniqueContacts := map[bson.ObjectId]struct{}{}
-	dailyTotals := map[string]float64{}
+	match := revenueMatch(tenantID, c)
 
-	for _, r := range rows {
-		if currency == "" && r.Currency != "" {
-			currency = r.Currency
+	// ANA-002/003: aggregate server-side, grouped by currency, in integer
+	// minor units. amount is stored in major units (float), so multiply by 100
+	// and round inside the pipeline; never sum across currencies.
+	minorExpr := bson.M{"$round": bson.M{"$multiply": []interface{}{"$amount", 100}}}
+	pipeline := []bson.M{
+		{"$match": match},
+		{"$group": bson.M{
+			"_id":        "$currency",
+			"gross_minor": bson.M{"$sum": minorExpr},
+			"refunded_minor": bson.M{"$sum": bson.M{"$cond": []interface{}{
+				bson.M{"$eq": []interface{}{"$status", "refunded"}}, minorExpr, 0,
+			}}},
+			"paid_count": bson.M{"$sum": bson.M{"$cond": []interface{}{
+				bson.M{"$eq": []interface{}{"$status", "refunded"}}, 0, 1,
+			}}},
+			"refunded_count": bson.M{"$sum": bson.M{"$cond": []interface{}{
+				bson.M{"$eq": []interface{}{"$status", "refunded"}}, 1, 0,
+			}}},
+		}},
+	}
+	var groups []revenueGroup
+	if err := db.GetCollection(pkgmodels.PurchaseLogCollection).Pipe(pipeline).All(&groups); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "revenue aggregation failed"})
+		return
+	}
+
+	byCurrency := rollupRevenue(groups)
+	for i := range byCurrency {
+		byCurrency[i].UniqueBuyers = revenueUniqueBuyers(tenantID, match, byCurrency[i].Currency)
+	}
+
+	// Backward-compatible top-level fields for the admin Revenue page, computed
+	// for the primary (highest-net) currency in major units. `paid_total` is
+	// gross sales; `net_total` = gross − refunded (now correct).
+	resp := gin.H{
+		"status":      "ok",
+		"by_currency": byCurrency,
+		"complete":    true, // full aggregation, no silent row cap
+		"source":      "purchase_logs",
+		"as_of":       time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(byCurrency) > 0 {
+		p := byCurrency[0]
+		avg := 0.0
+		if p.PaidCount > 0 {
+			avg = float64(p.NetMinor) / 100.0 / float64(p.PaidCount)
 		}
-		switch r.Status {
-		case "refunded":
-			refundedCount++
-			refundedTotal += r.Amount
+		resp["currency"] = p.Currency
+		resp["paid_total"] = float64(p.GrossMinor) / 100.0
+		resp["refunded_total"] = float64(p.RefundedMinor) / 100.0
+		resp["net_total"] = float64(p.NetMinor) / 100.0
+		resp["paid_count"] = p.PaidCount
+		resp["refunded_count"] = p.RefundedCount
+		resp["unique_buyers"] = p.UniqueBuyers
+		resp["average_purchase"] = avg
+		resp["daily_series"] = revenueDailySeries(tenantID, match, p.Currency)
+	} else {
+		resp["currency"] = ""
+		resp["paid_total"] = 0.0
+		resp["refunded_total"] = 0.0
+		resp["net_total"] = 0.0
+		resp["daily_series"] = []interface{}{}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// revenueDailySeries returns the per-day net (gross − refunded) for one
+// currency, in major units, ordered by date — computed by DB aggregation so it
+// is not subject to any row cap.
+func revenueDailySeries(tenantID bson.ObjectId, match bson.M, currency string) []map[string]interface{} {
+	m := bson.M{}
+	for k, v := range match {
+		m[k] = v
+	}
+	m["currency"] = currency
+	minorExpr := bson.M{"$round": bson.M{"$multiply": []interface{}{"$amount", 100}}}
+	pipeline := []bson.M{
+		{"$match": m},
+		{"$group": bson.M{
+			"_id": bson.M{"$dateToString": bson.M{"format": "%Y-%m-%d", "date": "$timestamps.created_at"}},
+			"net_minor": bson.M{"$sum": bson.M{"$cond": []interface{}{
+				bson.M{"$eq": []interface{}{"$status", "refunded"}}, bson.M{"$multiply": []interface{}{minorExpr, -1}}, minorExpr,
+			}}},
+		}},
+		{"$sort": bson.M{"_id": 1}},
+	}
+	var raw []struct {
+		Date     string `bson:"_id"`
+		NetMinor int64  `bson:"net_minor"`
+	}
+	_ = db.GetCollection(pkgmodels.PurchaseLogCollection).Pipe(pipeline).All(&raw)
+	out := make([]map[string]interface{}, 0, len(raw))
+	for _, r := range raw {
+		if r.Date == "" {
 			continue
 		}
-		paidCount++
-		paidTotal += r.Amount
-		uniqueContacts[r.UserId] = struct{}{}
-		if r.SoftDeletes.CreatedAt != nil {
-			d := r.SoftDeletes.CreatedAt.UTC().Format("2006-01-02")
-			dailyTotals[d] += r.Amount
+		out = append(out, map[string]interface{}{"date": r.Date, "amount": float64(r.NetMinor) / 100.0})
+	}
+	return out
+}
+
+// revenueUniqueBuyers counts distinct non-refunded buyers for one currency.
+func revenueUniqueBuyers(tenantID bson.ObjectId, match bson.M, currency string) int {
+	q := bson.M{}
+	for k, v := range match {
+		q[k] = v
+	}
+	q["currency"] = currency
+	q["status"] = bson.M{"$ne": "refunded"}
+	var ids []bson.ObjectId
+	_ = db.GetCollection(pkgmodels.PurchaseLogCollection).Find(q).Distinct("user_id", &ids)
+	return len(ids)
+}
+
+// revenueMatch builds the tenant + optional date-window match shared by the
+// revenue aggregation and the legacy row loaders.
+func revenueMatch(tenantID bson.ObjectId, c *gin.Context) bson.M {
+	q := bson.M{"tenant_id": tenantID}
+	if from, ok := parseUnixSeconds(c.Query("from")); ok {
+		q["timestamps.created_at"] = bson.M{"$gte": from}
+	}
+	if to, ok := parseUnixSeconds(c.Query("to")); ok {
+		clause, _ := q["timestamps.created_at"].(bson.M)
+		if clause == nil {
+			clause = bson.M{}
 		}
+		clause["$lte"] = to
+		q["timestamps.created_at"] = clause
 	}
-
-	// Render the daily series as an ordered slice so the frontend can plot
-	// it without re-sorting.
-	type point struct {
-		Date   string  `json:"date"`
-		Amount float64 `json:"amount"`
-	}
-	keys := make([]string, 0, len(dailyTotals))
-	for k := range dailyTotals {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	series := make([]point, 0, len(keys))
-	for _, k := range keys {
-		series = append(series, point{Date: k, Amount: dailyTotals[k]})
-	}
-
-	avg := 0.0
-	if paidCount > 0 {
-		avg = paidTotal / float64(paidCount)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":            "ok",
-		"currency":          currency,
-		"paid_count":        paidCount,
-		"paid_total":        paidTotal,
-		"refunded_count":    refundedCount,
-		"refunded_total":    refundedTotal,
-		"net_total":         paidTotal - refundedTotal,
-		"unique_buyers":     len(uniqueContacts),
-		"average_purchase":  avg,
-		"daily_series":      series,
-	})
+	return q
 }
 
 // handleRevenueByProduct returns paid totals + counts grouped by product, hot
