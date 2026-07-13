@@ -232,6 +232,12 @@ func (p *GeminiProvider) generateContentPlain(prompt string, maxTokens int) (str
 	if maxTokens <= 0 {
 		maxTokens = 220
 	}
+	// Gemini 2.5 models spend maxOutputTokens on internal "thinking" before
+	// any visible text, so a tight budget yields truncated prose. Disable
+	// thinking for plain-text generation and give the budget headroom.
+	if maxTokens < 1024 {
+		maxTokens = 1024
+	}
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", p.Model, p.APIKey)
 	reqBody := map[string]any{
 		"contents": []map[string]any{
@@ -244,6 +250,7 @@ func (p *GeminiProvider) generateContentPlain(prompt string, maxTokens int) (str
 		"generationConfig": map[string]any{
 			"temperature":     0.7,
 			"maxOutputTokens": maxTokens,
+			"thinkingConfig":  map[string]any{"thinkingBudget": 0},
 		},
 	}
 	bodyBytes, err := json.Marshal(reqBody)
