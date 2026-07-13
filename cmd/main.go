@@ -93,6 +93,8 @@ func main() {
 	r := gin.Default()
 	r.Use(httputil.CORSMiddleware())
 
+	r.GET("/health", httputil.HealthHandler("marketing-service"))
+
 	// Public marketing routes (page serving, events).
 	api := r.Group("/api/marketing")
 	routes.RegisterFunnelRoutes(api)
