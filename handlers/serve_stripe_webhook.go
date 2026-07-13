@@ -196,19 +196,38 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		log.Printf("[stripe webhook] newsletter tier upgrade: %v", err)
 	}
 
-	// Provision each product included in the offer. Dispatching by product
-	// type wires the right downstream system: courses → LMS enrollment,
-	// services → ServiceEnrollment row, coaching → coaching-service
-	// provisioning, downloads → already covered by badge grant, newsletters
-	// → already covered by tier upgrade above. Each branch is idempotent so
-	// Stripe retries are safe.
+	// Record the immutable Purchase + PurchaseItem ledger (COM-CC-005/006).
+	// The Purchase is idempotent by Stripe session id, so retries reuse it; a
+	// fresh checkout (repurchase) is a new session and therefore a new Purchase
+	// with new items — never deduped by tenant+contact+product.
+	purchase, err := recordPurchaseLedger(tenantID, contact.Id, &offer, &session)
+	if err != nil {
+		return fmt.Errorf("record purchase ledger: %w", err)
+	}
+
+	// Provision each product included in the offer, keyed off its PurchaseItem
+	// so retries never double-provision and a partial failure is recoverable:
+	// each item is provisioned only while its status is not yet "provisioned".
+	// Dispatch by product type wires the right downstream system (courses → LMS
+	// enrollment, services → ServiceEnrollment, coaching → coaching-service,
+	// downloads/newsletters → badge/tier above).
 	var enrollFailures []string
 	for _, productID := range offer.IncludedProducts {
+		item, err := ensurePurchaseItem(tenantID, contact.Id, purchase, &offer, productID)
+		if err != nil {
+			enrollFailures = append(enrollFailures, fmt.Sprintf("%s: item: %v", productID.Hex(), err))
+			continue
+		}
+		if item.Status == pkgmodels.ItemStatusProvisioned {
+			continue // already provisioned on an earlier delivery of this event
+		}
 		if err := provisionProductPurchase(tenantID, contact.Id, productID, offer.Id); err != nil {
 			log.Printf("[stripe webhook] PROVISION FAILED tenant=%s offer=%s product=%s contact=%s email=%s: %v",
 				tenantID.Hex(), offer.Id.Hex(), productID.Hex(), contact.Id.Hex(), email, err)
 			enrollFailures = append(enrollFailures, fmt.Sprintf("%s: %v", productID.Hex(), err))
+			continue
 		}
+		markPurchaseItemProvisioned(item.Id)
 	}
 
 	if isNewBuyer {
@@ -389,6 +408,71 @@ func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *p
 		}
 	}
 	return nil
+}
+
+// recordPurchaseLedger idempotently creates the immutable Purchase for a
+// checkout session (COM-CC-005). Keyed by (tenant, stripe_session_id): a Stripe
+// retry of the same event reuses the existing Purchase, while a new checkout is
+// a distinct session and therefore a new Purchase.
+func recordPurchaseLedger(tenantID, contactID bson.ObjectId, offer *pkgmodels.Offer, session *stripeCheckoutSession) (*pkgmodels.Purchase, error) {
+	col := db.GetCollection(pkgmodels.PurchaseCollection)
+	var existing pkgmodels.Purchase
+	if err := col.Find(bson.M{"tenant_id": tenantID, "stripe_session_id": session.ID}).One(&existing); err == nil {
+		return &existing, nil
+	}
+	snap := pkgmodels.OfferSnapshot{
+		OfferID:       offer.Id,
+		Title:         offer.Title,
+		PricingModel:  offer.PricingModel,
+		Amount:        offer.Amount,
+		Currency:      offer.Currency,
+		GrantedBadges: offer.GrantedBadges,
+		ProductIDs:    offer.IncludedProducts,
+	}
+	currency := session.Currency
+	if currency == "" {
+		currency = offer.Currency
+	}
+	p := pkgmodels.NewPurchase(tenantID, contactID, snap, session.AmountTotal, currency, session.ID)
+	p.StripePaymentIntentID = session.PaymentIntent
+	p.StripeSubscriptionID = session.Subscription
+	if err := col.Insert(p); err != nil {
+		// A concurrent delivery may have won the race; re-read.
+		if err2 := col.Find(bson.M{"tenant_id": tenantID, "stripe_session_id": session.ID}).One(&existing); err2 == nil {
+			return &existing, nil
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
+// ensurePurchaseItem idempotently creates the PurchaseItem for one product of a
+// Purchase (COM-CC-006), keyed by (purchase_id, product_id). Returns the item
+// (existing or newly created) so the caller can decide whether to provision.
+func ensurePurchaseItem(tenantID, contactID bson.ObjectId, purchase *pkgmodels.Purchase, offer *pkgmodels.Offer, productID bson.ObjectId) (*pkgmodels.PurchaseItem, error) {
+	col := db.GetCollection(pkgmodels.PurchaseItemCollection)
+	var existing pkgmodels.PurchaseItem
+	if err := col.Find(bson.M{"purchase_id": purchase.Id, "product_id": productID}).One(&existing); err == nil {
+		return &existing, nil
+	}
+	var product pkgmodels.Product
+	_ = db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{"_id": productID, "tenant_id": tenantID}).One(&product)
+	item := pkgmodels.NewPurchaseItem(tenantID, contactID, purchase.Id, offer.Id, productID, product.ProductType, product.Name)
+	if err := col.Insert(item); err != nil {
+		if err2 := col.Find(bson.M{"purchase_id": purchase.Id, "product_id": productID}).One(&existing); err2 == nil {
+			return &existing, nil
+		}
+		return nil, err
+	}
+	return item, nil
+}
+
+// markPurchaseItemProvisioned flips a purchase item to provisioned after its
+// downstream provisioning succeeds.
+func markPurchaseItemProvisioned(itemID bson.ObjectId) {
+	_ = db.GetCollection(pkgmodels.PurchaseItemCollection).UpdateId(itemID, bson.M{
+		"$set": bson.M{"status": pkgmodels.ItemStatusProvisioned, "timestamps.updated_at": time.Now()},
+	})
 }
 
 // recordSubscription upserts a Subscription row. For recurring payments the

@@ -30,6 +30,36 @@ func EnsureEcommerceIndexes() {
 	if err := col.EnsureIndex(idx); err != nil {
 		log.Printf("ecommerce: failed to ensure coupon unique index: %v", err)
 	}
+
+	// Commerce ledger invariants (COM-CC-005/006): one Purchase per Stripe
+	// session per tenant, and one PurchaseItem per (purchase, product) — the
+	// idempotency keys that keep webhook retries from duplicating commercial
+	// records or provisioning.
+	ledgerIndexes := map[string]mgo.Index{
+		pkgmodels.PurchaseCollection: {
+			Key:        []string{"tenant_id", "stripe_session_id"},
+			Unique:     true,
+			Background: true,
+			Sparse:     true,
+		},
+		pkgmodels.PurchaseItemCollection: {
+			Key:        []string{"purchase_id", "product_id"},
+			Unique:     true,
+			Background: true,
+		},
+	}
+	for coll, index := range ledgerIndexes {
+		if err := db.GetCollection(coll).EnsureIndex(index); err != nil {
+			log.Printf("ecommerce: failed to ensure %s index %v: %v", coll, index.Key, err)
+		}
+	}
+	// Access-grant lookup index (non-unique) for library authorization (W2-C).
+	if err := db.GetCollection(pkgmodels.AccessGrantCollection).EnsureIndex(mgo.Index{
+		Key:        []string{"tenant_id", "contact_id", "product_id", "status"},
+		Background: true,
+	}); err != nil {
+		log.Printf("ecommerce: failed to ensure access_grant index: %v", err)
+	}
 }
 
 // RegisterEcommerceRoutes registers all ecommerce-related endpoints.
