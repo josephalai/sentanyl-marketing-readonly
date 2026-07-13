@@ -1827,7 +1827,7 @@ func buildGlobalStyleVars(s *pkgmodels.Site) string {
   --container-narrow: 720px;
   --container-normal: 1080px;
   --container-wide: 1280px;
-  --container-full: 100%;
+  --container-full: 100%%;
 }
 `, primary, secondary, accent, headingFont, bodyFont, borderRadius)
 }
