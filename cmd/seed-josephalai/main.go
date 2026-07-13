@@ -158,6 +158,10 @@ func main() {
 	form := upsertApplicationForm(tenantID)
 	cfg["coaching_form_public_id"] = form.PublicId
 
+	// Package-size survey — first live DynamicForm consumer (/client-packages).
+	survey := upsertPackageSurveyForm(tenantID)
+	cfg["package_survey_form_public_id"] = survey.PublicId
+
 	// Manifesting readiness quiz — the /research page's embedded assessment
 	// (data-sentanyl-quiz), doubling as a lead magnet.
 	quiz := upsertReadinessQuiz(tenantID)
@@ -530,6 +534,48 @@ func upsertApplicationForm(tenantID bson.ObjectId) *pkgmodels.PageForm {
 	form.SoftDeletes.CreatedAt = &now
 	if err := col.Insert(form); err != nil {
 		log.Fatalf("seed-josephalai: insert form: %v", err)
+	}
+	log.Printf("  + form %q %s", name, form.PublicId)
+	return &form
+}
+
+func upsertPackageSurveyForm(tenantID bson.ObjectId) *pkgmodels.PageForm {
+	const name = "Package Fit Survey"
+	col := db.GetCollection(pkgmodels.PageFormCollection)
+	var existing pkgmodels.PageForm
+	if err := col.Find(bson.M{
+		"tenant_id":             tenantID,
+		"name":                  name,
+		"timestamps.deleted_at": nil,
+	}).One(&existing); err == nil {
+		return &existing
+	}
+
+	badgePub := upsertBadge(tenantID, "Package Survey")
+
+	now := time.Now()
+	form := pkgmodels.PageForm{
+		Id:       bson.NewObjectId(),
+		PublicId: utils.GeneratePublicId(),
+		TenantID: tenantID,
+		Name:     name,
+		FormType: "survey",
+		Fields: []*pkgmodels.FormField{
+			{FieldName: "name", FieldType: "text", Required: true},
+			{FieldName: "email", FieldType: "email", Required: true},
+			{FieldName: "session_length", FieldType: "select", Required: true, Options: []string{"30 minutes", "45 minutes", "Not sure yet"}},
+			{FieldName: "package_size", FieldType: "select", Required: true, Options: []string{"Single session", "3 sessions", "5 sessions", "10 sessions"}},
+			{FieldName: "goal", FieldType: "textarea", Placeholder: "What outcome are you working toward?"},
+		},
+		OnSubmit: &pkgmodels.FormOnSubmit{
+			UpsertContact:   true,
+			WriteAttributes: true,
+			AssignBadgeIds:  []string{badgePub},
+		},
+	}
+	form.SoftDeletes.CreatedAt = &now
+	if err := col.Insert(form); err != nil {
+		log.Fatalf("seed-josephalai: insert survey form: %v", err)
 	}
 	log.Printf("  + form %q %s", name, form.PublicId)
 	return &form

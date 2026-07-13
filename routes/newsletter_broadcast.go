@@ -136,7 +136,7 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 	// substitution of {{SUB_PUBLIC_ID}} happens later in personalizeEmail so
 	// every subscriber lands on a unique tracked URL.
 	bodyHTML = rewriteLinksForTracking(bodyHTML, post.PublicId)
-	bodyHTML = wrapEmailHTML(post, bodyHTML)
+	bodyHTML = wrapEmailHTML(post, bodyHTML, emailer.TenantPostalAddress(post.TenantID.Hex()))
 
 	count := 0
 	for _, sub := range subs {
@@ -199,7 +199,7 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 // footer, open tracking pixel) around the post body. {{UNSUBSCRIBE_URL}}
 // and {{SUB_PUBLIC_ID}} are placeholders substituted per-recipient by
 // personalizeEmail at send time.
-func wrapEmailHTML(post *pkgmodels.NewsletterPost, body string) string {
+func wrapEmailHTML(post *pkgmodels.NewsletterPost, body string, postalAddress string) string {
 	preview := post.EmailPreviewText
 	header := ""
 	if post.Title != "" {
@@ -213,9 +213,13 @@ func wrapEmailHTML(post *pkgmodels.NewsletterPost, body string) string {
 	// 1px so it renders silently. Some clients block remote images by default
 	// — that's an accepted floor for open-rate accuracy.
 	pixel := fmt.Sprintf(`<img src="/api/marketing/newsletters/track/open?p=%s&s={{SUB_PUBLIC_ID}}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0">`, post.PublicId)
+	address := ""
+	if strings.TrimSpace(postalAddress) != "" {
+		address = "<br/>" + htmlEscape(strings.TrimSpace(postalAddress))
+	}
 	footer := `<hr style="margin:40px 0;border:none;border-top:1px solid #ddd"/>
 <p style="color:#888;font-size:12px;text-align:center">You're receiving this because you subscribed.
-<a href="{{UNSUBSCRIBE_URL}}" style="color:#888">Unsubscribe</a></p>`
+<a href="{{UNSUBSCRIBE_URL}}" style="color:#888">Unsubscribe</a>` + address + `</p>`
 	hidden := ""
 	if preview != "" {
 		hidden = fmt.Sprintf(`<div style="display:none;max-height:0;overflow:hidden">%s</div>`, htmlEscape(preview))

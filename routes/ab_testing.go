@@ -294,6 +294,7 @@ func handleABStartTest(c *gin.Context) {
 		return
 	}
 
+	abPostal := emailer.TenantPostalAddress(tenantID.Hex())
 	count := 0
 	for i, u := range users {
 		v := t.Variants[i%len(t.Variants)]
@@ -307,7 +308,7 @@ func handleABStartTest(c *gin.Context) {
 		unsubURL := emailer.UnsubURL(publicBaseURL(), u.PublicId)
 		html := rewriteABLinks(v.Body, send.PublicId)
 		html = injectABPixel(html, send.PublicId)
-		html = emailer.AppendUnsubFooter(html, unsubURL)
+		html = emailer.AppendUnsubFooter(html, unsubURL, abPostal)
 
 		msg := pkgmodels.NewInstantEmail()
 		msg.From = "no-reply@sentanyl.local"

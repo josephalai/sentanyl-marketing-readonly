@@ -157,6 +157,7 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		from = "no-reply@sentanyl.local"
 	}
 
+	postal := emailer.TenantPostalAddress(camp.TenantID.Hex())
 	count := 0
 	for _, u := range users {
 		recipient := pkgmodels.NewCampaignRecipient(camp.Id, camp.TenantID, u.Id, string(u.Email))
@@ -189,7 +190,7 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		msg.Html = strings.ReplaceAll(msg.Html, "{{SEND_PUBLIC_ID}}", send.PublicId)
 		// Visible opt-out footer rides the stored HTML so scheduled sends keep
 		// it; the RFC 8058 headers attach on the instant path below.
-		msg.Html = emailer.AppendUnsubFooter(msg.Html, unsubURL)
+		msg.Html = emailer.AppendUnsubFooter(msg.Html, unsubURL, postal)
 		msg.ReplyTo = camp.ReplyTo
 
 		col := pkgmodels.InstantEmailCollection
