@@ -121,6 +121,12 @@ func main() {
 	routes.RegisterEcommerceRoutes(tenantAPI)
 	routes.RegisterInboxCloserRoutes(tenantAPI)
 
+	// A/B broadcast testing — tenant-authed, mounted at /api/ab to match the
+	// admin abService contract (Caddy routes /api/ab/* here).
+	abAPI := r.Group("/api/ab")
+	abAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
+	routes.RegisterABTestingRoutes(abAPI)
+
 	// Legacy /api/tenant/* paths — frontend pages call these directly (pre-refactor paths).
 	// Caddy now routes /api/tenant/products*, /api/tenant/offers*, etc. to this service.
 	legacyTenantAPI := r.Group("/api/tenant")
