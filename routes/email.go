@@ -4,12 +4,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
+	"github.com/josephalai/sentanyl/marketing-service/internal/sendauth"
+	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
@@ -55,19 +56,8 @@ func handleInsertEmail(c *gin.Context) {
 	insertAndSendEmail(c, req)
 }
 
-// nonRoutableTLDs are RFC-reserved TLDs that can never receive mail. Sends to
-// them (e.g. e2e fixtures like user@e2e.local) are accepted and dropped so
-// test flows stay green without generating hard bounces on the real MTA.
-var nonRoutableTLDs = map[string]bool{
-	"local": true, "localhost": true, "test": true, "invalid": true, "example": true,
-}
-
-func isNonRoutableRecipient(to string) bool {
-	if i := strings.LastIndex(to, "."); i >= 0 && i < len(to)-1 {
-		return nonRoutableTLDs[strings.ToLower(to[i+1:])]
-	}
-	return false
-}
+// Recipient routability now lives in the centralized sendauth authority
+// (COM-EM-004): see sendauth.IsNonRoutable / sendauth.Authorize.
 
 // insertAndSendEmail persists the message and dispatches it through the
 // configured provider, then writes the API response.
@@ -85,11 +75,19 @@ func insertAndSendEmail(c *gin.Context, req sendEmailRequest) {
 		return
 	}
 
-	if isNonRoutableRecipient(req.To) {
-		log.Printf("email: suppressed non-routable recipient %s (reserved TLD)", req.To)
+	// Centralized send authorization (COM-EM-004). This endpoint carries
+	// transactional/system sends, so a marketing unsubscribe does not block it;
+	// non-routable and invalid addresses are still dropped.
+	if dec := sendauth.Authorize(sendauth.Request{
+		TenantID: auth.GetTenantObjectID(c),
+		Email:    req.To,
+		Class:    sendauth.Transactional,
+		Purpose:  "api_send",
+	}); !dec.Allowed {
+		log.Printf("email: suppressed recipient %s (reason=%s)", req.To, dec.Reason)
 		c.JSON(http.StatusCreated, gin.H{
 			"status": "OK", "id": msg.GetIdHex(), "public_id": msg.PublicId,
-			"sent": false, "suppressed": true,
+			"sent": false, "suppressed": true, "reason": dec.Reason,
 		})
 		return
 	}

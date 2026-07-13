@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/sendauth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/emailer"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -160,6 +161,20 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 	postal := emailer.TenantPostalAddress(camp.TenantID.Hex())
 	count := 0
 	for _, u := range users {
+		// Centralized send authorization (COM-EM-004): the audience query
+		// already excludes unsubscribes, but routing every recipient through
+		// the single authority also drops non-routable/invalid addresses and
+		// catches address-scoped suppressions consistently with other channels.
+		if dec := sendauth.Authorize(sendauth.Request{
+			TenantID: camp.TenantID,
+			Email:    string(u.Email),
+			Class:    sendauth.Marketing,
+			Purpose:  "campaign",
+		}); !dec.Allowed {
+			log.Printf("campaign: skip recipient %s (reason=%s)", u.Email, dec.Reason)
+			continue
+		}
+
 		recipient := pkgmodels.NewCampaignRecipient(camp.Id, camp.TenantID, u.Id, string(u.Email))
 		if err := db.GetCollection(pkgmodels.CampaignRecipientCollection).Insert(recipient); err != nil {
 			log.Printf("campaign: recipient insert failed: %v", err)
