@@ -752,6 +752,34 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 		}
 	}
 
+	// Revoke the authoritative Access Grants for this contact + offer products
+	// (COM-CC-014). Under ACCESS_GRANTS_ONLY this is what actually removes
+	// Library access; otherwise it keeps the grant ledger consistent with the
+	// badge revocation above. Idempotent — already-revoked grants stay revoked.
+	if len(offer.IncludedProducts) > 0 {
+		_, _ = db.GetCollection(pkgmodels.AccessGrantCollection).UpdateAll(
+			bson.M{
+				"tenant_id":  tenantID,
+				"contact_id": contact.Id,
+				"product_id": bson.M{"$in": offer.IncludedProducts},
+				"offer_id":   offerID,
+				"status":     bson.M{"$ne": pkgmodels.GrantStatusRevoked},
+			},
+			bson.M{"$set": bson.M{"status": pkgmodels.GrantStatusRevoked, "timestamps.updated_at": now}},
+		)
+	}
+
+	// Mark the immutable Purchase + PurchaseItems refunded (status history, not
+	// deletion — the records stay for revenue/audit).
+	_, _ = db.GetCollection(pkgmodels.PurchaseCollection).UpdateAll(
+		bson.M{"tenant_id": tenantID, "contact_id": contact.Id, "offer_snapshot.offer_id": offerID, "status": bson.M{"$ne": pkgmodels.PurchaseStatusRefunded}},
+		bson.M{"$set": bson.M{"status": pkgmodels.PurchaseStatusRefunded, "timestamps.updated_at": now}},
+	)
+	_, _ = db.GetCollection(pkgmodels.PurchaseItemCollection).UpdateAll(
+		bson.M{"tenant_id": tenantID, "contact_id": contact.Id, "offer_id": offerID, "status": bson.M{"$ne": pkgmodels.ItemStatusRefunded}},
+		bson.M{"$set": bson.M{"status": pkgmodels.ItemStatusRefunded, "timestamps.updated_at": now}},
+	)
+
 	// Mark the matching subscription record as refunded.
 	_, _ = db.GetCollection(pkgmodels.SubscriptionCollection).UpdateAll(
 		bson.M{
