@@ -70,12 +70,9 @@ func triggerStoryStart(storyName, funnelId, userPublicId string) {
 // so that frontend pages built against the old monolith paths keep working.
 // Caddy routes /api/tenant/funnels* to this service.
 //
-// /api/tenant/purchases (formerly served by handleGetPurchases here, scoped
-// by subscriber_id query param) was superseded by handlers.RegisterPurchasesRoutes
-// in Phase 5 — that handler is tenant-scoped via JWT and returns hydrated
-// DTOs. The legacy handleGetPurchases remains in this file because the
-// /api/marketing/funnels group also registers it (different prefix, no
-// collision); it just isn't mounted on /api/tenant/* anymore.
+// /api/tenant/purchases was superseded by handlers.RegisterPurchasesRoutes
+// (tenant-scoped via JWT, hydrated DTOs); the legacy query-param product/
+// purchase handlers that used to live in this file have been removed.
 func RegisterLegacyTenantFunnelRoutes(rg *gin.RouterGroup) {
 	rg.GET("/funnels", handleGetFunnels)
 	rg.GET("/funnels/:funnelId", handleGetFunnel)
@@ -133,48 +130,56 @@ func handleGetDefaultFunnelTemplate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "template": tmpl})
 }
 
-// RegisterFunnelRoutes registers all funnel-related endpoints.
+// RegisterFunnelRoutes registers the genuinely public funnel endpoints
+// (page serving + event ingestion). The funnel/product/purchase/template
+// CRUD that used to live here trusted a subscriber_id query param with no
+// auth; the surviving handlers are JWT-scoped and mounted only on the
+// tenant-authed legacy groups (RegisterLegacyTenantFunnelRoutes /
+// RegisterLegacyFunnelTemplateRoutes). The product/purchase variants were
+// superseded by RegisterEcommerceRoutes + handlers.RegisterPurchasesRoutes
+// and have been removed.
 func RegisterFunnelRoutes(rg *gin.RouterGroup) {
-	rg.GET("/funnels", handleGetFunnels)
-	rg.GET("/funnels/:funnelId", handleGetFunnel)
-	rg.POST("/funnels", handleCreateFunnel)
-	rg.DELETE("/funnels/:funnelId", handleDeleteFunnel)
-
 	rg.GET("/funnel/page", handleGetPageByDomainPath)
 	rg.POST("/funnel/event", handleFunnelEvent)
-
-	rg.GET("/products", handleGetProducts)
-	rg.GET("/products/:productId", handleGetProduct)
-	rg.POST("/products", handleCreateProduct)
-	rg.DELETE("/products/:productId", handleDeleteProduct)
-
-	rg.GET("/purchases", handleGetPurchases)
-
-	rg.GET("/funnel-templates", handleGetFunnelTemplates)
-	rg.GET("/funnel-templates/:templateId", handleGetFunnelTemplate)
-	rg.POST("/funnel-templates", handleCreateFunnelTemplate)
-	rg.PUT("/funnel-templates/:templateId", handleUpdateFunnelTemplate)
-	rg.DELETE("/funnel-templates/:templateId", handleDeleteFunnelTemplate)
 }
 
 // ---------- Funnel CRUD ----------
 
+// jwtTenantOr returns the tenant_id/subscriber_id $or clause for the JWT
+// tenant (same dual-key pattern as handleUpdateFunnel), or nil when the
+// request carries no tenant identity.
+func jwtTenantOr(c *gin.Context) []bson.M {
+	if pkgauth.GetTenantID(c) == "" {
+		return nil
+	}
+	return []bson.M{
+		{"tenant_id": pkgauth.GetTenantObjectID(c)},
+		{"subscriber_id": pkgauth.GetTenantID(c)},
+	}
+}
+
 func handleGetFunnels(c *gin.Context) {
-	subscriberId := c.Query("subscriber_id")
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	var funnels []pkgmodels.Funnel
 	db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
-		"subscriber_id":         subscriberId,
+		"$or":                   scope,
 		"timestamps.deleted_at": nil,
 	}).All(&funnels)
-	for range funnels {
-	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "funnels": funnels})
 }
 
 func handleGetFunnel(c *gin.Context) {
-	funnelId := c.Param("funnelId")
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	var funnel pkgmodels.Funnel
-	err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{"public_id": funnelId}).One(&funnel)
+	err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{"public_id": c.Param("funnelId"), "$or": scope}).One(&funnel)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "funnel not found"})
 		return
@@ -227,11 +232,12 @@ func handleCreateFunnel(c *gin.Context) {
 	now := time.Now()
 	funnel.Id = bson.NewObjectId()
 	funnel.PublicId = utils.GeneratePublicId()
-	if funnel.TenantID == "" {
-		funnel.TenantID = pkgauth.GetTenantObjectID(c)
-	}
+	// Ownership always comes from the JWT, never the request body.
+	funnel.TenantID = pkgauth.GetTenantObjectID(c)
+	funnel.SubscriberId = pkgauth.GetTenantID(c)
 	if funnel.SubscriberId == "" {
-		funnel.SubscriberId = pkgauth.GetTenantID(c)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
 	}
 	normalizeFunnelTree(&funnel)
 	funnel.SoftDeletes.CreatedAt = &now
@@ -293,10 +299,14 @@ func handleUpdateFunnel(c *gin.Context) {
 }
 
 func handleDeleteFunnel(c *gin.Context) {
-	funnelId := c.Param("funnelId")
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	now := time.Now()
 	db.GetCollection(pkgmodels.FunnelCollection).Update(
-		bson.M{"public_id": funnelId},
+		bson.M{"public_id": c.Param("funnelId"), "$or": scope},
 		bson.M{"$set": bson.M{"timestamps.deleted_at": now}},
 	)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -573,80 +583,30 @@ func evaluateWatchThreshold(operator string, progressPct int, threshold int) boo
 	}
 }
 
-// ---------- Product CRUD ----------
-
-func handleGetProducts(c *gin.Context) {
-	subscriberId := c.Query("subscriber_id")
-	var products []pkgmodels.Product
-	db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-		"subscriber_id":         subscriberId,
-		"timestamps.deleted_at": nil,
-	}).All(&products)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "products": products})
-}
-
-func handleGetProduct(c *gin.Context) {
-	productId := c.Param("productId")
-	var product pkgmodels.Product
-	err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{"public_id": productId}).One(&product)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "product": product})
-}
-
-func handleCreateProduct(c *gin.Context) {
-	var product pkgmodels.Product
-	if err := c.ShouldBindJSON(&product); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product data"})
-		return
-	}
-	now := time.Now()
-	product.Id = bson.NewObjectId()
-	product.PublicId = utils.GeneratePublicId()
-	product.SoftDeletes.CreatedAt = &now
-	db.GetCollection(pkgmodels.ProductCollection).Insert(product)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "product": product})
-}
-
-func handleDeleteProduct(c *gin.Context) {
-	productId := c.Param("productId")
-	now := time.Now()
-	db.GetCollection(pkgmodels.ProductCollection).Update(
-		bson.M{"public_id": productId},
-		bson.M{"$set": bson.M{"timestamps.deleted_at": now}},
-	)
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// ---------- Purchase Log ----------
-
-func handleGetPurchases(c *gin.Context) {
-	subscriberId := c.Query("subscriber_id")
-	var purchases []pkgmodels.PurchaseLog
-	db.GetCollection(pkgmodels.PurchaseLogCollection).Find(bson.M{
-		"subscriber_id": subscriberId,
-	}).All(&purchases)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "purchases": purchases})
-}
-
 // ---------- Funnel Template CRUD ----------
 
 func handleGetFunnelTemplates(c *gin.Context) {
-	subscriberId := c.Query("subscriber_id")
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	var templates []pkgmodels.FunnelTemplate
 	db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
-		"subscriber_id":         subscriberId,
+		"$or":                   scope,
 		"timestamps.deleted_at": nil,
 	}).All(&templates)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "templates": templates})
 }
 
 func handleGetFunnelTemplate(c *gin.Context) {
-	templateId := c.Param("templateId")
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	var tmpl pkgmodels.FunnelTemplate
-	err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{"public_id": templateId}).One(&tmpl)
+	err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{"public_id": c.Param("templateId"), "$or": scope}).One(&tmpl)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
 		return
@@ -655,6 +615,11 @@ func handleGetFunnelTemplate(c *gin.Context) {
 }
 
 func handleCreateFunnelTemplate(c *gin.Context) {
+	sId := pkgauth.GetTenantID(c)
+	if sId == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	var tmpl pkgmodels.FunnelTemplate
 	if err := c.ShouldBindJSON(&tmpl); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid template data"})
@@ -663,6 +628,8 @@ func handleCreateFunnelTemplate(c *gin.Context) {
 	now := time.Now()
 	tmpl.Id = bson.NewObjectId()
 	tmpl.PublicId = utils.GeneratePublicId()
+	tmpl.SubscriberId = sId
+	tmpl.TenantID = pkgauth.GetTenantObjectID(c)
 	tmpl.SoftDeletes.CreatedAt = &now
 	db.GetCollection(pkgmodels.FunnelTemplateCollection).Insert(tmpl)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "template": tmpl})
@@ -725,9 +692,14 @@ func handleUpdateFunnelTemplate(c *gin.Context) {
 	if updates.AssetManifest != nil {
 		set["asset_manifest"] = updates.AssetManifest
 	}
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	if len(set) > 0 {
 		db.GetCollection(pkgmodels.FunnelTemplateCollection).Update(
-			bson.M{"public_id": templateId},
+			bson.M{"public_id": templateId, "$or": scope},
 			bson.M{"$set": set},
 		)
 		// If this template is now the tenant default, clear the flag on
@@ -754,10 +726,14 @@ func handleUpdateFunnelTemplate(c *gin.Context) {
 }
 
 func handleDeleteFunnelTemplate(c *gin.Context) {
-	templateId := c.Param("templateId")
+	scope := jwtTenantOr(c)
+	if scope == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	now := time.Now()
 	db.GetCollection(pkgmodels.FunnelTemplateCollection).Update(
-		bson.M{"public_id": templateId},
+		bson.M{"public_id": c.Param("templateId"), "$or": scope},
 		bson.M{"$set": bson.M{"timestamps.deleted_at": now}},
 	)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
