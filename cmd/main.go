@@ -52,6 +52,9 @@ func main() {
 	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
 	routes.EnsureEcommerceIndexes()
 
+	// Ensure MongoDB indexes for download upload intents (DEL-010).
+	routes.EnsureDownloadIndexes()
+
 	// Durable job kernel: indexes, handlers, and a background worker for
 	// outbound webhook delivery (WH-003) and future durable workloads.
 	jobs.EnsureIndexes()

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	mgo "gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/pkg/auth"
@@ -36,6 +37,19 @@ var (
 func SetDownloadsStorage(p storage.StorageProvider, bucket string) {
 	downloadStorage = p
 	downloadBucket = bucket
+}
+
+// EnsureDownloadIndexes enforces the UploadIntent invariant (DEL-010): one
+// intent per object path, so an issued path can't be re-registered by another
+// product or tenant.
+func EnsureDownloadIndexes() {
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).EnsureIndex(mgo.Index{
+		Key:        []string{"object_path"},
+		Unique:     true,
+		Background: true,
+	}); err != nil {
+		log.Printf("downloads: failed to ensure upload_intents unique index: %v", err)
+	}
 }
 
 // RegisterDigitalDownloadTenantRoutes registers the tenant-side routes for
@@ -156,6 +170,14 @@ func handleDownloadUploadURL(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue upload URL"})
 		return
 	}
+	// DEL-010: record the issued path server-side so attach can only finalize
+	// paths this tenant was actually granted, with metadata resolved from here.
+	intent := pkgmodels.NewUploadIntent(tenantID, product.Id, objectPath, safeFileName(req.FileName), req.ContentType, req.SizeBytes)
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Insert(intent); err != nil {
+		log.Printf("downloads: insert upload intent failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue upload URL"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"upload_url":   signed,
 		"object_path":  objectPath,
@@ -164,11 +186,24 @@ func handleDownloadUploadURL(c *gin.Context) {
 	})
 }
 
+// downloadObjectPathPrefix returns the only object-path prefix a tenant may
+// attach for a given product. Defense-in-depth alongside the UploadIntent
+// check — even a stray intent row can't cross tenant/product namespaces.
+func downloadObjectPathPrefix(tenantID bson.ObjectId, productPublicID string) string {
+	return fmt.Sprintf("%s/downloads/%s/", tenantID.Hex(), productPublicID)
+}
+
 // handleDownloadAttach finalizes a successful upload by creating the Asset
-// row and appending its id to Product.Downloads.AssetIDs. Idempotent on the
-// (product, object_path) pair — re-attaching the same path returns the
-// existing asset.
+// row and appending its id to Product.Downloads.AssetIDs. The object path
+// must match a pending UploadIntent issued to this tenant+product and the
+// object must actually exist in the bucket (DEL-010); metadata comes from the
+// intent, not the request. Idempotent on the (product, object_path) pair —
+// re-attaching the same path returns the existing asset (DEL-009).
 func handleDownloadAttach(c *gin.Context) {
+	if downloadStorage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "storage not configured"})
+		return
+	}
 	tenantID := auth.GetTenantObjectID(c)
 	if tenantID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -192,20 +227,61 @@ func handleDownloadAttach(c *gin.Context) {
 		return
 	}
 
+	if !strings.HasPrefix(req.ObjectPath, downloadObjectPathPrefix(tenantID, product.PublicId)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "object path not issued for this product"})
+		return
+	}
+
+	// Idempotency: the same object path re-attached returns the existing asset.
+	var existing pkgmodels.Asset
+	if err := db.GetCollection(pkgmodels.AssetCollection).Find(bson.M{
+		"tenant_id":             tenantID,
+		"s3_key":                req.ObjectPath,
+		"timestamps.deleted_at": nil,
+	}).One(&existing); err == nil {
+		if productOwnsAsset(product, existing.Id) {
+			c.JSON(http.StatusOK, existing)
+			return
+		}
+	}
+
+	var intent pkgmodels.UploadIntent
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Find(bson.M{
+		"tenant_id":   tenantID,
+		"product_id":  product.Id,
+		"object_path": req.ObjectPath,
+		"status":      pkgmodels.UploadIntentStatusPending,
+		"expires_at":  bson.M{"$gt": time.Now()},
+	}).One(&intent); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "object path not issued for this product"})
+		return
+	}
+
+	exists, err := downloadStorage.ObjectExists(downloadBucket, req.ObjectPath)
+	if err != nil {
+		log.Printf("downloads: attach object check failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify uploaded object"})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusConflict, gin.H{"error": "object not uploaded"})
+		return
+	}
+
 	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", downloadBucket, req.ObjectPath)
 
 	asset := pkgmodels.NewAsset()
 	asset.TenantID = tenantID
 	asset.Title = strings.TrimSpace(req.Title)
 	if asset.Title == "" {
-		asset.Title = req.FileName
+		asset.Title = intent.FileName
 	}
 	asset.Kind = "download_file"
 	asset.Status = "ready"
 	asset.FileURL = publicURL
-	asset.FileName = req.FileName
-	asset.FileType = req.ContentType
-	asset.FileSize = req.SizeBytes
+	asset.FileName = intent.FileName
+	asset.FileType = intent.ContentType
+	asset.FileSize = intent.SizeBytes
 	asset.S3Key = req.ObjectPath
 
 	if err := db.GetCollection(pkgmodels.AssetCollection).Insert(asset); err != nil {
@@ -227,6 +303,12 @@ func handleDownloadAttach(c *gin.Context) {
 		log.Printf("downloads: update product asset list failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to attach asset"})
 		return
+	}
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Update(
+		bson.M{"_id": intent.Id},
+		bson.M{"$set": bson.M{"status": pkgmodels.UploadIntentStatusAttached}},
+	); err != nil {
+		log.Printf("downloads: mark intent attached failed: %v", err)
 	}
 	c.JSON(http.StatusCreated, asset)
 }
