@@ -11,6 +11,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/emailer"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
@@ -303,8 +304,10 @@ func handleABStartTest(c *gin.Context) {
 			continue
 		}
 
+		unsubURL := emailer.UnsubURL(publicBaseURL(), u.PublicId)
 		html := rewriteABLinks(v.Body, send.PublicId)
 		html = injectABPixel(html, send.PublicId)
+		html = emailer.AppendUnsubFooter(html, unsubURL)
 
 		msg := pkgmodels.NewInstantEmail()
 		msg.From = "no-reply@sentanyl.local"
@@ -315,7 +318,11 @@ func handleABStartTest(c *gin.Context) {
 			continue
 		}
 		if smtpProvider != nil {
-			_ = smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, "")
+			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
+				_ = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, "", emailer.UnsubHeaders(unsubURL))
+			} else {
+				_ = smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, "")
+			}
 		}
 		count++
 	}

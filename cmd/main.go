@@ -97,6 +97,10 @@ func main() {
 	api := r.Group("/api/marketing")
 	routes.RegisterFunnelRoutes(api)
 	routes.RegisterEmailRoutes(api)
+	// Contact-level one-click unsubscribe (campaign/story/A-B emails). Not
+	// rate-limited: mailbox providers batch one-click POSTs, and a dropped
+	// unsubscribe is a compliance failure.
+	routes.RegisterUnsubscribeRoutes(api)
 
 	// Public campaign click tracker — recipients have no JWT, so this lives
 	// outside the tenant-auth group. Engine-level register since it's not

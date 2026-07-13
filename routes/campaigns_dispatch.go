@@ -9,6 +9,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/emailer"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
@@ -25,7 +26,9 @@ func resolveCampaignAudience(tenantID bson.ObjectId, aud pkgmodels.CampaignAudie
 		return nil, fmt.Errorf("must_not_have lookup: %w", err)
 	}
 
-	q := bson.M{"tenant_id": tenantID}
+	// Contacts who used the one-click unsubscribe are suppressed from every
+	// bulk channel that resolves audiences here (campaigns + A/B).
+	q := bson.M{"tenant_id": tenantID, "unsubscribed_at": nil}
 	if len(mustIDs) > 0 {
 		q["badges"] = bson.M{"$all": mustIDs}
 	}
@@ -178,11 +181,15 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		} else {
 			msg = pkgmodels.NewInstantEmail()
 		}
+		unsubURL := emailer.UnsubURL(publicBaseURL(), u.PublicId)
 		msg.From = from
 		msg.To = string(u.Email)
 		msg.SubjectLine = camp.Subject
 		msg.Html = strings.ReplaceAll(bodyHTML, "{{REC_PUBLIC_ID}}", recipient.PublicId)
 		msg.Html = strings.ReplaceAll(msg.Html, "{{SEND_PUBLIC_ID}}", send.PublicId)
+		// Visible opt-out footer rides the stored HTML so scheduled sends keep
+		// it; the RFC 8058 headers attach on the instant path below.
+		msg.Html = emailer.AppendUnsubFooter(msg.Html, unsubURL)
 		msg.ReplyTo = camp.ReplyTo
 
 		col := pkgmodels.InstantEmailCollection
@@ -195,7 +202,13 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		}
 
 		if !scheduled && smtpProvider != nil {
-			if err := smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo); err != nil {
+			sendErr := error(nil)
+			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
+				sendErr = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo, emailer.UnsubHeaders(unsubURL))
+			} else {
+				sendErr = smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo)
+			}
+			if err := sendErr; err != nil {
 				log.Printf("campaign: SMTP send failed for %s: %v", msg.To, err)
 				_ = db.GetCollection(pkgmodels.CampaignRecipientCollection).Update(
 					bson.M{"_id": recipient.Id},
