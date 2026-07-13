@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -1492,8 +1493,61 @@ type deliveryWebhookEvent struct {
 	Raw bson.M `json:"raw,omitempty"`
 }
 
+// deliveryWebhookAuthorized checks the shared delivery-webhook secret. In
+// production a missing secret fails closed (no request is accepted); in
+// non-production an unset secret is tolerated so local/e2e keep working.
+func deliveryWebhookAuthorized(c *gin.Context) bool {
+	secret := os.Getenv("DELIVERY_WEBHOOK_SECRET")
+	if secret == "" {
+		return !auth.IsProductionEnv()
+	}
+	got := c.GetHeader("X-Sentanyl-Delivery-Secret")
+	if got == "" {
+		got = c.Query("secret")
+	}
+	return hmac.Equal([]byte(got), []byte(secret))
+}
+
+// resolveDeliveryTenant binds a provider event to exactly one tenant via the
+// EmailSend row identified by the provider message id. It never resolves by
+// email alone: if the message id is missing or unknown, or the address matches
+// sends in more than one tenant, it refuses so a bounce/complaint cannot spill
+// suppression across tenants.
+func resolveDeliveryTenant(messageID, email string) (bson.ObjectId, bool) {
+	if messageID != "" {
+		var send pkgmodels.EmailSend
+		if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"message_id": messageID}).One(&send); err == nil && send.TenantID != "" {
+			return send.TenantID, true
+		}
+	}
+	// Fallback: the address must be unambiguous — sends to exactly one tenant.
+	var sends []pkgmodels.EmailSend
+	_ = db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"recipient_email": email}).Select(bson.M{"tenant_id": 1}).All(&sends)
+	tenantSet := map[string]bson.ObjectId{}
+	for _, s := range sends {
+		if s.TenantID != "" {
+			tenantSet[s.TenantID.Hex()] = s.TenantID
+		}
+	}
+	if len(tenantSet) == 1 {
+		for _, tid := range tenantSet {
+			return tid, true
+		}
+	}
+	return "", false
+}
+
 func handleNewsletterDeliveryWebhook(c *gin.Context) {
 	provider := c.Param("provider")
+
+	// COM-EM-001: this endpoint is public but must not be an unauthenticated,
+	// cross-tenant suppression primitive. Require a shared delivery secret
+	// (the provider config carries it); fail closed in production when unset.
+	if !deliveryWebhookAuthorized(c) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized delivery webhook"})
+		return
+	}
+
 	var ev deliveryWebhookEvent
 	if err := c.ShouldBindJSON(&ev); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -1502,6 +1556,15 @@ func handleNewsletterDeliveryWebhook(c *gin.Context) {
 	email := strings.ToLower(strings.TrimSpace(ev.Email))
 	if email == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "email required"})
+		return
+	}
+
+	// Resolve the exact tenant from the provider message id via the EmailSend
+	// row. Never suppress by email alone (that would let one tenant's event —
+	// or a forged one — suppress the same address in unrelated tenants).
+	tenantID, ok := resolveDeliveryTenant(ev.MessageID, email)
+	if !ok {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "could not bind event to a tenant send"})
 		return
 	}
 	var newStatus string
@@ -1526,7 +1589,7 @@ func handleNewsletterDeliveryWebhook(c *gin.Context) {
 	}
 	now := time.Now()
 	info, err := db.GetCollection(pkgmodels.NewsletterSubscriptionCollection).UpdateAll(
-		bson.M{"email": email, "status": pkgmodels.NewsletterSubscriptionStatusActive},
+		bson.M{"email": email, "tenant_id": tenantID, "status": pkgmodels.NewsletterSubscriptionStatusActive},
 		bson.M{"$set": bson.M{
 			"status":          newStatus,
 			"unsubscribed_at": now,
