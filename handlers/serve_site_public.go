@@ -82,7 +82,9 @@ func handlePublicFormSubmit(c *gin.Context) {
 			case "domain", "name", "email", "phone", "message", "form_id", "next_url":
 				continue
 			}
-			req.Fields[k] = vs[0]
+			// Repeated keys (multiselect checkboxes) join comma-separated —
+			// the executor's multiselect coercion splits on commas.
+			req.Fields[k] = strings.Join(vs, ",")
 		}
 	}
 
@@ -109,7 +111,7 @@ func handlePublicFormSubmit(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 			return
 		}
-		runFormSubmission(c, tenantID, req.FormID, &req, strings.Contains(contentType, "application/json"))
+		runFormSubmission(c, tenantID, req.FormID, &req, strings.Contains(contentType, "application/json"), "builder_page")
 		return
 	}
 
@@ -146,7 +148,7 @@ func handlePublicFormSubmit(c *gin.Context) {
 // the OnSubmit executor, and writes the response (303 redirect for browser
 // posts, JSON otherwise). Shared by the legacy builder route and the
 // /api/public/forms/:formId channel route.
-func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID string, req *publicFormRequest, isJSON bool) {
+func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID string, req *publicFormRequest, isJSON bool, source string) {
 	var form pkgmodels.PageForm
 	if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
 		"public_id":             formPublicID,
@@ -168,6 +170,7 @@ func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID stri
 
 	result := forms.Execute(&form, forms.Submission{
 		FieldValues:          values,
+		Source:               source,
 		VideoSessionPublicId: req.VideoSessionID,
 	})
 

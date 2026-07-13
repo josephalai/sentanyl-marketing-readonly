@@ -5,9 +5,12 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/channel"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
+	"github.com/josephalai/sentanyl/pkg/db"
+	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/publicchannel"
 )
 
@@ -27,6 +30,7 @@ func RegisterPublicChannelRoutes(public *gin.RouterGroup) {
 	public.GET("/products/:id", handlePublicChannelProduct)
 	public.GET("/offers", handlePublicChannelOffers)
 	public.GET("/offers/:id", handlePublicChannelOffer)
+	public.GET("/forms/:formId", handlePublicChannelFormGet)
 	public.POST("/forms/:formId", handlePublicChannelFormSubmit)
 	public.POST("/checkout/:offerId", handlePublicChannelCheckout)
 	public.POST("/newsletters/:productId/subscribe", handlePublicChannelNewsletterSubscribe)
@@ -137,7 +141,8 @@ func handlePublicChannelFormSubmit(c *gin.Context) {
 			case "domain", "name", "email", "phone", "message", "form_id", "next_url", "public_key":
 				continue
 			}
-			req.Fields[k] = vs[0]
+			// Repeated keys (multiselect checkboxes) join comma-separated.
+			req.Fields[k] = strings.Join(vs, ",")
 		}
 	}
 
@@ -145,7 +150,52 @@ func handlePublicChannelFormSubmit(c *gin.Context) {
 	if pubCtx == nil {
 		return
 	}
-	runFormSubmission(c, pubCtx.TenantID, c.Param("formId"), &req, isJSON)
+	runFormSubmission(c, pubCtx.TenantID, c.Param("formId"), &req, isJSON, "coded_embed")
+}
+
+// handlePublicChannelFormGet is GET /api/public/forms/:formId — a whitelisted
+// form definition (name + renderable fields only, never the on_submit chain
+// or tenant internals) so coded sites can render forms dynamically.
+func handlePublicChannelFormGet(c *gin.Context) {
+	pubCtx := resolvePublicChannelRequest(c, "")
+	if pubCtx == nil {
+		return
+	}
+	var form pkgmodels.PageForm
+	if err := db.GetCollection(pkgmodels.PageFormCollection).Find(bson.M{
+		"public_id":             c.Param("formId"),
+		"tenant_id":             pubCtx.TenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&form); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "form not found"})
+		return
+	}
+	type publicField struct {
+		FieldName   string   `json:"field_name"`
+		FieldType   string   `json:"field_type"`
+		Required    bool     `json:"required,omitempty"`
+		Options     []string `json:"options,omitempty"`
+		Placeholder string   `json:"placeholder,omitempty"`
+	}
+	fields := make([]publicField, 0, len(form.Fields))
+	for _, f := range form.Fields {
+		if f == nil || f.FieldName == "" {
+			continue
+		}
+		fields = append(fields, publicField{
+			FieldName:   f.FieldName,
+			FieldType:   f.FieldType,
+			Required:    f.Required,
+			Options:     f.Options,
+			Placeholder: f.Placeholder,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"form": gin.H{
+		"public_id": form.PublicId,
+		"name":      form.Name,
+		"form_type": form.FormType,
+		"fields":    fields,
+	}})
 }
 
 // publicChannelCheckoutRequest is the body for POST /api/public/checkout/:offerId.

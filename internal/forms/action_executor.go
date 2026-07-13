@@ -34,6 +34,10 @@ const downloadEmailTTL = 24 * time.Hour
 // FieldValues is keyed by FormField.FieldName as configured on the form.
 type Submission struct {
 	FieldValues map[string]string
+	// Source records which public surface the submission came from:
+	// "builder_page" (published funnel/site pages) or "coded_embed"
+	// (BYO-website channel embeds). Stored on the FormSubmission row.
+	Source string
 	// VideoSessionPublicId, when set, stamps any PurchaseLog rows the
 	// executor creates (e.g. granted_via_form rows) so a video-driven
 	// landing page's bottom-of-page conversion is attributable to the
@@ -72,6 +76,8 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 		return res
 	}
 
+	res.Warnings = append(res.Warnings, validateOptions(form, sub.FieldValues)...)
+
 	contact, err := upsertContact(form, sub)
 	if err != nil || contact == nil {
 		if err != nil {
@@ -79,10 +85,13 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 		} else {
 			res.Warnings = append(res.Warnings, "upsert_contact: missing email")
 		}
+		// Keep the raw answers even when no contact could be resolved.
+		recordSubmission(form, sub, nil)
 		return res
 	}
 	res.ContactID = contact.Id.Hex()
 	res.ContactPublicID = contact.PublicId
+	recordSubmission(form, sub, contact)
 
 	on := form.OnSubmit
 	if on == nil {
@@ -320,8 +329,101 @@ func coerceFieldValue(fieldType, raw string) any {
 				return t
 			}
 		}
+	case "multiselect":
+		// Wire format: comma-separated selections.
+		parts := strings.Split(raw, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if v := strings.TrimSpace(p); v != "" {
+				out = append(out, v)
+			}
+		}
+		return out
 	}
 	return raw
+}
+
+// validateOptions drops submitted values that aren't among a choice field's
+// declared options (select/radio: whole value; multiselect: per selection).
+// Returns warnings for anything dropped — consistent with the executor's
+// non-fatal posture.
+func validateOptions(form *pkgmodels.PageForm, values map[string]string) []string {
+	var warnings []string
+	allowed := func(f *pkgmodels.FormField, v string) bool {
+		for _, o := range f.Options {
+			if o == v {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range form.Fields {
+		if f == nil || len(f.Options) == 0 {
+			continue
+		}
+		raw, present := values[f.FieldName]
+		if !present || raw == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(f.FieldType)) {
+		case "select", "radio":
+			if !allowed(f, raw) {
+				warnings = append(warnings, "invalid_option: "+f.FieldName+"="+raw)
+				delete(values, f.FieldName)
+			}
+		case "multiselect":
+			parts := strings.Split(raw, ",")
+			kept := make([]string, 0, len(parts))
+			for _, p := range parts {
+				v := strings.TrimSpace(p)
+				if v == "" {
+					continue
+				}
+				if allowed(f, v) {
+					kept = append(kept, v)
+				} else {
+					warnings = append(warnings, "invalid_option: "+f.FieldName+"="+v)
+				}
+			}
+			if len(kept) == 0 {
+				delete(values, f.FieldName)
+			} else {
+				values[f.FieldName] = strings.Join(kept, ",")
+			}
+		}
+	}
+	return warnings
+}
+
+// recordSubmission persists the raw (option-validated, type-coerced) answers
+// as a FormSubmission row so tenants can review per-form responses.
+func recordSubmission(form *pkgmodels.PageForm, sub Submission, contact *pkgmodels.User) {
+	data := map[string]interface{}{}
+	typed := map[string]string{}
+	for _, f := range form.Fields {
+		if f != nil && f.FieldName != "" {
+			typed[f.FieldName] = f.FieldType
+		}
+	}
+	for k, v := range sub.FieldValues {
+		data[k] = coerceFieldValue(typed[k], v)
+	}
+	row := pkgmodels.FormSubmission{
+		Id:        bson.NewObjectId(),
+		PublicId:  utils.GeneratePublicId(),
+		TenantID:  form.TenantID,
+		FormID:    form.PublicId,
+		Data:      data,
+		Source:    sub.Source,
+		CreatedAt: time.Now(),
+	}
+	if contact != nil {
+		row.ContactID = contact.PublicId
+		row.ContactEmail = string(contact.Email)
+	}
+	if err := db.GetCollection(pkgmodels.FormSubmissionCollection).Insert(row); err != nil {
+		log.Printf("forms: failed to record submission for form %s: %v", form.PublicId, err)
+	}
 }
 
 // scopedFind builds a (public_id + tenant_or_subscriber) filter. Different

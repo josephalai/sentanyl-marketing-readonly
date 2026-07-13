@@ -403,22 +403,49 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 				if f == nil || f.FieldName == "" {
 					continue
 				}
-				inputType := "text"
-				switch strings.ToLower(f.FieldType) {
-				case "email":
-					inputType = "email"
-				case "number":
-					inputType = "number"
-				case "tel", "phone":
-					inputType = "tel"
-				}
 				required := ""
 				if f.Required {
 					required = " required"
 				}
-				placeholder := humanizeFieldName(f.FieldName)
-				sb.WriteString(fmt.Sprintf("<input type=\"%s\" name=\"%s\" placeholder=\"%s\"%s>\n",
-					inputType, esc(f.FieldName), esc(placeholder), required))
+				placeholder := f.Placeholder
+				if placeholder == "" {
+					placeholder = humanizeFieldName(f.FieldName)
+				}
+				switch strings.ToLower(f.FieldType) {
+				case "select", "radio":
+					sb.WriteString(fmt.Sprintf("<select name=\"%s\"%s>\n", esc(f.FieldName), required))
+					if !f.Required {
+						sb.WriteString("<option value=\"\">" + esc(placeholder) + "</option>\n")
+					}
+					for _, o := range f.Options {
+						sb.WriteString(fmt.Sprintf("<option value=\"%s\">%s</option>\n", esc(o), esc(o)))
+					}
+					sb.WriteString("</select>\n")
+				case "multiselect":
+					sb.WriteString(fmt.Sprintf("<fieldset class=\"form-multiselect\"><legend>%s</legend>\n", esc(placeholder)))
+					for _, o := range f.Options {
+						sb.WriteString(fmt.Sprintf("<label><input type=\"checkbox\" name=\"%s\" value=\"%s\">%s</label>\n", esc(f.FieldName), esc(o), esc(o)))
+					}
+					sb.WriteString("</fieldset>\n")
+				case "textarea":
+					sb.WriteString(fmt.Sprintf("<textarea name=\"%s\" placeholder=\"%s\" rows=\"5\"%s></textarea>\n", esc(f.FieldName), esc(placeholder), required))
+				case "boolean", "bool":
+					sb.WriteString(fmt.Sprintf("<label class=\"form-checkbox\"><input type=\"checkbox\" name=\"%s\" value=\"true\"%s>%s</label>\n", esc(f.FieldName), required, esc(placeholder)))
+				default:
+					inputType := "text"
+					switch strings.ToLower(f.FieldType) {
+					case "email":
+						inputType = "email"
+					case "number":
+						inputType = "number"
+					case "tel", "phone":
+						inputType = "tel"
+					case "date":
+						inputType = "date"
+					}
+					sb.WriteString(fmt.Sprintf("<input type=\"%s\" name=\"%s\" placeholder=\"%s\"%s>\n",
+						inputType, esc(f.FieldName), esc(placeholder), required))
+				}
 			}
 		} else {
 			if isContactForm {

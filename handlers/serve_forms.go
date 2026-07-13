@@ -3,6 +3,7 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +22,37 @@ func RegisterFormsRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.GET("/forms/:formId", handleGetForm)
 	tenantAPI.PUT("/forms/:formId", handleUpdateForm)
 	tenantAPI.DELETE("/forms/:formId", handleDeleteForm)
+	tenantAPI.GET("/forms/:formId/submissions", handleListFormSubmissions)
+}
+
+// handleListFormSubmissions returns the stored submissions for one form,
+// newest first, with a total count for pagination.
+func handleListFormSubmissions(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	formID := c.Param("formId")
+	limit := 50
+	if n, err := strconv.Atoi(c.Query("limit")); err == nil && n > 0 && n <= 200 {
+		limit = n
+	}
+	skip := 0
+	if n, err := strconv.Atoi(c.Query("skip")); err == nil && n > 0 {
+		skip = n
+	}
+	filter := bson.M{"tenant_id": tenantID, "form_id": formID}
+	total, _ := db.GetCollection(pkgmodels.FormSubmissionCollection).Find(filter).Count()
+	var subs []pkgmodels.FormSubmission
+	if err := db.GetCollection(pkgmodels.FormSubmissionCollection).Find(filter).Sort("-created_at").Skip(skip).Limit(limit).All(&subs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list submissions"})
+		return
+	}
+	if subs == nil {
+		subs = []pkgmodels.FormSubmission{}
+	}
+	c.JSON(http.StatusOK, gin.H{"submissions": subs, "total": total, "skip": skip, "limit": limit})
 }
 
 func handleListForms(c *gin.Context) {

@@ -310,26 +310,61 @@ func buildFormHTML(tenantID bson.ObjectId, formPublicID string, slotValues map[s
 		if f == nil || f.FieldName == "" {
 			continue
 		}
-		sb.WriteString(`<label class="sentanyl-form-field">`)
-		sb.WriteString(html.EscapeString(humanize(f.FieldName)))
-		inputType := "text"
-		switch strings.ToLower(f.FieldType) {
-		case "email":
-			inputType = "email"
-		case "number":
-			inputType = "number"
-		case "tel", "phone":
-			inputType = "tel"
-		}
-		sb.WriteString(`<input type="`)
-		sb.WriteString(inputType)
-		sb.WriteString(`" name="`)
-		sb.WriteString(html.EscapeString(f.FieldName))
-		sb.WriteString(`"`)
+		name := html.EscapeString(f.FieldName)
+		req := ""
 		if f.Required {
-			sb.WriteString(` required`)
+			req = " required"
 		}
-		sb.WriteString(`/></label>`)
+		switch strings.ToLower(f.FieldType) {
+		case "select", "radio":
+			// Both render as a <select> in the no-JS materialized form —
+			// one value posted under the field name.
+			sb.WriteString(`<label class="sentanyl-form-field">` + html.EscapeString(humanize(f.FieldName)))
+			sb.WriteString(`<select name="` + name + `"` + req + `>`)
+			if !f.Required {
+				sb.WriteString(`<option value=""></option>`)
+			}
+			for _, o := range f.Options {
+				sb.WriteString(`<option value="` + html.EscapeString(o) + `">` + html.EscapeString(o) + `</option>`)
+			}
+			sb.WriteString(`</select></label>`)
+		case "multiselect":
+			// Checkboxes sharing the field name; the submit handler joins
+			// repeated values with commas (executor splits multiselect).
+			sb.WriteString(`<fieldset class="sentanyl-form-field sentanyl-form-multiselect"><legend>` + html.EscapeString(humanize(f.FieldName)) + `</legend>`)
+			for _, o := range f.Options {
+				ov := html.EscapeString(o)
+				sb.WriteString(`<label><input type="checkbox" name="` + name + `" value="` + ov + `"/>` + ov + `</label>`)
+			}
+			sb.WriteString(`</fieldset>`)
+		case "textarea":
+			sb.WriteString(`<label class="sentanyl-form-field">` + html.EscapeString(humanize(f.FieldName)))
+			sb.WriteString(`<textarea name="` + name + `"` + req)
+			if f.Placeholder != "" {
+				sb.WriteString(` placeholder="` + html.EscapeString(f.Placeholder) + `"`)
+			}
+			sb.WriteString(`></textarea></label>`)
+		case "boolean", "bool":
+			sb.WriteString(`<label class="sentanyl-form-field sentanyl-form-checkbox"><input type="checkbox" name="` + name + `" value="true"` + req + `/>` + html.EscapeString(humanize(f.FieldName)) + `</label>`)
+		default:
+			inputType := "text"
+			switch strings.ToLower(f.FieldType) {
+			case "email":
+				inputType = "email"
+			case "number":
+				inputType = "number"
+			case "tel", "phone":
+				inputType = "tel"
+			case "date":
+				inputType = "date"
+			}
+			sb.WriteString(`<label class="sentanyl-form-field">` + html.EscapeString(humanize(f.FieldName)))
+			sb.WriteString(`<input type="` + inputType + `" name="` + name + `"`)
+			if f.Placeholder != "" {
+				sb.WriteString(` placeholder="` + html.EscapeString(f.Placeholder) + `"`)
+			}
+			sb.WriteString(req + `/></label>`)
+		}
 	}
 	sb.WriteString(`<button type="submit">Submit</button>`)
 	sb.WriteString(`</form>`)

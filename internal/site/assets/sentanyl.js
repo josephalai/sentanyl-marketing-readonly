@@ -174,6 +174,11 @@
       submit: function (formId, payload) {
         return post('/api/public/forms/' + encodeURIComponent(formId), payload);
       },
+      // Whitelisted definition (name + fields incl. select options) for
+      // rendering a form dynamically on a coded site.
+      get: function (formId) {
+        return get('/api/public/forms/' + encodeURIComponent(formId));
+      },
     },
 
     checkout: {
@@ -276,7 +281,9 @@
         case 'email': case 'name': case 'phone': case 'message': case 'next_url':
           flat[input.name] = v; break;
         default:
-          fields[input.name] = v;
+          // Repeated names (multiselect checkboxes) accumulate
+          // comma-separated — the server splits multiselect on commas.
+          fields[input.name] = fields[input.name] ? fields[input.name] + ',' + v : v;
       }
     });
     flat.fields = fields;
