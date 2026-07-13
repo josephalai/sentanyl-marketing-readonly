@@ -11,6 +11,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/linktoken"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
@@ -47,15 +48,35 @@ func handleEmailTrackOpen(c *gin.Context) {
 	_, _ = c.Writer.Write(emailTrackingGIF)
 }
 
-// handleEmailTrackClick is GET /api/marketing/track/click?e=<send id>&u=<url>.
-// Records the click on the send row and 302s to the destination.
+// handleEmailTrackClick is GET /api/marketing/track/click.
+//
+// COM-002/006: the canonical form carries a signed opaque token
+// (?t=<token>) that binds tenant, send id, destination, and expiry. Only the
+// destination embedded in a valid token is honored, so Sentanyl domains can
+// never be an open redirect. The legacy ?e=<send>&u=<url> form is accepted only
+// for **relative** (same-origin) destinations during the transition; an
+// external raw destination is refused and falls back to "/".
 func handleEmailTrackClick(c *gin.Context) {
+	if tok := c.Query("t"); tok != "" {
+		if _, sendID, dest, ok := linktoken.Verify(tok); ok {
+			if sendID != "" {
+				StampEmailSendClick(sendID, dest)
+			}
+			c.Redirect(http.StatusFound, dest)
+			return
+		}
+		// Present-but-invalid token: do not fall through to a raw redirect.
+		c.Redirect(http.StatusFound, "/")
+		return
+	}
+
+	// Legacy path: only relative destinations are allowed now.
 	target := c.Query("u")
 	if decoded, err := url.QueryUnescape(target); err == nil && decoded != "" {
 		target = decoded
 	}
-	if target == "" || !(strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "/")) {
-		target = "/"
+	if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		target = "/" // refuse absolute/external destinations (open-redirect fix)
 	}
 	if sendID := c.Query("e"); sendID != "" {
 		StampEmailSendClick(sendID, target)

@@ -3,12 +3,14 @@ package routes
 import (
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/linktoken"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
@@ -21,16 +23,34 @@ func RegisterCampaignTrackingRoutes(r *gin.Engine) {
 
 // handleCampaignClick records a click against a campaign recipient, optionally
 // awards a badge (when the link's click rule named one), and 302s to the
-// original URL. URL is passed through `u`; campaign+recipient via `c`/`r`;
-// badge identifier via `b` (public_id or name).
+// destination. COM-002/006: the destination comes from a signed token (?t=) so
+// this endpoint cannot be used as an open redirect; the legacy ?u= form is
+// honored only for relative (same-origin) destinations. campaign+recipient via
+// `c`/`r`; badge identifier via `b`.
 func handleCampaignClick(c *gin.Context) {
 	campPubID := c.Query("c")
 	recPubID := c.Query("r")
-	target := c.Query("u")
 	badgeIdent := c.Query("b")
 
-	if campPubID == "" || recPubID == "" || target == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing campaign/recipient/url"})
+	target := ""
+	if tok := c.Query("t"); tok != "" {
+		if _, _, dest, ok := linktoken.Verify(tok); ok {
+			target = dest
+		} else {
+			c.Redirect(http.StatusFound, "/")
+			return
+		}
+	} else {
+		raw := c.Query("u")
+		if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
+			target = raw // relative same-origin only
+		} else {
+			target = "/" // refuse external raw destinations (open-redirect fix)
+		}
+	}
+
+	if campPubID == "" || recPubID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing campaign/recipient"})
 		return
 	}
 
