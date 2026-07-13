@@ -1378,7 +1378,11 @@ func sendDraftNow(agent *pkgmodels.InboxAgent, account *pkgmodels.InboxAccount, 
 		subject = "Re: " + subject
 	}
 	htmlBody := "<p>" + strings.ReplaceAll(html.EscapeString(draft.DraftBody), "\n", "<br>") + "</p>"
-	if err := sendViaAccount(account, from, original.FromEmail, subject, htmlBody, original.ProviderMessageID); err != nil {
+	// Threads ingested via the platform reply domain keep their VERP address
+	// as Reply-To so the contact's next reply re-enters the pipeline; without
+	// it the conversation would dead-end at the agent's display identity.
+	replyTo := verpReplyToForThread(&thread)
+	if err := sendViaAccount(account, from, original.FromEmail, subject, htmlBody, original.ProviderMessageID, replyTo); err != nil {
 		return fmt.Errorf("send failed: %w", err)
 	}
 	now := time.Now()
@@ -1628,10 +1632,39 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// verpReplyToForThread reconstructs the platform VERP reply address for a
+// thread that was ingested via the reply domain (its provider thread key is
+// either "<token@domain>" or the bare email_sends token). Empty when the
+// platform reply domain is unset or the thread came from a real mailbox.
+func verpReplyToForThread(thread *pkgmodels.EmailThread) string {
+	domain := emailer.PlatformReplyDomain()
+	if domain == "" || thread == nil || thread.ProviderThreadID == "" {
+		return ""
+	}
+	v := strings.Trim(thread.ProviderThreadID, "<>")
+	if i := strings.Index(v, "@"); i > 0 {
+		if strings.EqualFold(v[i+1:], domain) {
+			return "reply+" + v[:i] + "@" + domain
+		}
+		return ""
+	}
+	// Bare token (reply arrived without In-Reply-To): only trust it if it
+	// really is an email_sends public id.
+	n, err := db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"public_id": v}).Count()
+	if err != nil || n == 0 {
+		return ""
+	}
+	return "reply+" + v + "@" + domain
+}
+
 // sendViaAccount dispatches the reply through the account's own SMTP credentials
 // if configured, otherwise falls back to the global smtpProvider (dev/MailHog).
-// inReplyTo threads the reply under the original message when known.
-func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody, inReplyTo string) error {
+// inReplyTo threads the reply under the original message when known; a
+// non-empty replyTo overrides the default Reply-To (= from).
+func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody, inReplyTo, replyTo string) error {
+	if replyTo == "" {
+		replyTo = from
+	}
 	if account != nil && account.SMTPHost != "" && account.CredentialsEncrypted != "" {
 		raw, err := utils.Decrypt(account.CredentialsEncrypted)
 		if err != nil {
@@ -1647,15 +1680,15 @@ func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody
 		return imapsync.SendReply(account.SMTPHost, account.SMTPPort, creds.Username, creds.Password, from, to, subject, htmlBody, inReplyTo)
 	}
 	if smtpProvider != nil {
-		if inReplyTo != "" {
-			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
-				return hs.SendEmailWithHeaders(from, to, subject, htmlBody, from, map[string]string{
-					"In-Reply-To": inReplyTo,
-					"References":  inReplyTo,
-				})
+		if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
+			headers := map[string]string{}
+			if inReplyTo != "" {
+				headers["In-Reply-To"] = inReplyTo
+				headers["References"] = inReplyTo
 			}
+			return hs.SendEmailWithHeaders(from, to, subject, htmlBody, replyTo, headers)
 		}
-		return smtpProvider.SendEmail(from, to, subject, htmlBody, from)
+		return smtpProvider.SendEmail(from, to, subject, htmlBody, replyTo)
 	}
 	log.Printf("inbox: no send provider configured — draft not sent to %s", to)
 	return nil
