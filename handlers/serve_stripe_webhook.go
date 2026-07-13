@@ -17,6 +17,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
+	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
@@ -203,6 +204,18 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 	purchase, err := recordPurchaseLedger(tenantID, contact.Id, &offer, &session)
 	if err != nil {
 		return fmt.Errorf("record purchase ledger: %w", err)
+	}
+
+	// Emit a durable, signed outbound webhook for the purchase (WH-003/004).
+	// Best-effort enqueue: delivery + retry are handled by the job worker.
+	if err := webhooks.Emit(tenantID, "purchase.completed", map[string]interface{}{
+		"purchase_public_id": purchase.PublicId,
+		"offer_public_id":    offer.PublicId,
+		"contact_public_id":  contact.PublicId,
+		"amount_total":       purchase.AmountTotal,
+		"currency":           purchase.Currency,
+	}); err != nil {
+		log.Printf("[stripe webhook] webhook emit failed: %v", err)
 	}
 
 	// Provision each product included in the offer, keyed off its PurchaseItem

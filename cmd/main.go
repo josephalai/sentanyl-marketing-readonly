@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
@@ -13,8 +14,10 @@ import (
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/marketing-service/internal/scheduler"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
+	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/config"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
@@ -48,6 +51,12 @@ func main() {
 
 	// Ensure MongoDB indexes for ecommerce collections (coupon dedupe, etc).
 	routes.EnsureEcommerceIndexes()
+
+	// Durable job kernel: indexes, handlers, and a background worker for
+	// outbound webhook delivery (WH-003) and future durable workloads.
+	jobs.EnsureIndexes()
+	webhooks.RegisterHandlers()
+	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
 
 	// Ensure MongoDB indexes for frontend channels (coded websites, etc).
 	channel.EnsureIndexes()
