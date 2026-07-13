@@ -91,13 +91,23 @@ func rewriteCampaignLinks(body, campaignPubID string, rules []pkgmodels.Campaign
 		}
 
 		badge := matchClickBadge(href, rules)
-		tracked := fmt.Sprintf("/api/marketing/campaigns/track/click?c=%s&r={{REC_PUBLIC_ID}}&u=%s",
-			campaignPubID, urlQueryEscape(href))
+		tracked := fmt.Sprintf("%s/api/marketing/campaigns/track/click?c=%s&r={{REC_PUBLIC_ID}}&e={{SEND_PUBLIC_ID}}&u=%s",
+			publicBaseURL(), campaignPubID, urlQueryEscape(href))
 		if badge != "" {
 			tracked += "&b=" + urlQueryEscape(badge)
 		}
 		return fmt.Sprintf(`<a %shref="%s"%s>`, pre, tracked, post)
 	})
+}
+
+// campaignOpenPixel appends the unified 1x1 open pixel; the send id is
+// substituted per recipient alongside {{REC_PUBLIC_ID}}.
+func campaignOpenPixel(body string) string {
+	pixel := `<img src="` + publicBaseURL() + `/api/marketing/track/open?e={{SEND_PUBLIC_ID}}" width="1" height="1" style="display:none" alt=""/>`
+	if i := strings.LastIndex(body, "</body>"); i >= 0 {
+		return body[:i] + pixel + body[i:]
+	}
+	return body + pixel
 }
 
 // matchClickBadge returns the badge identifier for the first click rule whose
@@ -137,7 +147,7 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		return 0, nil
 	}
 
-	bodyHTML := rewriteCampaignLinks(camp.Body, camp.PublicId, camp.ClickRules)
+	bodyHTML := campaignOpenPixel(rewriteCampaignLinks(camp.Body, camp.PublicId, camp.ClickRules))
 
 	from := camp.FromEmail
 	if from == "" {
@@ -152,6 +162,15 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 			continue
 		}
 
+		// Unified per-email tracking row — its public id rides the pixel and
+		// click links via {{SEND_PUBLIC_ID}}.
+		send := pkgmodels.NewEmailSend(camp.TenantID, pkgmodels.EmailSendSourceCampaign, string(u.Email), camp.Subject)
+		send.ContactPublicID = u.PublicId
+		send.CampaignPublicID = camp.PublicId
+		if err := db.GetCollection(pkgmodels.EmailSendCollection).Insert(send); err != nil {
+			log.Printf("campaign: email send row insert failed: %v", err)
+		}
+
 		var msg *pkgmodels.Email
 		if scheduled {
 			msg = pkgmodels.NewScheduledEmail()
@@ -163,6 +182,7 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		msg.To = string(u.Email)
 		msg.SubjectLine = camp.Subject
 		msg.Html = strings.ReplaceAll(bodyHTML, "{{REC_PUBLIC_ID}}", recipient.PublicId)
+		msg.Html = strings.ReplaceAll(msg.Html, "{{SEND_PUBLIC_ID}}", send.PublicId)
 		msg.ReplyTo = camp.ReplyTo
 
 		col := pkgmodels.InstantEmailCollection

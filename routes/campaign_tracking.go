@@ -54,6 +54,11 @@ func handleCampaignClick(c *gin.Context) {
 		bson.M{"$push": bson.M{"clicks": pkgmodels.CampaignClickEvent{URL: target, At: now}}},
 	)
 
+	// Stamp the unified per-email tracking row too.
+	if sendID := c.Query("e"); sendID != "" {
+		StampEmailSendClick(sendID, target)
+	}
+
 	if badgeIdent != "" {
 		if err := awardCampaignBadge(camp.TenantID, rec.UserID, rec.Id, badgeIdent); err != nil {
 			log.Printf("campaign-track: badge award failed: %v", err)

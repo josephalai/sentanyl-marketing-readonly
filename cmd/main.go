@@ -103,6 +103,8 @@ func main() {
 	// outside the tenant-auth group. Engine-level register since it's not
 	// confined to /api/marketing.
 	routes.RegisterCampaignTrackingRoutes(r)
+	// Unified per-email open pixel + click redirect (story/campaign/newsletter).
+	routes.RegisterEmailTrackingRoutes(r)
 
 	// Tenant send API — accepts per-tenant X-API-Key OR tenant JWT. Sibling
 	// group on the same prefix as tenantAPI below (gin allows both); external

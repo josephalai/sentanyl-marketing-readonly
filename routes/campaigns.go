@@ -28,6 +28,7 @@ func RegisterCampaignRoutes(rg *gin.RouterGroup) {
 	rg.POST("/campaigns/:publicId/schedule", scheduleCampaign)
 
 	rg.GET("/campaigns/:publicId/recipients", listCampaignRecipients)
+	rg.GET("/campaigns/:publicId/stats", handleCampaignStats)
 }
 
 func listCampaigns(c *gin.Context) {

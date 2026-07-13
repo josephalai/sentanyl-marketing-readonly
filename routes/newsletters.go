@@ -1403,6 +1403,12 @@ func handleNewsletterTrackOpen(c *gin.Context) {
 			bson.M{"$inc": bson.M{"stats.opens": 1}},
 		)
 	}
+	// Additive stamp on the unified per-email tracking row, resolved by
+	// post + recipient (the newsletter pixel predates send ids).
+	_ = db.GetCollection(pkgmodels.EmailSendCollection).Update(
+		bson.M{"newsletter_post_public_id": post.PublicId, "recipient_email": sub.Email, "opened_at": nil},
+		bson.M{"$set": bson.M{"opened_at": time.Now()}},
+	)
 	respondPixel()
 }
 
@@ -1440,6 +1446,14 @@ func handleNewsletterTrackClick(c *gin.Context) {
 						bson.M{"_id": post.Id},
 						bson.M{"$inc": bson.M{"stats.clicks": 1}},
 					)
+				}
+				// Additive stamp on the unified per-email tracking row.
+				var sendRow pkgmodels.EmailSend
+				if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{
+					"newsletter_post_public_id": post.PublicId,
+					"recipient_email":           sub.Email,
+				}).One(&sendRow); err == nil {
+					StampEmailSendClick(sendRow.PublicId, target)
 				}
 			}
 		}
@@ -1546,6 +1560,24 @@ func handleNewsletterDeliveryWebhook(c *gin.Context) {
 		}
 	}
 	_ = err
+	// Stamp the unified per-email tracking rows: message_id when the
+	// provider carries it, else the most recent send to this address.
+	switch ev.Type {
+	case "bounce", "complaint":
+		MarkEmailSendBounced("", ev.MessageID, email, now)
+	case "unsubscribe":
+		var row pkgmodels.EmailSend
+		q := bson.M{"recipient_email": email, "unsubscribed_at": nil}
+		if ev.MessageID != "" {
+			q = bson.M{"message_id": ev.MessageID}
+		}
+		if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(q).Sort("-sent_at").One(&row); err == nil {
+			_ = db.GetCollection(pkgmodels.EmailSendCollection).Update(
+				bson.M{"_id": row.Id},
+				bson.M{"$set": bson.M{"unsubscribed_at": now}},
+			)
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "provider": provider, "matched": matched})
 }
 

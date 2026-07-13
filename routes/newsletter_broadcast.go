@@ -2,6 +2,7 @@ package routes
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -160,6 +161,16 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 			continue
 		}
 		count++
+
+		// Additive unified per-email tracking row (NewsletterPostStats stays
+		// canonical for the newsletter analytics tab; this feeds the unified
+		// cross-source view). Open/click stamps resolve by post + email.
+		send := pkgmodels.NewEmailSend(post.TenantID, pkgmodels.EmailSendSourceNewsletter, sub.Email, subject)
+		send.ContactPublicID = sub.PublicId
+		send.NewsletterPostPublicID = post.PublicId
+		if err := db.GetCollection(pkgmodels.EmailSendCollection).Insert(send); err != nil {
+			log.Printf("newsletter: email send row insert failed: %v", err)
+		}
 
 		// Send instant rows immediately. Scheduled rows are picked up by the
 		// in-process scheduler at Scheduled time. Attach RFC 8058 one-click
