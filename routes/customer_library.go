@@ -781,6 +781,7 @@ func issueCertificateAsync(enrollmentIDHex string, completedAt time.Time) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	auth.AttachServiceAuth(req, "marketing") // API-001 signed service identity
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("issueCertificateAsync: post: %v", err)

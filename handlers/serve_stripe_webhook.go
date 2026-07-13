@@ -17,6 +17,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
+	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -437,6 +438,7 @@ func callInternalEnroll(tenantID, contactID, productID bson.ObjectId) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	auth.AttachServiceAuth(req, "marketing") // API-001 signed service identity
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
