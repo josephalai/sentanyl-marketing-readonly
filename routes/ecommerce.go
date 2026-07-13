@@ -3,6 +3,7 @@ package routes
 import (
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -279,6 +280,22 @@ func handleTenantDeleteProduct(c *gin.Context) {
 }
 
 // --- Offer CRUD ---
+
+// activeGrantProductIDs returns the product ids a contact holds an active
+// Access Grant for (COM-CC-001). This is the authoritative entitlement source.
+func activeGrantProductIDs(tenantID, contactID bson.ObjectId) []bson.ObjectId {
+	var grants []pkgmodels.AccessGrant
+	db.GetCollection(pkgmodels.AccessGrantCollection).Find(bson.M{
+		"tenant_id":  tenantID,
+		"contact_id": contactID,
+		"status":     pkgmodels.GrantStatusActive,
+	}).All(&grants)
+	out := make([]bson.ObjectId, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, g.ProductID)
+	}
+	return out
+}
 
 // resolveTenantProducts resolves each supplied identifier (hex ObjectId or
 // public_id) to a Product owned by tenantID. It returns the resolved ids and,
@@ -782,31 +799,39 @@ func handleGetLibraryProducts(c *gin.Context) {
 		return
 	}
 
-	var badgeNames []string
-	for _, badgeID := range contact.Badges {
-		var badge pkgmodels.Badge
-		err := db.GetCollection(pkgmodels.BadgeCollection).FindId(badgeID).One(&badge)
-		if err == nil {
-			badgeNames = append(badgeNames, badge.Name)
-		}
-	}
-
-	if len(badgeNames) == 0 {
-		c.JSON(http.StatusOK, gin.H{"products": []interface{}{}})
-		return
-	}
-
-	var offers []pkgmodels.Offer
-	db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
-		"tenant_id":             tenantID,
-		"granted_badges":        bson.M{"$in": badgeNames},
-		"timestamps.deleted_at": nil,
-	}).All(&offers)
-
 	productIDSet := make(map[bson.ObjectId]bool)
-	for _, offer := range offers {
-		for _, pid := range offer.IncludedProducts {
-			productIDSet[pid] = true
+
+	// Authoritative path (COM-CC-001): active Access Grants directly name the
+	// products this customer is entitled to, snapshotted at purchase and
+	// immune to later Offer/badge edits.
+	for _, pid := range activeGrantProductIDs(tenantID, contactID) {
+		productIDSet[pid] = true
+	}
+
+	// Transitional badge-derived path: unioned in so customers who predate the
+	// Access Grant ledger keep access until grants are backfilled. Once
+	// ACCESS_GRANTS_ONLY=1 the badge path is skipped and grants are the sole
+	// authority. Badges then serve only automation/segmentation.
+	if os.Getenv("ACCESS_GRANTS_ONLY") != "1" {
+		var badgeNames []string
+		for _, badgeID := range contact.Badges {
+			var badge pkgmodels.Badge
+			if err := db.GetCollection(pkgmodels.BadgeCollection).FindId(badgeID).One(&badge); err == nil {
+				badgeNames = append(badgeNames, badge.Name)
+			}
+		}
+		if len(badgeNames) > 0 {
+			var offers []pkgmodels.Offer
+			db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
+				"tenant_id":             tenantID,
+				"granted_badges":        bson.M{"$in": badgeNames},
+				"timestamps.deleted_at": nil,
+			}).All(&offers)
+			for _, offer := range offers {
+				for _, pid := range offer.IncludedProducts {
+					productIDSet[pid] = true
+				}
+			}
 		}
 	}
 

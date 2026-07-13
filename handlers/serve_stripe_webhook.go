@@ -228,6 +228,9 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 			continue
 		}
 		markPurchaseItemProvisioned(item.Id)
+		// Durable, customer-specific entitlement derived from the purchase item
+		// (COM-CC-001/007). Idempotent by purchase_item_id.
+		ensureAccessGrant(item, offer.Id)
 	}
 
 	if isNewBuyer {
@@ -473,6 +476,21 @@ func markPurchaseItemProvisioned(itemID bson.ObjectId) {
 	_ = db.GetCollection(pkgmodels.PurchaseItemCollection).UpdateId(itemID, bson.M{
 		"$set": bson.M{"status": pkgmodels.ItemStatusProvisioned, "timestamps.updated_at": time.Now()},
 	})
+}
+
+// ensureAccessGrant creates the durable AccessGrant for a provisioned purchase
+// item, idempotent by purchase_item_id (COM-CC-001/007). This is the
+// authoritative entitlement the customer Library authorizes against.
+func ensureAccessGrant(item *pkgmodels.PurchaseItem, offerID bson.ObjectId) {
+	col := db.GetCollection(pkgmodels.AccessGrantCollection)
+	n, _ := col.Find(bson.M{"purchase_item_id": item.Id}).Count()
+	if n > 0 {
+		return
+	}
+	grant := pkgmodels.NewAccessGrant(item.TenantID, item.ContactID, item.ProductID, item.Id, offerID, "purchase")
+	if err := col.Insert(grant); err != nil {
+		log.Printf("[stripe webhook] access grant insert failed for item %s: %v", item.Id.Hex(), err)
+	}
 }
 
 // recordSubscription upserts a Subscription row. For recurring payments the
