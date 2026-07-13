@@ -171,6 +171,8 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		send := pkgmodels.NewEmailSend(camp.TenantID, pkgmodels.EmailSendSourceCampaign, string(u.Email), camp.Subject)
 		send.ContactPublicID = u.PublicId
 		send.CampaignPublicID = camp.PublicId
+		msgID, verpReplyTo := emailer.ReplyCorrelation(send.PublicId)
+		send.MessageID = msgID
 		if err := db.GetCollection(pkgmodels.EmailSendCollection).Insert(send); err != nil {
 			log.Printf("campaign: email send row insert failed: %v", err)
 		}
@@ -191,7 +193,12 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		// Visible opt-out footer rides the stored HTML so scheduled sends keep
 		// it; the RFC 8058 headers attach on the instant path below.
 		msg.Html = emailer.AppendUnsubFooter(msg.Html, unsubURL, postal)
+		// VERP Reply-To only fills the gap — a tenant-configured Reply-To
+		// always wins over platform reply ingestion.
 		msg.ReplyTo = camp.ReplyTo
+		if msg.ReplyTo == "" {
+			msg.ReplyTo = verpReplyTo
+		}
 
 		col := pkgmodels.InstantEmailCollection
 		if scheduled {
@@ -205,7 +212,11 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		if !scheduled && smtpProvider != nil {
 			sendErr := error(nil)
 			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
-				sendErr = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo, emailer.UnsubHeaders(unsubURL))
+				headers := emailer.UnsubHeaders(unsubURL)
+				if msgID != "" {
+					headers["Message-ID"] = msgID
+				}
+				sendErr = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo, headers)
 			} else {
 				sendErr = smtpProvider.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo)
 			}

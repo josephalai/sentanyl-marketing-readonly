@@ -123,13 +123,19 @@ func FetchNew(host string, port int, username, password string, lastUID uint32) 
 	return msgs, maxUID, nil
 }
 
-// SendReply sends an authenticated SMTP reply.
+// SendReply sends an authenticated SMTP reply. inReplyTo (the original
+// message's Message-ID, may be empty) threads the reply in the recipient's
+// mail client via In-Reply-To/References.
 // Uses implicit TLS on port 465, STARTTLS on all other ports.
-func SendReply(smtpHost string, smtpPort int, username, password, from, to, subject, htmlBody string) error {
+func SendReply(smtpHost string, smtpPort int, username, password, from, to, subject, htmlBody, inReplyTo string) error {
 	var buf strings.Builder
 	fmt.Fprintf(&buf, "From: %s\r\n", from)
 	fmt.Fprintf(&buf, "To: %s\r\n", to)
 	fmt.Fprintf(&buf, "Subject: %s\r\n", subject)
+	if inReplyTo != "" {
+		fmt.Fprintf(&buf, "In-Reply-To: %s\r\n", inReplyTo)
+		fmt.Fprintf(&buf, "References: %s\r\n", inReplyTo)
+	}
 	buf.WriteString("MIME-Version: 1.0\r\n")
 	buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n\r\n")
 	buf.WriteString(htmlBody)

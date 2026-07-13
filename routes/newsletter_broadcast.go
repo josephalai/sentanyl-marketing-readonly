@@ -140,6 +140,16 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 
 	count := 0
 	for _, sub := range subs {
+		// Unified per-email tracking row (NewsletterPostStats stays canonical
+		// for the newsletter analytics tab; this feeds the unified
+		// cross-source view). Open/click stamps resolve by post + email. Built
+		// before the message so its public id can key reply correlation.
+		send := pkgmodels.NewEmailSend(post.TenantID, pkgmodels.EmailSendSourceNewsletter, sub.Email, subject)
+		send.ContactPublicID = sub.PublicId
+		send.NewsletterPostPublicID = post.PublicId
+		msgID, verpReplyTo := emailer.ReplyCorrelation(send.PublicId)
+		send.MessageID = msgID
+
 		var msg *pkgmodels.Email
 		if scheduled {
 			msg = pkgmodels.NewScheduledEmail()
@@ -152,6 +162,9 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		msg.SubjectLine = subject
 		msg.Html = personalizeEmail(bodyHTML, sub)
 		msg.ReplyTo = cfg.ReplyToEmail
+		if msg.ReplyTo == "" {
+			msg.ReplyTo = verpReplyTo
+		}
 
 		col := pkgmodels.InstantEmailCollection
 		if scheduled {
@@ -162,12 +175,6 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		}
 		count++
 
-		// Additive unified per-email tracking row (NewsletterPostStats stays
-		// canonical for the newsletter analytics tab; this feeds the unified
-		// cross-source view). Open/click stamps resolve by post + email.
-		send := pkgmodels.NewEmailSend(post.TenantID, pkgmodels.EmailSendSourceNewsletter, sub.Email, subject)
-		send.ContactPublicID = sub.PublicId
-		send.NewsletterPostPublicID = post.PublicId
 		if err := db.GetCollection(pkgmodels.EmailSendCollection).Insert(send); err != nil {
 			log.Printf("newsletter: email send row insert failed: %v", err)
 		}
@@ -178,6 +185,9 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		// provider supports custom headers.
 		if !scheduled && smtpProvider != nil {
 			headers := listUnsubHeaders(newsletterUnsubURL(sub.UnsubscribeToken))
+			if msgID != "" {
+				headers["Message-ID"] = msgID
+			}
 			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
 				_ = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, msg.ReplyTo, headers)
 			} else {

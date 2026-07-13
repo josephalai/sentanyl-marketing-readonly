@@ -54,6 +54,7 @@ func main() {
 
 	// Ensure MongoDB indexes for Inbox Closer AI queues and tenant records.
 	routes.EnsureInboxIndexes()
+	routes.EnsureTodoIndexes()
 
 	// Bootstrap the {{ai}} handlebar resolver. Constructs a process-wide
 	// singleton wired to the configured SiteAIProvider; broadcast send,
@@ -138,6 +139,7 @@ func main() {
 	tenantAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
 	routes.RegisterEcommerceRoutes(tenantAPI)
 	routes.RegisterInboxCloserRoutes(tenantAPI)
+	routes.RegisterTodoRoutes(tenantAPI)
 	// Outbound webhook CRUD — was on the public group scoped by a trusted
 	// subscriber_id query param; now JWT-scoped and tenant-authed.
 	routes.RegisterOutboundWebhookRoutes(tenantAPI)
@@ -156,6 +158,7 @@ func main() {
 	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
 	routes.RegisterNewsletterTenantRoutes(legacyTenantAPI)
 	routes.RegisterInboxCloserRoutes(legacyTenantAPI)
+	routes.RegisterTodoRoutes(legacyTenantAPI)
 
 	// Legacy /api/funnel/* path — FunnelTemplatesPage calls /api/funnel/template.
 	legacyFunnelAPI := r.Group("/api/funnel")

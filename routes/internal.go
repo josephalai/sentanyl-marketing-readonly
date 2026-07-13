@@ -18,6 +18,77 @@ func RegisterInternalRoutes(rg *gin.RouterGroup) {
 	rg.POST("/hydrate-funnel", HandleInternalHydrateFunnel)
 	rg.POST("/hydrate-graph", HandleInternalHydrateGraph)
 	rg.POST("/test/backdate-enrollment", HandleInternalBackdateEnrollment)
+	rg.POST("/inbox/inbound-email", HandleInternalInboundEmail)
+}
+
+// HandleInternalInboundEmail ingests a reply relayed by inbound-smtp-service
+// (platform Reply-To ingestion for tenants without a connected IMAP inbox).
+// Internal network only, plus a shared-secret header for defense in depth.
+func HandleInternalInboundEmail(c *gin.Context) {
+	if secret := os.Getenv("INBOUND_RELAY_SECRET"); secret == "" || c.GetHeader("X-Inbound-Relay-Secret") != secret {
+		c.JSON(http.StatusForbidden, gin.H{"error": "relay secret mismatch"})
+		return
+	}
+	var req struct {
+		FromEmail         string   `json:"from_email" binding:"required"`
+		FromName          string   `json:"from_name"`
+		To                []string `json:"to"`
+		Subject           string   `json:"subject"`
+		BodyText          string   `json:"body_text"`
+		BodyHTML          string   `json:"body_html"`
+		MessageID         string   `json:"message_id"`
+		InReplyTo         string   `json:"in_reply_to"`
+		EmailSendPublicID string   `json:"email_send_public_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.BodyText == "" && req.BodyHTML == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty message body"})
+		return
+	}
+	// The VERP token is the only trusted correlation input — the tenant comes
+	// from the email_sends row it points at, never from the relay payload.
+	var origin pkgmodels.EmailSend
+	if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"public_id": req.EmailSendPublicID}).One(&origin); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown reply token"})
+		return
+	}
+	tenantID := origin.TenantID
+
+	agent, account, err := resolveInboxAgentForInbound(tenantID, "", "", req.To)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		return
+	}
+	// Thread on the original outbound Message-ID when the reply carries it,
+	// else on the VERP token, so a back-and-forth stays one thread.
+	threadKey := req.InReplyTo
+	if threadKey == "" {
+		threadKey = req.EmailSendPublicID
+	}
+	res, err := processInboundEmail(tenantID, agent, account, inboundEmail{
+		FromEmail:         req.FromEmail,
+		FromName:          req.FromName,
+		Subject:           req.Subject,
+		BodyText:          req.BodyText,
+		BodyHTML:          req.BodyHTML,
+		ProviderMessageID: req.MessageID,
+		ProviderThreadID:  threadKey,
+		ToList:            req.To,
+		Source:            "platform_inbound",
+		EmailSendPublicID: req.EmailSendPublicID,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"draft_id":       res.Draft.PublicId,
+		"draft_status":   res.Draft.Status,
+		"classification": res.Classification.PrimaryCategory,
+	})
 }
 
 // RegisterInternalE2ETestRoutes registers test-only endpoints under a caller-

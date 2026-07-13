@@ -15,7 +15,9 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/emailer"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/mcptools"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/plans"
 	"github.com/josephalai/sentanyl/pkg/utils"
@@ -57,6 +59,7 @@ func EnsureInboxIndexes() {
 		pkgmodels.AIReplyDraftCollection: {
 			{Key: []string{"tenant_id", "status", "-created_at"}, Background: true},
 			{Key: []string{"tenant_id", "send_after_at"}, Background: true},
+			{Key: []string{"tenant_id", "contact_id", "status", "sent_at"}, Background: true},
 		},
 		pkgmodels.ContactMemoryCollection: {
 			{Key: []string{"tenant_id", "contact_id"}, Unique: true, Background: true},
@@ -93,6 +96,8 @@ func RegisterInboxCloserRoutes(rg *gin.RouterGroup) {
 	rg.GET("/inbox/threads/:id", handleInboxGetThread)
 	rg.GET("/inbox/messages/:id", handleInboxGetMessage)
 	rg.POST("/inbox/process-inbound", handleInboxProcessInbound)
+
+	rg.GET("/inbox/tools", handleInboxListTools)
 
 	rg.GET("/inbox/drafts", handleInboxListDrafts)
 	rg.PUT("/inbox/drafts/:id", handleInboxUpdateDraft)
@@ -356,12 +361,22 @@ func handleInboxUpdateAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	allowed := map[string]bool{"name": true, "reply_identity": true, "send_mode": true, "timer_minutes": true, "double_check_enabled": true, "auto_send_enabled": true, "status": true}
+	allowed := map[string]bool{
+		"name": true, "reply_identity": true, "send_mode": true, "timer_minutes": true,
+		"double_check_enabled": true, "auto_send_enabled": true, "status": true,
+		"confidence_threshold": true, "max_replies_per_contact_per_day": true,
+		"quiet_hours_start": true, "quiet_hours_end": true, "timezone": true,
+		"blocked_categories": true, "tool_whitelist": true,
+	}
 	update := bson.M{"timestamps.updated_at": time.Now()}
 	for k, v := range req {
 		if allowed[k] {
 			update[k] = v
 		}
+	}
+	if errMsg := validateInboxAgentUpdate(update); errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return
 	}
 	if err := db.GetCollection(pkgmodels.InboxAgentCollection).UpdateId(agent.Id, bson.M{"$set": update}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update inbox agent"})
@@ -462,101 +477,48 @@ func handleInboxProcessInbound(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	contact, err := findOrCreateInboxContact(tenantID, req.FromEmail, req.FromName)
+	res, err := processInboundEmail(tenantID, agent, account, inboundEmail{
+		FromEmail:         req.FromEmail,
+		FromName:          req.FromName,
+		Subject:           req.Subject,
+		BodyText:          req.BodyText,
+		BodyHTML:          req.BodyHTML,
+		ProviderMessageID: req.ProviderMessageID,
+		ProviderThreadID:  req.ProviderThreadID,
+		ToList:            req.To,
+		Source:            "dev",
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to match contact"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
-	}
-	thread, err := findOrCreateThread(tenantID, account.Id, req.ProviderThreadID, req.Subject, req.FromEmail, account.EmailAddress)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save thread"})
-		return
-	}
-	msg := pkgmodels.NewEmailMessage(tenantID, thread.Id, "inbound")
-	msg.ProviderMessageID = req.ProviderMessageID
-	msg.FromEmail = strings.ToLower(strings.TrimSpace(req.FromEmail))
-	msg.FromName = req.FromName
-	msg.ToJSON = req.To
-	msg.Subject = req.Subject
-	msg.BodyText = req.BodyText
-	msg.BodyHTML = req.BodyHTML
-	now := time.Now()
-	msg.ReceivedAt = &now
-	msg.SetCreated()
-	if err := db.GetCollection(pkgmodels.EmailMessageCollection).Insert(msg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save message"})
-		return
-	}
-	_ = db.GetCollection(pkgmodels.EmailThreadCollection).UpdateId(thread.Id, bson.M{"$set": bson.M{"last_message_at": now}})
-
-	classification := classifyInboundEmail(req.Subject + "\n" + req.BodyText)
-	retrieved := retrieveInboxContextForAgent(tenantID, agent.Id, req.BodyText)
-	reply := generateInboxDraftReply(tenantID, agent, contact, classification, req.BodyText, retrieved)
-
-	// Double-check pass when enabled
-	var audit *pkgmodels.AIReplyAudit
-	if agent.DoubleCheckEnabled {
-		if dc := doubleCheckDraft(reply, req.BodyText, classification); dc != nil {
-			if dc.SuggestedRevision != "" {
-				reply = dc.SuggestedRevision
-			}
-			if dc.FinalRiskLevel != "" {
-				classification.RiskLevel = dc.FinalRiskLevel
-			}
-			if dc.FinalConfidenceScore > 0 {
-				classification.ConfidenceScore = dc.FinalConfidenceScore
-			}
-			audit = dc
-		}
-	}
-
-	draft := pkgmodels.NewAIReplyDraft(tenantID, agent.Id, thread.Id, msg.Id, contact.Id)
-	draft.DraftBody = reply
-	draft.Category = classification.PrimaryCategory
-	draft.RiskLevel = classification.RiskLevel
-	draft.ConfidenceScore = classification.ConfidenceScore
-	draft.RecommendedAction = decideInboxAction(agent, classification)
-	draft.ReasoningSummary = "Draft generated from inbound email, customer context, active agent settings, and available Business Brain/context chunks."
-	if draft.RecommendedAction == "escalate" {
-		draft.Status = pkgmodels.AIReplyDraftStatusEscalated
-	}
-	if draft.RecommendedAction == "timer_send" {
-		t := now.Add(time.Duration(agent.TimerMinutes) * time.Minute)
-		draft.SendAfterAt = &t
-		draft.Status = pkgmodels.AIReplyDraftStatusTimer
-	}
-	draft.SetCreated()
-	if err := db.GetCollection(pkgmodels.AIReplyDraftCollection).Insert(draft); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save draft"})
-		return
-	}
-	if audit == nil {
-		audit = createAuditForDraft(tenantID, draft, classification)
-	} else {
-		audit.Id = bson.NewObjectId()
-		audit.PublicId = utils.GeneratePublicId()
-		audit.TenantID = tenantID
-		audit.AIReplyDraftID = draft.Id
-		audit.SetCreated()
-	}
-	_ = db.GetCollection(pkgmodels.AIReplyAuditCollection).Insert(audit)
-	logInboxActivity(tenantID, agent.Id, "email_received", thread.Id, msg.Id, contact.Id, bson.M{"category": classification.PrimaryCategory})
-	logInboxActivity(tenantID, agent.Id, "reply_generated", thread.Id, msg.Id, contact.Id, bson.M{"draft_id": draft.Id.Hex(), "action": draft.RecommendedAction})
-	updateContactMemoryFromDraft(tenantID, contact.Id, msg.Id, classification, req.BodyText)
-
-	if draft.RecommendedAction == "auto_send" {
-		_ = sendDraftNow(agent, account, *draft)
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"classification": classification,
-		"thread":         thread,
-		"message":        msg,
-		"contact":        contact,
-		"draft":          draft,
-		"audit":          audit,
-		"retrieved":      retrieved,
+		"classification": res.Classification,
+		"thread":         res.Thread,
+		"message":        res.Message,
+		"contact":        res.Contact,
+		"draft":          res.Draft,
+		"audit":          res.Audit,
+		"retrieved":      res.Retrieved,
 	})
+}
+
+// handleInboxListTools serves the MCP tool registry (names + descriptions)
+// so the agent-settings whitelist UI never drifts from the backend table.
+func handleInboxListTools(c *gin.Context) {
+	if _, ok := tenantIDFromContext(c); !ok {
+		return
+	}
+	type toolInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	out := make([]toolInfo, 0, len(mcptools.Tools))
+	for _, t := range mcptools.Tools {
+		out = append(out, toolInfo{Name: t.Name, Description: t.Description})
+	}
+	c.JSON(http.StatusOK, gin.H{"tools": out})
 }
 
 func handleInboxListDrafts(c *gin.Context) {
@@ -597,10 +559,17 @@ func handleInboxUpdateDraft(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	err := db.GetCollection(pkgmodels.AIReplyDraftCollection).UpdateId(draft.Id, bson.M{"$set": bson.M{
+	update := bson.M{"$set": bson.M{
 		"draft_body":            req.DraftBody,
 		"timestamps.updated_at": time.Now(),
-	}})
+	}}
+	// An edited timer draft must not auto-send unseen: pull it back to draft
+	// so the tenant explicitly approves/sends the revised text.
+	if draft.Status == pkgmodels.AIReplyDraftStatusTimer {
+		update["$set"].(bson.M)["status"] = pkgmodels.AIReplyDraftStatusDraft
+		update["$unset"] = bson.M{"send_after_at": ""}
+	}
+	err := db.GetCollection(pkgmodels.AIReplyDraftCollection).UpdateId(draft.Id, update)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update draft"})
 		return
@@ -690,6 +659,15 @@ func handleInboxSendDraft(c *gin.Context) {
 	_ = db.GetCollection(pkgmodels.InboxAccountCollection).FindId(agent.InboxAccountID).One(&account)
 	if draft.RiskLevel == pkgmodels.InboxRiskHigh {
 		c.JSON(http.StatusConflict, gin.H{"error": "high-risk drafts require human handling and cannot be sent from this endpoint"})
+		return
+	}
+	// A human clicking Send overrides the soft guardrails, but never the
+	// contact's opt-out.
+	var contact pkgmodels.User
+	_ = db.GetCollection(pkgmodels.UserCollection).FindId(draft.ContactID).One(&contact)
+	if contact.IsSuppressed() {
+		logInboxActivity(tenantID, agent.Id, "reply_send_blocked", draft.EmailThreadID, draft.EmailMessageID, draft.ContactID, bson.M{"draft_id": draft.Id.Hex(), "guardrail": "contact_unsubscribed"})
+		c.JSON(http.StatusConflict, gin.H{"error": "contact has unsubscribed; sending is not allowed"})
 		return
 	}
 	if err := sendDraftNow(&agent, &account, draft); err != nil {
@@ -1105,12 +1083,9 @@ func retrieveInboxContextForAgent(tenantID, agentID bson.ObjectId, query string)
 	}
 	var all []scored
 
-	// Business Brain chunks
+	// Business Brain chunks (auto-regenerated when the sources changed)
 	var brainChunks []pkgmodels.BusinessBrainChunk
-	brain, err := latestBusinessBrain(tenantID)
-	if err != nil {
-		brain, _, err = regenerateBusinessBrain(tenantID)
-	}
+	brain, err := ensureBusinessBrainFresh(tenantID)
 	if err == nil {
 		_ = db.GetCollection(pkgmodels.BusinessBrainChunkCollection).Find(bson.M{"tenant_id": tenantID, "business_brain_id": brain.Id}).All(&brainChunks)
 	}
@@ -1353,7 +1328,7 @@ func decideInboxAction(agent *pkgmodels.InboxAgent, c inboxClassification) strin
 	if c.RiskLevel == pkgmodels.InboxRiskHigh || c.ConfidenceScore < 0.70 {
 		return "escalate"
 	}
-	if agent.SendMode == pkgmodels.InboxSendModeDraftOnly || c.RiskLevel == pkgmodels.InboxRiskMedium || c.ConfidenceScore < 0.90 {
+	if agent.SendMode == pkgmodels.InboxSendModeDraftOnly || c.RiskLevel == pkgmodels.InboxRiskMedium || c.ConfidenceScore < agent.EffectiveConfidenceThreshold() {
 		return "save_draft"
 	}
 	if agent.SendMode == pkgmodels.InboxSendModeTimerApproval {
@@ -1403,7 +1378,7 @@ func sendDraftNow(agent *pkgmodels.InboxAgent, account *pkgmodels.InboxAccount, 
 		subject = "Re: " + subject
 	}
 	htmlBody := "<p>" + strings.ReplaceAll(html.EscapeString(draft.DraftBody), "\n", "<br>") + "</p>"
-	if err := sendViaAccount(account, from, original.FromEmail, subject, htmlBody); err != nil {
+	if err := sendViaAccount(account, from, original.FromEmail, subject, htmlBody, original.ProviderMessageID); err != nil {
 		return fmt.Errorf("send failed: %w", err)
 	}
 	now := time.Now()
@@ -1458,6 +1433,7 @@ func regenerateBusinessBrain(tenantID bson.ObjectId) (*pkgmodels.BusinessBrain, 
 	brain.SourceHash = hash
 	brain.Version = version
 	brain.GeneratedAt = &now
+	brain.CheckedAt = &now
 	brain.SetCreated()
 	if err := db.GetCollection(pkgmodels.BusinessBrainCollection).Insert(brain); err != nil {
 		return nil, nil, err
@@ -1536,6 +1512,41 @@ func chunkBusinessBrain(tenantID, brainID bson.ObjectId, markdown string) []pkgm
 		})
 	}
 	return chunks
+}
+
+// businessBrainStaleCheckInterval throttles source re-hashing so retrieval
+// doesn't rebuild the markdown on every inbound email.
+const businessBrainStaleCheckInterval = 10 * time.Minute
+
+// ensureBusinessBrainFresh returns the latest brain, regenerating it when the
+// underlying sources (brand profile, products, offers, context packs) have
+// changed since it was built. Cheap: the staleness probe is a markdown
+// rebuild + sha256, no LLM.
+func ensureBusinessBrainFresh(tenantID bson.ObjectId) (*pkgmodels.BusinessBrain, error) {
+	brain, err := latestBusinessBrain(tenantID)
+	if err != nil {
+		brain, _, err = regenerateBusinessBrain(tenantID)
+		return brain, err
+	}
+	now := time.Now()
+	if brain.CheckedAt != nil && now.Sub(*brain.CheckedAt) < businessBrainStaleCheckInterval && brain.StaleAt == nil {
+		return brain, nil
+	}
+	markdown := buildBusinessBrainMarkdown(tenantID)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(markdown)))
+	if hash == brain.SourceHash {
+		_ = db.GetCollection(pkgmodels.BusinessBrainCollection).UpdateId(brain.Id, bson.M{
+			"$set":   bson.M{"checked_at": now},
+			"$unset": bson.M{"stale_at": ""},
+		})
+		return brain, nil
+	}
+	_ = db.GetCollection(pkgmodels.BusinessBrainCollection).UpdateId(brain.Id, bson.M{"$set": bson.M{"stale_at": now, "checked_at": now}})
+	fresh, _, err := regenerateBusinessBrain(tenantID)
+	if err != nil {
+		return brain, nil // stale beats broken: keep serving the old brain
+	}
+	return fresh, nil
 }
 
 func latestBusinessBrain(tenantID bson.ObjectId) (*pkgmodels.BusinessBrain, error) {
@@ -1619,7 +1630,8 @@ func truncate(s string, n int) string {
 
 // sendViaAccount dispatches the reply through the account's own SMTP credentials
 // if configured, otherwise falls back to the global smtpProvider (dev/MailHog).
-func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody string) error {
+// inReplyTo threads the reply under the original message when known.
+func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody, inReplyTo string) error {
 	if account != nil && account.SMTPHost != "" && account.CredentialsEncrypted != "" {
 		raw, err := utils.Decrypt(account.CredentialsEncrypted)
 		if err != nil {
@@ -1632,9 +1644,17 @@ func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody
 		if err := json.Unmarshal([]byte(raw), &creds); err != nil {
 			return err
 		}
-		return imapsync.SendReply(account.SMTPHost, account.SMTPPort, creds.Username, creds.Password, from, to, subject, htmlBody)
+		return imapsync.SendReply(account.SMTPHost, account.SMTPPort, creds.Username, creds.Password, from, to, subject, htmlBody, inReplyTo)
 	}
 	if smtpProvider != nil {
+		if inReplyTo != "" {
+			if hs, ok := smtpProvider.(emailer.HeaderSender); ok {
+				return hs.SendEmailWithHeaders(from, to, subject, htmlBody, from, map[string]string{
+					"In-Reply-To": inReplyTo,
+					"References":  inReplyTo,
+				})
+			}
+		}
 		return smtpProvider.SendEmail(from, to, subject, htmlBody, from)
 	}
 	log.Printf("inbox: no send provider configured — draft not sent to %s", to)
@@ -1650,65 +1670,18 @@ func RegisterIMAPHandler() {
 			log.Printf("imap: no agent for account %s: %v", accountID.Hex(), err)
 			return
 		}
-		contact, err := findOrCreateInboxContact(tenantID, msg.FromEmail, msg.FromName)
-		if err != nil {
-			log.Printf("imap: contact error for %s: %v", msg.FromEmail, err)
-			return
-		}
-		thread, err := findOrCreateThread(tenantID, account.Id, msg.InReplyTo, msg.Subject, msg.FromEmail, account.EmailAddress)
-		if err != nil {
-			log.Printf("imap: thread error: %v", err)
-			return
-		}
-		now := msg.Date
-		if now.IsZero() {
-			now = time.Now()
-		}
-		emailMsg := pkgmodels.NewEmailMessage(tenantID, thread.Id, "inbound")
-		emailMsg.ProviderMessageID = msg.MessageID
-		emailMsg.FromEmail = msg.FromEmail
-		emailMsg.FromName = msg.FromName
-		emailMsg.ToJSON = msg.ToList
-		emailMsg.Subject = msg.Subject
-		emailMsg.BodyText = msg.BodyText
-		emailMsg.ReceivedAt = &now
-		emailMsg.SetCreated()
-		if err := db.GetCollection(pkgmodels.EmailMessageCollection).Insert(emailMsg); err != nil {
-			log.Printf("imap: failed to store message from %s: %v", msg.FromEmail, err)
-			return
-		}
-		_ = db.GetCollection(pkgmodels.EmailThreadCollection).UpdateId(thread.Id, bson.M{"$set": bson.M{"last_message_at": now}})
-
-		classification := classifyInboundEmail(msg.Subject + "\n" + msg.BodyText)
-		retrieved := retrieveInboxContext(tenantID, msg.BodyText)
-		reply := generateInboxDraftReply(tenantID, agent, contact, classification, msg.BodyText, retrieved)
-		draft := pkgmodels.NewAIReplyDraft(tenantID, agent.Id, thread.Id, emailMsg.Id, contact.Id)
-		draft.DraftBody = reply
-		draft.Category = classification.PrimaryCategory
-		draft.RiskLevel = classification.RiskLevel
-		draft.ConfidenceScore = classification.ConfidenceScore
-		draft.RecommendedAction = decideInboxAction(agent, classification)
-		draft.ReasoningSummary = "Draft generated from IMAP-synced message."
-		if draft.RecommendedAction == "escalate" {
-			draft.Status = pkgmodels.AIReplyDraftStatusEscalated
-		}
-		if draft.RecommendedAction == "timer_send" {
-			t := time.Now().Add(time.Duration(agent.TimerMinutes) * time.Minute)
-			draft.SendAfterAt = &t
-			draft.Status = pkgmodels.AIReplyDraftStatusTimer
-		}
-		draft.SetCreated()
-		if err := db.GetCollection(pkgmodels.AIReplyDraftCollection).Insert(draft); err != nil {
-			log.Printf("imap: failed to save draft: %v", err)
-			return
-		}
-		audit := createAuditForDraft(tenantID, draft, classification)
-		_ = db.GetCollection(pkgmodels.AIReplyAuditCollection).Insert(audit)
-		logInboxActivity(tenantID, agent.Id, "email_received", thread.Id, emailMsg.Id, contact.Id, bson.M{"source": "imap", "category": classification.PrimaryCategory})
-		updateContactMemoryFromDraft(tenantID, contact.Id, emailMsg.Id, classification, msg.BodyText)
-
-		if draft.RecommendedAction == "auto_send" {
-			_ = sendDraftNow(agent, account, *draft)
+		if _, err := processInboundEmail(tenantID, agent, account, inboundEmail{
+			FromEmail:         msg.FromEmail,
+			FromName:          msg.FromName,
+			Subject:           msg.Subject,
+			BodyText:          msg.BodyText,
+			ProviderMessageID: msg.MessageID,
+			ProviderThreadID:  msg.InReplyTo,
+			ToList:            msg.ToList,
+			Date:              msg.Date,
+			Source:            "imap",
+		}); err != nil {
+			log.Printf("imap: inbound processing failed for %s: %v", msg.FromEmail, err)
 		}
 	})
 }
@@ -1909,6 +1882,17 @@ func runTimerApprovals() {
 		var agent pkgmodels.InboxAgent
 		var account pkgmodels.InboxAccount
 		if err := db.GetCollection(pkgmodels.InboxAgentCollection).FindId(draft.InboxAgentID).One(&agent); err != nil {
+			continue
+		}
+		// Conditions may have changed since the draft was queued (contact
+		// unsubscribed, agent paused, tenant kill switch, daily cap): recheck
+		// and hold the draft instead of sending.
+		if reason := recheckSendGuardrails(&agent, &draft, now); reason != "" {
+			_ = db.GetCollection(pkgmodels.AIReplyDraftCollection).UpdateId(draft.Id, bson.M{
+				"$set":   bson.M{"status": pkgmodels.AIReplyDraftStatusDraft, "timestamps.updated_at": now},
+				"$unset": bson.M{"send_after_at": ""},
+			})
+			logInboxActivity(draft.TenantID, agent.Id, "reply_timer_blocked", draft.EmailThreadID, draft.EmailMessageID, draft.ContactID, bson.M{"draft_id": draft.Id.Hex(), "guardrail": reason})
 			continue
 		}
 		_ = db.GetCollection(pkgmodels.InboxAccountCollection).FindId(agent.InboxAccountID).One(&account)
