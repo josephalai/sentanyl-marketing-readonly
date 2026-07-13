@@ -3,6 +3,7 @@ package routes
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2"
@@ -249,6 +250,31 @@ func handleTenantDeleteProduct(c *gin.Context) {
 
 // --- Offer CRUD ---
 
+// resolveTenantProducts resolves each supplied identifier (hex ObjectId or
+// public_id) to a Product owned by tenantID. It returns the resolved ids and,
+// separately, any identifiers that did not resolve to a live product in this
+// tenant. A hex id is NOT trusted on its face — it must match a tenant-owned
+// product, closing the cross-tenant attach hole (COM-CC-002/003).
+func resolveTenantProducts(tenantID bson.ObjectId, ids []string) ([]bson.ObjectId, []string) {
+	resolved := make([]bson.ObjectId, 0, len(ids))
+	var unresolved []string
+	for _, pid := range ids {
+		q := bson.M{"tenant_id": tenantID, "timestamps.deleted_at": nil}
+		if bson.IsObjectIdHex(pid) {
+			q["_id"] = bson.ObjectIdHex(pid)
+		} else {
+			q["public_id"] = pid
+		}
+		var found pkgmodels.Product
+		if err := db.GetCollection(pkgmodels.ProductCollection).Find(q).One(&found); err != nil {
+			unresolved = append(unresolved, pid)
+			continue
+		}
+		resolved = append(resolved, found.Id)
+	}
+	return resolved, unresolved
+}
+
 func handleCreateOffer(c *gin.Context) {
 	tenantID := auth.GetTenantObjectID(c)
 	if tenantID == "" {
@@ -281,25 +307,23 @@ func handleCreateOffer(c *gin.Context) {
 		offer.Coaching = req.Coaching
 	}
 
-	// Accept both hex ObjectId and public_id for each included product.
-	// Frontend callers (and test harnesses) often hold the public_id for
-	// display and constructing URLs; resolving here keeps the API contract
-	// flexible and avoids silently dropping products.
-	for _, pid := range req.IncludedProducts {
-		if bson.IsObjectIdHex(pid) {
-			offer.IncludedProducts = append(offer.IncludedProducts, bson.ObjectIdHex(pid))
-			continue
-		}
-		var found pkgmodels.Product
-		err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-			"tenant_id":             tenantID,
-			"public_id":             pid,
-			"timestamps.deleted_at": nil,
-		}).One(&found)
-		if err == nil {
-			offer.IncludedProducts = append(offer.IncludedProducts, found.Id)
-		}
+	// Resolve every included product through a tenant-scoped lookup — a hex id
+	// is not trusted unless it belongs to this tenant. Invalid identifiers are
+	// rejected with an itemized error rather than silently dropped, and an
+	// offer must include at least one product (COM-CC-002/003).
+	resolvedProducts, unresolved := resolveTenantProducts(tenantID, req.IncludedProducts)
+	if len(unresolved) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":              "one or more included products are not valid for this tenant",
+			"unresolved_products": unresolved,
+		})
+		return
 	}
+	if len(resolvedProducts) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "an offer must include at least one product"})
+		return
+	}
+	offer.IncludedProducts = resolvedProducts
 
 	if err := db.GetCollection(pkgmodels.OfferCollection).Insert(offer); err != nil {
 		log.Println("Error creating offer:", err)
@@ -382,22 +406,18 @@ func handleUpdateOffer(c *gin.Context) {
 		}
 	}
 	if req.IncludedProducts != nil {
-		// Accept both hex ObjectId and public_id (mirrors create path).
-		included := make([]bson.ObjectId, 0, len(req.IncludedProducts))
-		for _, pid := range req.IncludedProducts {
-			if bson.IsObjectIdHex(pid) {
-				included = append(included, bson.ObjectIdHex(pid))
-				continue
-			}
-			var found pkgmodels.Product
-			err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-				"tenant_id":             tenantID,
-				"public_id":             pid,
-				"timestamps.deleted_at": nil,
-			}).One(&found)
-			if err == nil {
-				included = append(included, found.Id)
-			}
+		// Tenant-scoped resolution with itemized rejection (COM-CC-002/003).
+		included, unresolved := resolveTenantProducts(tenantID, req.IncludedProducts)
+		if len(unresolved) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":              "one or more included products are not valid for this tenant",
+				"unresolved_products": unresolved,
+			})
+			return
+		}
+		if len(included) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "an offer must include at least one product"})
+			return
 		}
 		update["included_products"] = included
 	}
@@ -433,8 +453,23 @@ func handleDeleteOffer(c *gin.Context) {
 		return
 	}
 
-	err := db.GetCollection(pkgmodels.OfferCollection).Remove(
-		bson.M{"_id": bson.ObjectIdHex(offerID), "tenant_id": tenantID},
+	// COM-CC-004: an offer referenced by commercial history must not be
+	// physically destroyed. Block deletion when a subscription/purchase points
+	// at it, and otherwise archive (soft-delete) so historical purchase and
+	// access snapshots keep a resolvable definition.
+	oid := bson.ObjectIdHex(offerID)
+	refs, _ := db.GetCollection(pkgmodels.SubscriptionCollection).Find(bson.M{
+		"tenant_id": tenantID, "offer_id": oid,
+	}).Count()
+	if refs > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "offer is referenced by purchases and cannot be deleted; archive it instead"})
+		return
+	}
+
+	now := time.Now()
+	err := db.GetCollection(pkgmodels.OfferCollection).Update(
+		bson.M{"_id": oid, "tenant_id": tenantID},
+		bson.M{"$set": bson.M{"timestamps.deleted_at": now}},
 	)
 	if err != nil {
 		log.Println("Error deleting offer:", err)
@@ -442,7 +477,7 @@ func handleDeleteOffer(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "offer deleted"})
+	c.JSON(http.StatusOK, gin.H{"status": "offer archived"})
 }
 
 // --- Coupon CRUD ---
