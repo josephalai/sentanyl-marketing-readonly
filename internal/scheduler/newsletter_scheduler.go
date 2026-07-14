@@ -1,4 +1,4 @@
-// Package scheduler runs the newsletter background tickers:
+// Package scheduler runs the newsletter dispatch pass:
 //
 //   1. Absolute-mode publish — flips scheduled posts to published at their
 //      ScheduledAt and fans out the broadcast to all active subscribers.
@@ -8,14 +8,13 @@
 //      (post, subscription) pair. The newsletter_drip_dispatches collection
 //      dedupes — unique on (post_id, subscription_id) — so retries are safe.
 //
-// In-process goroutines mirror coaching-service/reminders/worker.go. The
-// in-process scheduler is acceptable for v1 because everything else in the
-// marketing pipeline already runs the same way; switching to a distributed
-// queue (River, Asynq, etc.) is parked in backlog for when the load
-// justifies it.
+// W3-B / OPS-001: the pass runs as a durable self-rescheduling job on
+// pkg/jobs (was an in-process goroutine), so it survives restarts and the
+// job lease guarantees a single dispatcher across replicas (OPS-004).
 package scheduler
 
 import (
+	"context"
 	"log"
 	"os"
 	"strconv"
@@ -28,6 +27,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
 )
@@ -44,8 +44,13 @@ var (
 // Same constructor pattern as routes/email.go's init.
 var smtp email.EmailProvider
 
-// Start launches the newsletter ticker goroutine. Interval defaults to 60s
-// and is overridable with NEWSLETTER_SCHEDULER_INTERVAL (seconds).
+const newsletterSweepJobType = "newsletter.sweep"
+
+// Start registers the newsletter sweep job and bootstraps the chain. Interval
+// defaults to 60s and is overridable with NEWSLETTER_SCHEDULER_INTERVAL
+// (seconds). The jobs worker (already running in marketing-service main)
+// executes the sweeps; panics are recovered by the worker and dead-lettered
+// after retries instead of silently killing a ticker.
 func Start() {
 	if os.Getenv("EMAIL_PROVIDER") != "" {
 		smtp = email.DefaultProvider()
@@ -57,23 +62,22 @@ func Start() {
 			interval = time.Duration(n) * time.Second
 		}
 	}
-	go runLoop(interval)
-}
 
-func runLoop(interval time.Duration) {
-	for {
-		// Recover from per-tick panics so a transient bug never kills the
-		// ticker for the lifetime of the process.
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[newsletter scheduler] panic recovered: %v", r)
-				}
-			}()
-			tick(time.Now().UTC())
-		}()
-		time.Sleep(interval)
+	jobs.Register(newsletterSweepJobType, func(ctx context.Context, job *jobs.Job) error {
+		// Re-arm the chain FIRST so a crash mid-sweep never stalls dispatch.
+		if err := jobs.EnqueueSweep(newsletterSweepJobType, time.Now().Add(interval), interval); err != nil {
+			return err
+		}
+		tick(time.Now().UTC())
+		if job.RunAt.Unix()%3600 < int64(interval/time.Second) {
+			jobs.PruneSucceeded(newsletterSweepJobType, 24*time.Hour)
+		}
+		return nil
+	})
+	if err := jobs.EnqueueSweep(newsletterSweepJobType, time.Now(), interval); err != nil {
+		log.Printf("[newsletter scheduler] bootstrap sweep enqueue failed: %v", err)
 	}
+	log.Printf("[newsletter scheduler] durable sweep registered (%s interval)", interval)
 }
 
 func tick(now time.Time) {
