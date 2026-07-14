@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/pkg/sendauth"
+	"github.com/josephalai/sentanyl/pkg/untrusted"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/emailer"
@@ -87,6 +88,7 @@ func EnsureInboxIndexes() {
 func RegisterInboxCloserRoutes(rg *gin.RouterGroup) {
 	rg.POST("/inbox/connect", handleInboxConnect)
 	rg.GET("/inbox/accounts", handleInboxListAccounts)
+	RegisterInboxOAuthTenantRoutes(rg)
 	rg.DELETE("/inbox/accounts/:id", handleInboxDeleteAccount)
 	rg.POST("/inbox/accounts/:id/sync", handleInboxSyncAccount)
 
@@ -1249,8 +1251,10 @@ func buildInboxReplyPrompt(agent *pkgmodels.InboxAgent, contact *pkgmodels.User,
 		b.WriteString("Business context is provided as reference. Use only what is relevant and accurate.\n")
 	}
 
-	b.WriteString("\nInbound email:\n")
-	b.WriteString(emailBody)
+	// COM-EM-012: the inbound email is attacker-controlled input — it enters
+	// the prompt fenced as untrusted DATA, never as instructions.
+	b.WriteString("\n")
+	b.WriteString(untrusted.Wrap("inbound email", emailBody))
 	b.WriteString("\n\nReturn only the reply body text. No subject line. No markdown.")
 	return b.String()
 }
@@ -1278,7 +1282,7 @@ Check and return ONLY valid JSON:
 Issues to check: factual accuracy, correct tone, not too long, not robotic, no hallucinated policies, no invented product details, answered the question, appropriate risk level.
 Set approved_for_send to false if risk is high or any serious issue found.
 suggested_revision should be null or a corrected reply string.`,
-		truncate(emailBody, 600),
+		untrusted.Wrap("inbound email", truncate(emailBody, 600)),
 		truncate(draftBody, 600),
 		classification.PrimaryCategory,
 		classification.RiskLevel,
@@ -1732,11 +1736,11 @@ func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody
 // RegisterIMAPHandler wires the IMAP sync loop into the inbound processing pipeline.
 // Called from main after routes are set up.
 func RegisterIMAPHandler() {
-	imapsync.RegisterHandler(func(tenantID, accountID bson.ObjectId, msg imapsync.Message) {
+	imapsync.RegisterHandler(func(tenantID, accountID bson.ObjectId, msg imapsync.Message) error {
 		agent, account, err := resolveInboxAgentForInbound(tenantID, "", accountID.Hex(), msg.ToList)
 		if err != nil {
 			log.Printf("imap: no agent for account %s: %v", accountID.Hex(), err)
-			return
+			return nil // configuration gap, not a retryable message failure
 		}
 		if _, err := processInboundEmail(tenantID, agent, account, inboundEmail{
 			FromEmail:         msg.FromEmail,
@@ -1750,8 +1754,11 @@ func RegisterIMAPHandler() {
 			Source:            "imap",
 		}); err != nil {
 			log.Printf("imap: inbound processing failed for %s: %v", msg.FromEmail, err)
+			return err // dead-letter this message; the batch continues
 		}
+		return nil
 	})
+	imapsync.RegisterMessageRetryJob()
 }
 
 // ─── Voice Profile ────────────────────────────────────────────────────────────

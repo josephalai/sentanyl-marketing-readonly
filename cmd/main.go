@@ -141,6 +141,10 @@ func main() {
 
 	// Set up Gin router.
 	r := gin.Default()
+
+	// Tenant mailbox OAuth callback (COM-EM-003) — public; auth is the
+	// HMAC-signed state minted by the authorize-url endpoint.
+	routes.RegisterInboxOAuthPublicRoutes(r)
 	r.Use(httputil.CORSMiddleware())
 
 	r.GET("/health", httputil.HealthHandler("marketing-service"))
