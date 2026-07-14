@@ -186,7 +186,19 @@ func applyUpsert(ch *pkgmodels.FrontendChannel, req ChannelUpsertRequest, tenant
 		if !bson.IsObjectIdHex(req.SiteID) {
 			return fmt.Errorf("invalid site_id")
 		}
-		ch.SiteID = bson.ObjectIdHex(req.SiteID)
+		// ACQ-012: a hex site_id is not trusted on its face — it must resolve
+		// to a live Site owned by THIS tenant, so a channel can never bind to
+		// another tenant's site.
+		siteID := bson.ObjectIdHex(req.SiteID)
+		n, _ := db.GetCollection(pkgmodels.SiteCollection).Find(bson.M{
+			"_id":                   siteID,
+			"tenant_id":             tenantID,
+			"timestamps.deleted_at": nil,
+		}).Count()
+		if n == 0 {
+			return fmt.Errorf("site_id does not resolve to a site in this tenant")
+		}
+		ch.SiteID = siteID
 	}
 	if req.PortalBaseURL != "" {
 		ch.PortalBaseURL = strings.TrimSpace(req.PortalBaseURL)
