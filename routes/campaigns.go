@@ -24,8 +24,11 @@ func RegisterCampaignRoutes(rg *gin.RouterGroup) {
 	rg.DELETE("/campaigns/:publicId", deleteCampaign)
 
 	rg.POST("/campaigns/:publicId/preview", previewCampaign)
-	rg.POST("/campaigns/:publicId/send", sendCampaign)
-	rg.POST("/campaigns/:publicId/schedule", scheduleCampaign)
+	// Dispatch is admin/owner authority (ID-001 editor-vs-admin): editors can
+	// author campaigns but not fan them out to real recipients.
+	sendGate := auth.RequirePermission(auth.PermSendManage)
+	rg.POST("/campaigns/:publicId/send", sendGate, sendCampaign)
+	rg.POST("/campaigns/:publicId/schedule", sendGate, scheduleCampaign)
 
 	rg.GET("/campaigns/:publicId/recipients", listCampaignRecipients)
 	rg.GET("/campaigns/:publicId/stats", handleCampaignStats)

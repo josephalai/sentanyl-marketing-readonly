@@ -46,8 +46,11 @@ func RegisterNewsletterTenantRoutes(rg *gin.RouterGroup) {
 	rg.GET("/newsletters/:productId/posts/:postId", handleGetNewsletterPost)
 	rg.PUT("/newsletters/:productId/posts/:postId", handleUpdateNewsletterPost)
 	rg.DELETE("/newsletters/:productId/posts/:postId", handleDeleteNewsletterPost)
-	rg.POST("/newsletters/:productId/posts/:postId/publish", handlePublishNewsletterPost)
-	rg.POST("/newsletters/:productId/posts/:postId/unpublish", handleUnpublishNewsletterPost)
+	// Publishing fans a broadcast out to subscribers — admin/owner authority
+	// (ID-001 editor-vs-admin), matching the campaign send gate.
+	publishGate := auth.RequirePermission(auth.PermSendManage)
+	rg.POST("/newsletters/:productId/posts/:postId/publish", publishGate, handlePublishNewsletterPost)
+	rg.POST("/newsletters/:productId/posts/:postId/unpublish", publishGate, handleUnpublishNewsletterPost)
 
 	// Subscribers + analytics.
 	rg.GET("/newsletters/:productId/subscribers", handleListNewsletterSubscribers)
