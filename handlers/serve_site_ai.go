@@ -75,6 +75,11 @@ func handleAIGenerateSite(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI provider not configured"})
 		return
 	}
+	// AI-005: per-tenant daily AI-op budget.
+	if aigov.BudgetExceeded(tenantID) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "daily AI generation limit reached for this workspace"})
+		return
+	}
 
 	var req ai.SiteGenerationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -137,6 +142,11 @@ func handleAIGenerateSite(c *gin.Context) {
 				MetaDescription: pageResult.SEO.MetaDescription,
 			}
 		}
+		// AI-003: reject invalid generated documents rather than persisting them.
+		if err := site.ValidatePuckDocument(pageResult.PuckRoot); err != nil {
+			log.Printf("Skipping AI-generated page %s — invalid document: %v", pageResult.Name, err)
+			continue
+		}
 		page.DraftDocument = pageResult.PuckRoot
 		if err := site.CreateSitePage(page); err != nil {
 			log.Printf("Failed to create AI-generated page %s: %v", pageResult.Name, err)
@@ -188,6 +198,11 @@ func handleAIGeneratePage(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI provider not configured"})
 		return
 	}
+	// AI-005: per-tenant daily AI-op budget.
+	if aigov.BudgetExceeded(tenantID) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "daily AI generation limit reached for this workspace"})
+		return
+	}
 
 	var req struct {
 		Prompt         string   `json:"prompt" binding:"required"`
@@ -209,7 +224,17 @@ func handleAIGeneratePage(c *gin.Context) {
 		return
 	}
 
-	// Save the generated document as the draft.
+	// AI-003: the generated document is untrusted LLM output — validate it
+	// against the allowed Puck component set before persisting, so a
+	// hallucinated/unknown/over-deep block can't be stored and later rendered.
+	if err := site.ValidatePuckDocument(doc); err != nil {
+		log.Printf("AI page generation produced an invalid document: %v", err)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "generated document failed validation: " + err.Error()})
+		return
+	}
+
+	// Save the generated document as the draft (proposal-first: AI writes the
+	// DRAFT, publishing stays a separate explicit action — AI-002).
 	if err := site.ServiceSaveDocument(bson.ObjectIdHex(pageID), tenantID, doc); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save generated document"})
 		return
@@ -238,6 +263,11 @@ func handleAIEditPage(c *gin.Context) {
 	}
 	if provider == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI provider not configured"})
+		return
+	}
+	// AI-005: per-tenant daily AI-op budget.
+	if aigov.BudgetExceeded(tenantID) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "daily AI generation limit reached for this workspace"})
 		return
 	}
 
@@ -276,6 +306,12 @@ func handleAIEditPage(c *gin.Context) {
 	if result.Document == nil {
 		log.Printf("AI edit returned nil document")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI returned empty document"})
+		return
+	}
+	// AI-003: validate the edited document before persisting.
+	if err := site.ValidatePuckDocument(result.Document); err != nil {
+		log.Printf("AI page edit produced an invalid document: %v", err)
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "edited document failed validation: " + err.Error()})
 		return
 	}
 

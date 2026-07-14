@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/josephalai/sentanyl/pkg/egress"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
@@ -354,25 +356,16 @@ func cleanFont(f string) string {
 // ─── Direct crawl (goquery fallback) ──────────────────────────────────────
 
 func crawlDirect(targetURL string) (*crawledSite, error) {
-	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequest("GET", targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := client.Do(req)
+	// AI-004/WH-002: the target is a tenant-supplied URL fetched server-side,
+	// so it must go through the SSRF-safe egress boundary (https-only in prod,
+	// blocks loopback/private/link-local/metadata, re-validates the dialed IP
+	// and every redirect hop, size/time caps). A raw client here would let a
+	// tenant point the cloner at internal infrastructure.
+	body, resp, err := egress.Get(context.Background(), targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read body failed: %w", err)
-	}
 
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
 	if err != nil {
@@ -421,12 +414,12 @@ func crawlDirect(targetURL string) (*crawledSite, error) {
 			return
 		}
 		cssURL := resolveAbsURL(base, href)
-		if r, err := client.Get(cssURL); err == nil {
-			defer r.Body.Close()
-			if b, err := io.ReadAll(io.LimitReader(r.Body, 150*1024)); err == nil {
-				cssBuilder.Write(b)
-				fetched++
-			}
+		// AI-004: linked stylesheets are also tenant-derived URLs — fetch them
+		// through the SSRF-safe boundary too.
+		if b, r, err := egress.Get(context.Background(), cssURL); err == nil {
+			r.Body.Close()
+			cssBuilder.Write(b)
+			fetched++
 		}
 	})
 
