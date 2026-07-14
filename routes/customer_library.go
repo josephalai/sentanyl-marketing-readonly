@@ -14,6 +14,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/entitlements"
 	"github.com/josephalai/sentanyl/pkg/i18n"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
@@ -68,14 +69,11 @@ func contactBadgeNames(tenantID, contactID bson.ObjectId) ([]string, error) {
 	return names, nil
 }
 
-// customerOwnsProduct returns the Product if any Offer the contact holds
-// includes it. Uses the same resolution rules as handleGetLibraryProducts.
+// customerOwnsProduct returns the Product if the contact is entitled to it.
+// DEL-001: answers through the shared entitlements authority (Access Grants
+// ∪ transitional badges) — the same authority as the library list, so
+// detail/player access can never diverge from what the library shows.
 func customerOwnsProduct(tenantID, contactID bson.ObjectId, productIDOrPublic string) (*pkgmodels.Product, bool) {
-	badgeNames, err := contactBadgeNames(tenantID, contactID)
-	if err != nil || len(badgeNames) == 0 {
-		return nil, false
-	}
-
 	productQuery := bson.M{
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
@@ -89,15 +87,8 @@ func customerOwnsProduct(tenantID, contactID bson.ObjectId, productIDOrPublic st
 	if err := db.GetCollection(pkgmodels.ProductCollection).Find(productQuery).One(&product); err != nil {
 		return nil, false
 	}
-
-	var offers []pkgmodels.Offer
-	_ = db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
-		"tenant_id":             tenantID,
-		"granted_badges":        bson.M{"$in": badgeNames},
-		"included_products":     product.Id,
-		"timestamps.deleted_at": nil,
-	}).All(&offers)
-	if len(offers) == 0 {
+	entitled, _ := entitlements.IsEntitled(tenantID, contactID, product.Id)
+	if !entitled {
 		return nil, false
 	}
 	return &product, true

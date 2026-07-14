@@ -538,18 +538,28 @@ func recordSubscription(tenantID, contactID, offerID bson.ObjectId, stripeSessio
 	return col.Insert(sub)
 }
 
-// callInternalEnroll posts to lms-service /internal/enroll. Best-effort; the
-// lms-service handler is itself idempotent on (tenant, contact, product).
-func callInternalEnroll(tenantID, contactID, productID bson.ObjectId) error {
+// callInternalEnroll posts to lms-service /internal/enroll. The purchase
+// item id is the idempotency key (DEL-007): retries reuse the enrollment,
+// repurchases (new item) enroll again; offer/source record provenance
+// (DEL-008).
+func callInternalEnroll(tenantID, contactID, productID, offerID, purchaseItemID bson.ObjectId) error {
 	lmsURL := os.Getenv("LMS_SERVICE_URL")
 	if lmsURL == "" {
 		lmsURL = "http://lms-service:8083"
 	}
-	body, _ := json.Marshal(map[string]string{
+	payload := map[string]string{
 		"tenant_id":  tenantID.Hex(),
 		"contact_id": contactID.Hex(),
 		"product_id": productID.Hex(),
-	})
+		"source":     "purchase",
+	}
+	if offerID.Valid() {
+		payload["offer_id"] = offerID.Hex()
+	}
+	if purchaseItemID.Valid() {
+		payload["purchase_item_id"] = purchaseItemID.Hex()
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", lmsURL+"/internal/enroll", bytes.NewReader(body))
 	if err != nil {
 		return err

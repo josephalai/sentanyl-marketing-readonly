@@ -23,6 +23,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/config"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/entitlements"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
@@ -104,6 +105,10 @@ func main() {
 	// all connected IMAP accounts every 2 minutes.
 	routes.RegisterIMAPHandler()
 	imapsync.StartSyncLoop(2 * time.Minute)
+
+	// DEL-016: flip overdue active access grants to expired (read-side
+	// authorization already honors expires_at; this projects the lifecycle).
+	entitlements.StartExpirySweep(10 * time.Minute)
 	routes.StartTimerApprovalLoop()
 
 	// Initialize the GCS storage provider used by digital download deliveries

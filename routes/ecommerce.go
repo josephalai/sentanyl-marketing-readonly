@@ -3,7 +3,6 @@ package routes
 import (
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/entitlements"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 
 	"github.com/josephalai/sentanyl/pkg/utils"
@@ -815,46 +815,10 @@ func handleGetLibraryProducts(c *gin.Context) {
 		return
 	}
 
-	productIDSet := make(map[bson.ObjectId]bool)
-
-	// Authoritative path (COM-CC-001): active Access Grants directly name the
-	// products this customer is entitled to, snapshotted at purchase and
-	// immune to later Offer/badge edits.
-	for _, pid := range activeGrantProductIDs(tenantID, contactID) {
-		productIDSet[pid] = true
-	}
-
-	// Transitional badge-derived path: unioned in so customers who predate the
-	// Access Grant ledger keep access until grants are backfilled. Once
-	// ACCESS_GRANTS_ONLY=1 the badge path is skipped and grants are the sole
-	// authority. Badges then serve only automation/segmentation.
-	if os.Getenv("ACCESS_GRANTS_ONLY") != "1" {
-		var badgeNames []string
-		for _, badgeID := range contact.Badges {
-			var badge pkgmodels.Badge
-			if err := db.GetCollection(pkgmodels.BadgeCollection).FindId(badgeID).One(&badge); err == nil {
-				badgeNames = append(badgeNames, badge.Name)
-			}
-		}
-		if len(badgeNames) > 0 {
-			var offers []pkgmodels.Offer
-			db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
-				"tenant_id":             tenantID,
-				"granted_badges":        bson.M{"$in": badgeNames},
-				"timestamps.deleted_at": nil,
-			}).All(&offers)
-			for _, offer := range offers {
-				for _, pid := range offer.IncludedProducts {
-					productIDSet[pid] = true
-				}
-			}
-		}
-	}
-
-	var productIDs []bson.ObjectId
-	for pid := range productIDSet {
-		productIDs = append(productIDs, pid)
-	}
+	// DEL-001: one shared authority answers every delivery surface — active
+	// Access Grants (COM-CC-001) unioned with the transitional badge path
+	// until ACCESS_GRANTS_ONLY=1 flips grants to the sole authority.
+	productIDs := entitlements.EntitledProductIDs(tenantID, contactID)
 
 	if len(productIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{"products": []interface{}{}})

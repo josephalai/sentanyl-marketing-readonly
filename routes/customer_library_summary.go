@@ -8,6 +8,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/entitlements"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
@@ -21,6 +22,58 @@ func RegisterCustomerLibrarySummaryRoutes(rg *gin.RouterGroup) {
 	rg.GET("/library/services", handleListLibraryServices)
 	rg.GET("/library/coaching", handleListLibraryCoaching)
 	rg.GET("/library/newsletters", handleListLibraryNewsletters)
+	rg.GET("/library/grants", handleListLibraryGrants)
+}
+
+// handleListLibraryGrants returns EVERY access grant for the contact —
+// including expired/suspended/revoked/completed — so the portal can render
+// honest lifecycle states (DEL-015) instead of silently hiding products the
+// customer used to have.
+func handleListLibraryGrants(c *gin.Context) {
+	tenantID, contactID, ok := resolveCustomerContext(c)
+	if !ok {
+		return
+	}
+	var grants []pkgmodels.AccessGrant
+	_ = db.GetCollection(pkgmodels.AccessGrantCollection).Find(bson.M{
+		"tenant_id":  tenantID,
+		"contact_id": contactID,
+	}).Sort("-timestamps.created_at").All(&grants)
+	type row struct {
+		PublicID      string `json:"public_id"`
+		ProductID     string `json:"product_id"`
+		ProductPublic string `json:"product_public_id,omitempty"`
+		Title         string `json:"title"`
+		ProductType   string `json:"product_type,omitempty"`
+		ThumbnailURL  string `json:"thumbnail_url,omitempty"`
+		Status        string `json:"status"`
+		Source        string `json:"source,omitempty"`
+		ExpiresAt     string `json:"expires_at,omitempty"`
+		CreatedAt     string `json:"created_at,omitempty"`
+	}
+	out := make([]row, 0, len(grants))
+	for _, g := range grants {
+		var p pkgmodels.Product
+		_ = db.GetCollection(pkgmodels.ProductCollection).FindId(g.ProductID).One(&p)
+		r := row{
+			PublicID:      g.PublicId,
+			ProductID:     g.ProductID.Hex(),
+			ProductPublic: p.PublicId,
+			Title:         p.Name,
+			ProductType:   p.ProductType,
+			ThumbnailURL:  p.ThumbnailURL,
+			Status:        g.Status,
+			Source:        g.Source,
+		}
+		if g.ExpiresAt != nil {
+			r.ExpiresAt = g.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		if g.CreatedAt != nil {
+			r.CreatedAt = g.CreatedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, r)
+	}
+	c.JSON(http.StatusOK, gin.H{"grants": out})
 }
 
 // handleListLibraryDownloads returns digital-download products the contact
@@ -31,18 +84,9 @@ func handleListLibraryDownloads(c *gin.Context) {
 	if !ok {
 		return
 	}
-	badgeNames, err := contactBadgeNames(tenantID, contactID)
-	if err != nil || len(badgeNames) == 0 {
-		c.JSON(http.StatusOK, gin.H{"downloads": []any{}})
-		return
-	}
-	var offers []pkgmodels.Offer
-	_ = db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
-		"tenant_id":             tenantID,
-		"granted_badges":        bson.M{"$in": badgeNames},
-		"timestamps.deleted_at": nil,
-	}).All(&offers)
-	productIDs := uniqueProductIDs(offers)
+	// DEL-001: same shared authority as the library list — grants ∪
+	// transitional badges — so the downloads section can't diverge.
+	productIDs := entitlements.EntitledProductIDs(tenantID, contactID)
 	if len(productIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{"downloads": []any{}})
 		return

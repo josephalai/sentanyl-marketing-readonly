@@ -17,6 +17,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/entitlements"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/storage"
 	"github.com/josephalai/sentanyl/pkg/utils"
@@ -659,10 +660,10 @@ func requireCustomer(c *gin.Context) (bson.ObjectId, bson.ObjectId, bool) {
 	return bson.ObjectIdHex(tenantStr), bson.ObjectIdHex(contactStr), true
 }
 
-// loadEntitledDownloadProduct verifies the customer holds an active offer that
-// includes the requested digital_download product. Reuses the badge-grant
-// resolution from handleGetLibraryProducts so the entitlement contract is
-// consistent across the library.
+// loadEntitledDownloadProduct verifies the customer is entitled to the
+// requested digital_download product through the shared entitlements
+// authority (DEL-001), so the entitlement contract is consistent across the
+// library.
 //
 // productID may be a 24-char hex ObjectId OR a public_id string — the portal
 // Library component constructs URLs as `product.id || product.public_id` and
@@ -700,39 +701,12 @@ func loadEntitledDownloadProduct(c *gin.Context, tenantID, contactID bson.Object
 	return &product, true
 }
 
-// assertContactEntitled confirms the contact owns at least one active offer
-// that includes productID. Returns a sentinel error otherwise.
+// assertContactEntitled confirms the contact may consume productID.
+// DEL-001: answers through the shared entitlements authority (Access Grants
+// ∪ transitional badges) — identical to the library list/detail surfaces.
 func assertContactEntitled(tenantID, contactID, productID bson.ObjectId) error {
-	var contact pkgmodels.User
-	if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
-		"_id":       contactID,
-		"tenant_id": tenantID,
-	}).One(&contact); err != nil {
-		return errors.New("contact not found")
-	}
-	if len(contact.Badges) == 0 {
-		return errors.New("no entitlements")
-	}
-	var badgeNames []string
-	for _, badgeID := range contact.Badges {
-		var b pkgmodels.Badge
-		if err := db.GetCollection(pkgmodels.BadgeCollection).FindId(badgeID).One(&b); err == nil {
-			badgeNames = append(badgeNames, b.Name)
-		}
-	}
-	if len(badgeNames) == 0 {
-		return errors.New("no entitlements")
-	}
-	count, err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
-		"tenant_id":             tenantID,
-		"granted_badges":        bson.M{"$in": badgeNames},
-		"included_products":     productID,
-		"timestamps.deleted_at": nil,
-	}).Count()
-	if err != nil {
-		return errors.New("entitlement check failed")
-	}
-	if count == 0 {
+	entitled, _ := entitlements.IsEntitled(tenantID, contactID, productID)
+	if !entitled {
 		return errors.New("not entitled to this product")
 	}
 	return nil

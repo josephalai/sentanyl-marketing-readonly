@@ -29,7 +29,7 @@ func provisionProductPurchase(tenantID, contactID, productID, offerID, purchaseI
 	}
 	switch product.ProductType {
 	case pkgmodels.ProductTypeCourse:
-		return callInternalEnroll(tenantID, contactID, productID)
+		return callInternalEnroll(tenantID, contactID, productID, offerID, purchaseItemID)
 	case pkgmodels.ProductTypeService:
 		return provisionServiceEnrollment(tenantID, contactID, &product, offerID, purchaseItemID)
 	case pkgmodels.ProductTypeCoaching:
