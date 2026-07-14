@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/linktoken"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -103,10 +104,9 @@ func awardCampaignBadge(tenantID, userID, recipientID bson.ObjectId, ident strin
 		return err
 	}
 
-	if err := db.GetCollection(pkgmodels.UserCollection).Update(
-		bson.M{"_id": userID},
-		bson.M{"$addToSet": bson.M{"badges": badge.Id}},
-	); err != nil {
+	// ID-012: one grant per campaign recipient regardless of repeat clicks
+	// (idempotent on the recipient ref), with durable provenance.
+	if _, err := badges.Assign(tenantID, userID, badge.Id, "campaign_click", recipientID.Hex(), "system"); err != nil {
 		return err
 	}
 

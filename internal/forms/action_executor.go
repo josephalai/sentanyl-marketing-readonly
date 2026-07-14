@@ -19,6 +19,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/email"
 	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
+	"github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/plans"
@@ -450,10 +451,8 @@ func assignBadge(tenantID, contactID bson.ObjectId, badgePublicID string) (strin
 	if err := db.GetCollection(pkgmodels.BadgeCollection).Find(scopedFind(tenantID, badgePublicID)).One(&badge); err != nil {
 		return "", false
 	}
-	if err := db.GetCollection(pkgmodels.UserCollection).Update(
-		bson.M{"_id": contactID, "tenant_id": tenantID},
-		bson.M{"$addToSet": bson.M{"badges": badge.Id}},
-	); err != nil {
+	// ID-012: mutation through the badge command records provenance.
+	if _, err := badges.Assign(tenantID, contactID, badge.Id, "form_action", "", "system"); err != nil {
 		log.Printf("forms.executor: assignBadge failed: %v", err)
 		return "", false
 	}
@@ -465,10 +464,7 @@ func removeBadge(tenantID, contactID bson.ObjectId, badgePublicID string) (strin
 	if err := db.GetCollection(pkgmodels.BadgeCollection).Find(scopedFind(tenantID, badgePublicID)).One(&badge); err != nil {
 		return "", false
 	}
-	if err := db.GetCollection(pkgmodels.UserCollection).Update(
-		bson.M{"_id": contactID, "tenant_id": tenantID},
-		bson.M{"$pull": bson.M{"badges": badge.Id}},
-	); err != nil {
+	if err := badges.Remove(tenantID, contactID, badge.Id, "form_action", "", "system"); err != nil {
 		log.Printf("forms.executor: removeBadge failed: %v", err)
 		return "", false
 	}

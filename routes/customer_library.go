@@ -13,6 +13,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/entitlements"
 	"github.com/josephalai/sentanyl/pkg/i18n"
@@ -638,7 +639,7 @@ func handleUpdateLessonProgress(c *gin.Context) {
 	if product != nil {
 		lesson, _, _ := lessonContext(product, enrollment, req.ModuleSlug, req.LessonSlug)
 		if lesson != nil && len(lesson.BadgeRules) > 0 {
-			evaluateLessonBadgeRules(tenantID, contactID, lesson.BadgeRules, previousWatchPercent, req.WatchPercent, justLessonCompleted)
+			evaluateLessonBadgeRules(tenantID, contactID, lesson.BadgeRules, previousWatchPercent, req.WatchPercent, justLessonCompleted, product.PublicId+":"+req.ModuleSlug+":"+req.LessonSlug)
 		}
 	}
 
@@ -709,6 +710,7 @@ func evaluateLessonBadgeRules(
 	rules []*pkgmodels.MediaBadgeRule,
 	previous, current int,
 	justCompleted bool,
+	sourceRef string,
 ) {
 	for _, r := range rules {
 		if r == nil || !r.Enabled {
@@ -747,10 +749,9 @@ func evaluateLessonBadgeRules(
 		}).One(&badge); err != nil {
 			continue
 		}
-		_ = db.GetCollection(pkgmodels.UserCollection).Update(
-			bson.M{"_id": contactID},
-			bson.M{"$addToSet": bson.M{"badges": badge.Id}},
-		)
+		// ID-012: idempotent per (lesson rule, contact) with provenance —
+		// repeated threshold crossings can't double-grant.
+		_, _ = badges.Assign(tenantID, contactID, badge.Id, "course_lesson", sourceRef+":"+r.BadgePublicId, "system")
 	}
 }
 

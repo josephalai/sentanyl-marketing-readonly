@@ -18,6 +18,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/pkg/auth"
+	badgecmd "github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -171,7 +172,7 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		return fmt.Errorf("upsert contact: %w", err)
 	}
 
-	if err := grantOfferBadges(tenantID, contact.Id, offer.GrantedBadges); err != nil {
+	if err := grantOfferBadges(tenantID, contact.Id, offer.GrantedBadges, session.ID); err != nil {
 		return fmt.Errorf("grant badges: %w", err)
 	}
 
@@ -311,8 +312,9 @@ func upsertContactForCheckout(tenantID bson.ObjectId, email, name, stripeCustome
 }
 
 // grantOfferBadges resolves or creates tenant-scoped Badge docs for each granted
-// badge name, then $addToSet them onto the contact's User.Badges array.
-func grantOfferBadges(tenantID, contactID bson.ObjectId, badgeNames []string) error {
+// badge name and grants them through the provenance command (ID-012),
+// idempotent per (checkout session, badge).
+func grantOfferBadges(tenantID, contactID bson.ObjectId, badgeNames []string, sourceRef string) error {
 	if len(badgeNames) == 0 {
 		return nil
 	}
@@ -342,13 +344,12 @@ func grantOfferBadges(tenantID, contactID bson.ObjectId, badgeNames []string) er
 		}
 		badgeIDs = append(badgeIDs, badge.Id)
 	}
-	if len(badgeIDs) == 0 {
-		return nil
+	for _, id := range badgeIDs {
+		if _, err := badgecmd.Assign(tenantID, contactID, id, "offer_purchase", sourceRef, "system"); err != nil {
+			return err
+		}
 	}
-	return db.GetCollection(pkgmodels.UserCollection).Update(
-		bson.M{"_id": contactID},
-		bson.M{"$addToSet": bson.M{"badges": bson.M{"$each": badgeIDs}}},
-	)
+	return nil
 }
 
 // recordPurchaseLog inserts one PurchaseLog row per included product on a
@@ -771,11 +772,8 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 		for _, b := range badges {
 			badgeIDs = append(badgeIDs, b.Id)
 		}
-		if len(badgeIDs) > 0 {
-			_ = db.GetCollection(pkgmodels.UserCollection).Update(
-				bson.M{"_id": contact.Id},
-				bson.M{"$pull": bson.M{"badges": bson.M{"$in": badgeIDs}}},
-			)
+		for _, id := range badgeIDs {
+			_ = badgecmd.Remove(tenantID, contact.Id, id, "refund", charge.ID, "system")
 		}
 	}
 

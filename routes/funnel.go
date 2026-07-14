@@ -15,6 +15,7 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	pkgauth "github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -553,14 +554,27 @@ func executeFunnelAction(tenantHex string, action *pkgmodels.Action, userId stri
 		return s, ""
 	}
 
+	// Resolve the acting user's ObjectId once so badge mutations flow through
+	// the provenance command (ID-012) with a tenant-scoped contact identity.
+	resolveUserID := func() (bson.ObjectId, bool) {
+		var u pkgmodels.User
+		if err := db.GetCollection(pkgmodels.UserCollection).Find(
+			bson.M{"public_id": userId, "$or": tenantScope}).Select(bson.M{"_id": 1}).One(&u); err != nil {
+			return "", false
+		}
+		return u.Id, true
+	}
+
 	applyBadge := func(badgeName string) {
 		var badge pkgmodels.Badge
 		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{"name": badgeName, "$or": tenantScope}).One(&badge); err == nil {
-			db.GetCollection(pkgmodels.UserCollection).Update(
-				bson.M{"public_id": userId, "$or": tenantScope},
-				bson.M{"$addToSet": bson.M{"badges": badge.Id}},
-			)
-			log.Printf("executeFunnelAction: gave badge %q to user %q", badgeName, userId)
+			if uid, ok := resolveUserID(); ok && bson.IsObjectIdHex(tenantHex) {
+				if _, err := badges.Assign(bson.ObjectIdHex(tenantHex), uid, badge.Id, "funnel_action", "", "system"); err != nil {
+					log.Printf("executeFunnelAction: badge grant failed: %v", err)
+					return
+				}
+				log.Printf("executeFunnelAction: gave badge %q to user %q", badgeName, userId)
+			}
 		} else {
 			log.Printf("executeFunnelAction: badge %q not found in tenant %s: %v", badgeName, tenantHex, err)
 		}
@@ -569,10 +583,9 @@ func executeFunnelAction(tenantHex string, action *pkgmodels.Action, userId stri
 	revokeBadge := func(badgeName string) {
 		var badge pkgmodels.Badge
 		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{"name": badgeName, "$or": tenantScope}).One(&badge); err == nil {
-			db.GetCollection(pkgmodels.UserCollection).Update(
-				bson.M{"public_id": userId, "$or": tenantScope},
-				bson.M{"$pull": bson.M{"badges": badge.Id}},
-			)
+			if uid, ok := resolveUserID(); ok && bson.IsObjectIdHex(tenantHex) {
+				_ = badges.Remove(bson.ObjectIdHex(tenantHex), uid, badge.Id, "funnel_action", "", "system")
+			}
 		}
 	}
 

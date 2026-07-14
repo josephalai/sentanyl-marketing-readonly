@@ -22,6 +22,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/config"
+	"github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/entitlements"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
@@ -109,6 +110,11 @@ func main() {
 	// DEL-016: flip overdue active access grants to expired (read-side
 	// authorization already honors expires_at; this projects the lifecycle).
 	entitlements.StartExpirySweep(10 * time.Minute)
+
+	// ID-012/DEL-004: badge provenance invariant + the trusted consumer for
+	// server-side video badge qualifications.
+	badges.EnsureIndexes()
+	badges.RegisterMediaQualifiedConsumer()
 	routes.StartTimerApprovalLoop()
 
 	// Initialize the GCS storage provider used by digital download deliveries
