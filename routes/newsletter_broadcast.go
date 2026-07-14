@@ -11,6 +11,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/pkg/sendauth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/emailer"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -140,6 +141,21 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 
 	count := 0
 	for _, sub := range subs {
+		// One send authority for every path (COM-EM-004): validity,
+		// routability, class-aware suppression, unsubscribe compliance, and
+		// the tenant quota, identically to campaigns.
+		unsubURL := newsletterUnsubURL(sub.UnsubscribeToken)
+		dec := sendauth.Authorize(sendauth.Request{
+			TenantID: post.TenantID,
+			Email:    sub.Email,
+			Class:    sendauth.Marketing,
+			Purpose:  "newsletter",
+			UnsubURL: unsubURL,
+		})
+		if !dec.Allowed {
+			log.Printf("newsletter: skip recipient %s (reason=%s)", sub.Email, dec.Reason)
+			continue
+		}
 		// Unified per-email tracking row (NewsletterPostStats stays canonical
 		// for the newsletter analytics tab; this feeds the unified
 		// cross-source view). Open/click stamps resolve by post + email. Built
@@ -184,7 +200,10 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		// unsubscribe headers (Gmail/Yahoo bulk-sender compliance) when the
 		// provider supports custom headers.
 		if !scheduled && smtpProvider != nil {
-			headers := listUnsubHeaders(newsletterUnsubURL(sub.UnsubscribeToken))
+			headers := dec.Headers
+			if headers == nil {
+				headers = listUnsubHeaders(unsubURL)
+			}
 			if msgID != "" {
 				headers["Message-ID"] = msgID
 			}
@@ -299,4 +318,43 @@ func personalizeEmail(html string, sub pkgmodels.NewsletterSubscription) string 
 	out := strings.ReplaceAll(html, "{{UNSUBSCRIBE_URL}}", unsub)
 	out = strings.ReplaceAll(out, "{{SUB_PUBLIC_ID}}", sub.PublicId)
 	return out
+}
+
+// RenderAndAuthorizeDripEmail builds the final per-recipient email for a
+// newsletter DRIP send through the exact same pipeline as a broadcast:
+// send-authority authorization (COM-EM-004: suppression, unsubscribe
+// compliance, quota), click/pixel tracking with per-recipient signed tokens
+// (COM-EM-006), personalization, and the unified EmailSend tracking row.
+// Injected into internal/scheduler at startup so the drip path cannot drift
+// from the broadcast path.
+func RenderAndAuthorizeDripEmail(product *pkgmodels.Product, post *pkgmodels.NewsletterPost, sub pkgmodels.NewsletterSubscription, preSplitBody, subject string) (html string, headers map[string]string, send *pkgmodels.EmailSend, allowed bool, reason string) {
+	unsubURL := newsletterUnsubURL(sub.UnsubscribeToken)
+	dec := sendauth.Authorize(sendauth.Request{
+		TenantID: post.TenantID,
+		Email:    sub.Email,
+		Class:    sendauth.Marketing,
+		Purpose:  "newsletter_drip",
+		UnsubURL: unsubURL,
+	})
+	if !dec.Allowed {
+		return "", nil, nil, false, dec.Reason
+	}
+	body := rewriteLinksForTracking(preSplitBody, post.PublicId)
+	body = wrapEmailHTML(post, body, emailer.TenantPostalAddress(post.TenantID.Hex()))
+
+	send = pkgmodels.NewEmailSend(post.TenantID, pkgmodels.EmailSendSourceNewsletter, sub.Email, subject)
+	send.ContactPublicID = sub.PublicId
+	send.NewsletterPostPublicID = post.PublicId
+	msgID, _ := emailer.ReplyCorrelation(send.PublicId)
+	send.MessageID = msgID
+
+	html = signEmailTrackingPlaceholders(personalizeEmail(body, sub), post.TenantID.Hex(), send.PublicId)
+	headers = dec.Headers
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	if msgID != "" {
+		headers["Message-ID"] = msgID
+	}
+	return html, headers, send, true, "ok"
 }

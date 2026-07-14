@@ -302,6 +302,39 @@ func ensureFreeTier(tiers []*pkgmodels.NewsletterTier) []*pkgmodels.NewsletterTi
 	return append([]*pkgmodels.NewsletterTier{free}, tiers...)
 }
 
+// resolveTierRefs verifies tier foreign references belong to THIS tenant
+// (COM-EM-008): a hex id is never trusted on its face — the offer must be a
+// live tenant-owned offer and the badge a live tenant-owned badge.
+func resolveTierRefs(tenantID bson.ObjectId, offerHex, badgeHex string) (offerID, badgeID bson.ObjectId, errMsg string) {
+	if offerHex != "" {
+		if !bson.IsObjectIdHex(offerHex) {
+			return "", "", "invalid offer_id"
+		}
+		n, _ := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
+			"_id": bson.ObjectIdHex(offerHex), "tenant_id": tenantID, "timestamps.deleted_at": nil,
+		}).Count()
+		if n == 0 {
+			return "", "", "offer_id does not resolve to a live offer in this tenant"
+		}
+		offerID = bson.ObjectIdHex(offerHex)
+	}
+	if badgeHex != "" {
+		if !bson.IsObjectIdHex(badgeHex) {
+			return "", "", "invalid badge_id"
+		}
+		n, _ := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{
+			"_id": bson.ObjectIdHex(badgeHex),
+			"$or": []bson.M{{"tenant_id": tenantID}, {"subscriber_id": tenantID.Hex()}},
+			"timestamps.deleted_at": nil,
+		}).Count()
+		if n == 0 {
+			return "", "", "badge_id does not resolve to a live badge in this tenant"
+		}
+		badgeID = bson.ObjectIdHex(badgeHex)
+	}
+	return offerID, badgeID, ""
+}
+
 // ---------- tenant: tiers ----------
 
 type tierUpsertReq struct {
@@ -328,19 +361,22 @@ func handleCreateNewsletterTier(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
 		return
 	}
-	if req.OfferID == "" || !bson.IsObjectIdHex(req.OfferID) {
+	if req.OfferID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid offer_id required for paid tier"})
+		return
+	}
+	offerID, badgeID, errMsg := resolveTierRefs(tenantID, req.OfferID, req.BadgeID)
+	if errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 		return
 	}
 	tier := &pkgmodels.NewsletterTier{
 		Id:          bson.NewObjectId(),
 		Name:        req.Name,
 		Description: req.Description,
-		OfferID:     bson.ObjectIdHex(req.OfferID),
+		OfferID:     offerID,
+		BadgeID:     badgeID,
 		Order:       req.Order,
-	}
-	if req.BadgeID != "" && bson.IsObjectIdHex(req.BadgeID) {
-		tier.BadgeID = bson.ObjectIdHex(req.BadgeID)
 	}
 	cfg := p.Newsletter
 	cfg.Tiers = append(ensureFreeTier(cfg.Tiers), tier)
@@ -375,6 +411,11 @@ func handleUpdateNewsletterTier(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	offerID, badgeID, errMsg := resolveTierRefs(tenantID, req.OfferID, req.BadgeID)
+	if errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return
+	}
 	tid := bson.ObjectIdHex(tierID)
 	for _, t := range p.Newsletter.Tiers {
 		if t.Id == tid {
@@ -383,11 +424,11 @@ func handleUpdateNewsletterTier(c *gin.Context) {
 			}
 			t.Description = req.Description
 			t.Order = req.Order
-			if req.OfferID != "" && bson.IsObjectIdHex(req.OfferID) {
-				t.OfferID = bson.ObjectIdHex(req.OfferID)
+			if offerID != "" {
+				t.OfferID = offerID
 			}
-			if req.BadgeID != "" && bson.IsObjectIdHex(req.BadgeID) {
-				t.BadgeID = bson.ObjectIdHex(req.BadgeID)
+			if badgeID != "" {
+				t.BadgeID = badgeID
 			}
 			break
 		}

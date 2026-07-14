@@ -27,6 +27,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/emailer"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
@@ -45,6 +46,11 @@ var (
 var smtp email.EmailProvider
 
 const newsletterSweepJobType = "newsletter.sweep"
+
+// DripEmailRenderer is injected by cmd/main from the routes package so drip
+// sends share the broadcast pipeline exactly (send authority, signed
+// tracking, personalization, compliance headers, EmailSend row).
+var DripEmailRenderer func(product *pkgmodels.Product, post *pkgmodels.NewsletterPost, sub pkgmodels.NewsletterSubscription, preSplitBody, subject string) (html string, headers map[string]string, send *pkgmodels.EmailSend, allowed bool, reason string)
 
 // Start registers the newsletter sweep job and bootstraps the chain. Interval
 // defaults to 60s and is overridable with NEWSLETTER_SCHEDULER_INTERVAL
@@ -216,20 +222,33 @@ func dispatchDripPost(product *pkgmodels.Product, post *pkgmodels.NewsletterPost
 			continue
 		}
 
-		// Insert + send the email through the existing pipeline so all
-		// tracking, scheduler, and provider behaviour stays uniform with
-		// the broadcast path.
+		// Per-recipient render + authorization through the SAME pipeline as
+		// broadcasts (COM-EM-004/006): send authority, signed tracking,
+		// personalization, compliance headers, unified EmailSend row.
+		if DripEmailRenderer == nil {
+			log.Printf("[newsletter scheduler] drip renderer not wired; skipping send")
+			continue
+		}
+		html, headers, sendRow, allowed, reason := DripEmailRenderer(product, post, sub, bodyHTML, subject)
+		if !allowed {
+			log.Printf("[newsletter scheduler] drip skip %s (reason=%s)", sub.Email, reason)
+			continue
+		}
 		msg := pkgmodels.NewInstantEmail()
 		msg.From = from
 		msg.To = sub.Email
 		msg.SubjectLine = subject
-		// Per-recipient unsubscribe + tracking pixel substitution would
-		// happen here; v1 just sends the body. Future: re-use the broadcast
-		// wrapEmailHTML + personalizeEmail helpers.
-		msg.Html = bodyHTML
+		msg.Html = html
 		_ = db.GetCollection(pkgmodels.InstantEmailCollection).Insert(msg)
+		if sendRow != nil {
+			_ = db.GetCollection(pkgmodels.EmailSendCollection).Insert(sendRow)
+		}
 		if smtp != nil {
-			_ = smtp.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, "")
+			if hs, ok := smtp.(emailer.HeaderSender); ok {
+				_ = hs.SendEmailWithHeaders(msg.From, msg.To, msg.SubjectLine, msg.Html, "", headers)
+			} else {
+				_ = smtp.SendEmail(msg.From, msg.To, msg.SubjectLine, msg.Html, "")
+			}
 		}
 
 		// Stamp dispatch with email message id + sent_at.

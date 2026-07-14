@@ -29,6 +29,7 @@ func RegisterCampaignRoutes(rg *gin.RouterGroup) {
 	sendGate := auth.RequirePermission(auth.PermSendManage)
 	rg.POST("/campaigns/:publicId/send", sendGate, sendCampaign)
 	rg.POST("/campaigns/:publicId/schedule", sendGate, scheduleCampaign)
+	rg.POST("/campaigns/:publicId/cancel", sendGate, cancelCampaign)
 
 	rg.GET("/campaigns/:publicId/recipients", listCampaignRecipients)
 	rg.GET("/campaigns/:publicId/stats", handleCampaignStats)
@@ -219,8 +220,11 @@ func sendCampaign(c *gin.Context) {
 		bson.M{"$set": bson.M{"status": pkgmodels.CampaignStatusSending}},
 	)
 
-	count, err := dispatchCampaign(camp, false, time.Time{})
-	if err != nil {
+	// COM-EM-005: dispatch is a durable job — persisted before ack, retried
+	// with backoff, resumable after a crash without duplicate sends, and
+	// cancelable between recipients. The request no longer blocks on the
+	// whole audience.
+	if err := EnqueueCampaignDispatch(camp); err != nil {
 		_ = db.GetCollection(pkgmodels.CampaignCollection).Update(
 			bson.M{"_id": camp.Id},
 			bson.M{"$set": bson.M{"status": pkgmodels.CampaignStatusFailed, "last_error": err.Error()}},
@@ -228,16 +232,25 @@ func sendCampaign(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	now := time.Now()
+	c.JSON(http.StatusAccepted, gin.H{"status": "dispatching"})
+}
+
+// cancelCampaign flips a sending/scheduled campaign to canceled; the durable
+// dispatcher honors it between recipients.
+func cancelCampaign(c *gin.Context) {
+	camp, ok := loadCampaign(c)
+	if !ok {
+		return
+	}
+	if camp.Status != pkgmodels.CampaignStatusSending && camp.Status != pkgmodels.CampaignStatusScheduled {
+		c.JSON(http.StatusConflict, gin.H{"error": "campaign is not sending or scheduled"})
+		return
+	}
 	_ = db.GetCollection(pkgmodels.CampaignCollection).Update(
 		bson.M{"_id": camp.Id},
-		bson.M{"$set": bson.M{
-			"status":          pkgmodels.CampaignStatusSent,
-			"sent_at":         now,
-			"recipient_count": count,
-		}},
+		bson.M{"$set": bson.M{"status": pkgmodels.CampaignStatusCanceled}},
 	)
-	c.JSON(http.StatusOK, gin.H{"status": "sent", "recipient_count": count})
+	c.JSON(http.StatusOK, gin.H{"status": "canceled"})
 }
 
 func scheduleCampaign(c *gin.Context) {
@@ -261,7 +274,7 @@ func scheduleCampaign(c *gin.Context) {
 		return
 	}
 
-	count, err := dispatchCampaign(camp, true, req.ScheduledAt)
+	count, err := dispatchCampaignScheduled(camp, req.ScheduledAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

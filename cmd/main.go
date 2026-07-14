@@ -100,6 +100,7 @@ func main() {
 	// Newsletter scheduler — auto-publishes scheduled posts at their time
 	// and dispatches drip-mode posts per-subscriber. In-process goroutine
 	// matching the coaching reminder worker pattern.
+	scheduler.DripEmailRenderer = routes.RenderAndAuthorizeDripEmail
 	scheduler.Start()
 
 	// Inbox Closer — register the IMAP inbound handler and start polling
@@ -118,6 +119,10 @@ func main() {
 
 	// COM-EM-001: immutable delivery ProviderEvent invariant.
 	routes.EnsureDeliveryEventIndexes()
+
+	// COM-EM-005: durable campaign dispatch (recipient uniqueness + job).
+	routes.EnsureCampaignIndexes()
+	routes.RegisterCampaignDispatchJob()
 	routes.StartTimerApprovalLoop()
 
 	// Initialize the GCS storage provider used by digital download deliveries

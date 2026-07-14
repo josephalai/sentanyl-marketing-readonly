@@ -50,6 +50,10 @@ func RegisterStoryStartJob() {
 			"story_name":     storyName,
 			"subscriber_id":  subscriberID,
 			"user_public_id": userPublicID,
+			// COM-EM-009: the job's idempotency key doubles as the enrollment
+			// command key — a redelivered/retried command creates exactly one
+			// StorySession and sends the first email exactly once.
+			"command_key": job.IdempotencyKey,
 		})
 		req, err := http.NewRequest(http.MethodPost, coreURL+"/internal/story/start", bytes.NewReader(payload))
 		if err != nil {

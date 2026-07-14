@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/pkg/sendauth"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/emailer"
@@ -1680,6 +1681,24 @@ func verpReplyToForThread(thread *pkgmodels.EmailThread) string {
 func sendViaAccount(account *pkgmodels.InboxAccount, from, to, subject, htmlBody, inReplyTo, replyTo string) error {
 	if replyTo == "" {
 		replyTo = from
+	}
+	// COM-EM-004/011: every AI-inbox send passes the single send authority
+	// before any provider is touched. Replies to inbound conversations are
+	// Transactional (a person who wrote in expects an answer even if
+	// unsubscribed from bulk mail), which still blocks invalid/non-routable
+	// addresses; the guardrail ladder governs WHETHER an AI reply may send,
+	// this authority governs whether the ADDRESS may be sent to at all.
+	tenantID := bson.ObjectId("")
+	if account != nil {
+		tenantID = account.TenantID
+	}
+	if dec := sendauth.Authorize(sendauth.Request{
+		TenantID: tenantID,
+		Email:    to,
+		Class:    sendauth.Transactional,
+		Purpose:  "inbox_reply",
+	}); !dec.Allowed {
+		return fmt.Errorf("send authority refused %s: %s", to, dec.Reason)
 	}
 	if account != nil && account.SMTPHost != "" && account.CredentialsEncrypted != "" {
 		raw, err := utils.Decrypt(account.CredentialsEncrypted)
