@@ -13,9 +13,12 @@ import (
 // (ANA-004..008): the metric registry, facts-based attribution reporting,
 // projection rebuild, and facts↔source reconciliation.
 func RegisterAnalyticsRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.GET("/analytics/metrics", handleAnalyticsMetrics)
-	tenantAPI.GET("/analytics/revenue/by-source", handleRevenueBySource)
-	tenantAPI.GET("/analytics/reconcile", handleAnalyticsReconcile)
+	// ANA-010: analytics reads are owner/admin-only (financial data); rebuild
+	// stays owner-only (destructive reprojection).
+	rp := tenantAPI.Group("", auth.RequirePermission(auth.PermReportsView))
+	rp.GET("/analytics/metrics", handleAnalyticsMetrics)
+	rp.GET("/analytics/revenue/by-source", handleRevenueBySource)
+	rp.GET("/analytics/reconcile", handleAnalyticsReconcile)
 	tenantAPI.POST("/analytics/rebuild-facts", auth.RequireOwner(), handleRebuildFacts)
 }
 

@@ -18,10 +18,13 @@ import (
 // by the admin Revenue page. Mounted on the same /api/tenant/* group as the
 // rest of the admin surface.
 func RegisterRevenueRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.GET("/revenue/summary", handleRevenueSummary)
-	tenantAPI.GET("/revenue/by-product", handleRevenueByProduct)
-	tenantAPI.GET("/revenue/by-contact", handleRevenueByContact)
-	tenantAPI.GET("/revenue/contact/:contactId", handleRevenueForContact)
+	// ANA-010: financial/revenue reporting is owner/admin-only — editors
+	// author content but must not see revenue.
+	rv := tenantAPI.Group("", auth.RequirePermission(auth.PermReportsView))
+	rv.GET("/revenue/summary", handleRevenueSummary)
+	rv.GET("/revenue/by-product", handleRevenueByProduct)
+	rv.GET("/revenue/by-contact", handleRevenueByContact)
+	rv.GET("/revenue/contact/:contactId", handleRevenueForContact)
 }
 
 // revenueGroup is one currency's aggregation output from the DB pipeline.
