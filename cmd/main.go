@@ -55,6 +55,9 @@ func main() {
 	// Ensure MongoDB indexes for download upload intents (DEL-010).
 	routes.EnsureDownloadIndexes()
 
+	// Ensure FUL-001/002 service-fulfillment invariants.
+	routes.EnsureServiceFulfillmentIndexes()
+
 	// Durable job kernel: indexes, handlers, and a background worker for
 	// outbound webhook delivery (WH-003) and future durable workloads.
 	jobs.EnsureIndexes()

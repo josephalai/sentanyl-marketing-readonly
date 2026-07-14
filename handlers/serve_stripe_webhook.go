@@ -234,7 +234,7 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		if item.Status == pkgmodels.ItemStatusProvisioned {
 			continue // already provisioned on an earlier delivery of this event
 		}
-		if err := provisionProductPurchase(tenantID, contact.Id, productID, offer.Id); err != nil {
+		if err := provisionProductPurchase(tenantID, contact.Id, productID, offer.Id, item.Id); err != nil {
 			log.Printf("[stripe webhook] PROVISION FAILED tenant=%s offer=%s product=%s contact=%s email=%s: %v",
 				tenantID.Hex(), offer.Id.Hex(), productID.Hex(), contact.Id.Hex(), email, err)
 			enrollFailures = append(enrollFailures, fmt.Sprintf("%s: %v", productID.Hex(), err))

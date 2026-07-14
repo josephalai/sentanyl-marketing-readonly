@@ -21,6 +21,22 @@ import (
 // Currently enforces a unique index on (tenant_id, code) for coupons so duplicate
 // redeem codes per tenant are rejected at the DB layer in addition to the
 // application-level pre-check.
+// EnsureServiceFulfillmentIndexes enforces the FUL-001/002 invariants: one
+// service enrollment per purchased line item, and one instance slot per
+// (enrollment, template) so provisioning upserts can never duplicate slots.
+func EnsureServiceFulfillmentIndexes() {
+	if err := db.GetCollection(pkgmodels.ServiceEnrollmentCollection).EnsureIndex(mgo.Index{
+		Key: []string{"purchase_item_id"}, Unique: true, Sparse: true, Background: true,
+	}); err != nil {
+		log.Printf("fulfillment: service enrollment purchase-item index: %v", err)
+	}
+	if err := db.GetCollection(pkgmodels.ServiceInstanceCollection).EnsureIndex(mgo.Index{
+		Key: []string{"enrollment_id", "instance_template_id"}, Unique: true, Background: true,
+	}); err != nil {
+		log.Printf("fulfillment: service instance slot index: %v", err)
+	}
+}
+
 func EnsureEcommerceIndexes() {
 	col := db.GetCollection(pkgmodels.CouponCollection)
 	idx := mgo.Index{
