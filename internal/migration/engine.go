@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,11 +16,13 @@ import (
 	mgo "gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/egress"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/plans"
+	"github.com/josephalai/sentanyl/pkg/scan"
 	"github.com/josephalai/sentanyl/pkg/storage"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
@@ -185,8 +188,12 @@ func DryRun(p *models.MigrationProject) (bson.M, error) {
 	sim := newRun(p, ex, true)
 	translations := sim.importAll()
 	report := bson.M{
-		"phase":              "dry_run",
+		"phase":                  "dry_run",
 		"automation_translation": translations,
+		"samples":                previewSamples(ex),
+		// MIG-012 coexistence: until the owner-decided cutover, Kajabi stays
+		// the source of truth; imported records are drafts/facts only.
+		"source_of_truth":    "source platform remains authoritative until you sign off and complete cutover; imported pages/forms/stories are drafts, subscriptions are non-charging until activated",
 		"counts":             exportCounts(ex),
 		"parse_errors":       len(errs),
 		"would_create":       sim.created,
@@ -274,6 +281,24 @@ func Rollback(p *models.MigrationProject) (bson.M, error) {
 				continue
 			}
 		}
+		// A transaction's Purchase also projected PurchaseLog + RevenueFact
+		// rows (source=migration) — remove them with it.
+		if m.SourceType == models.SourceTypeTransaction {
+			var logs []models.PurchaseLog
+			_ = db.GetCollection(models.PurchaseLogCollection).Find(bson.M{
+				"tenant_id": p.TenantID, "source": "migration", "stripe_charge_id": "kajabi:" + m.SourceID,
+			}).All(&logs)
+			for _, lg := range logs {
+				if info, err := db.GetCollection(models.RevenueFactCollection).RemoveAll(bson.M{
+					"tenant_id": p.TenantID, "source_log_id": lg.Id,
+				}); err == nil && info != nil {
+					removed["revenue_fact"] += info.Removed
+				}
+				if err := db.GetCollection(models.PurchaseLogCollection).RemoveId(lg.Id); err == nil {
+					removed["purchase_log"]++
+				}
+			}
+		}
 		// A transaction's Purchase carries dependent rows created with it —
 		// purchase items and their migration grants — that must go with it.
 		if m.SourceType == models.SourceTypeTransaction {
@@ -325,6 +350,61 @@ func exportCounts(ex *Export) bson.M {
 	}
 }
 
+// previewSamples gives the sign-off reviewer a concrete glimpse of the
+// mapped data (first rows per entity), not just counts (MIG-011).
+func previewSamples(ex *Export) bson.M {
+	take := func(n, max int) int {
+		if n < max {
+			return n
+		}
+		return max
+	}
+	samples := bson.M{}
+	if n := take(len(ex.Contacts), 3); n > 0 {
+		v := make([]string, 0, n)
+		for _, c := range ex.Contacts[:n] {
+			v = append(v, c.Email)
+		}
+		samples["contacts"] = v
+	}
+	if n := take(len(ex.Offers), 3); n > 0 {
+		v := make([]string, 0, n)
+		for _, o := range ex.Offers[:n] {
+			v = append(v, fmt.Sprintf("%s (%d %s)", o.Title, o.AmountMinor, o.Currency))
+		}
+		samples["offers"] = v
+	}
+	if n := take(len(ex.Transactions), 3); n > 0 {
+		v := make([]string, 0, n)
+		for _, t := range ex.Transactions[:n] {
+			v = append(v, fmt.Sprintf("%s → %s (%d %s, %s)", t.Email, t.OfferRef, t.AmountMinor, t.Currency, t.Status))
+		}
+		samples["transactions"] = v
+	}
+	if n := take(len(ex.Subscriptions), 3); n > 0 {
+		v := make([]string, 0, n)
+		for _, sub := range ex.Subscriptions[:n] {
+			v = append(v, fmt.Sprintf("%s → %s (%d %s / %s)", sub.Email, sub.OfferRef, sub.AmountMinor, sub.Currency, sub.Interval))
+		}
+		samples["subscriptions"] = v
+	}
+	if n := take(len(ex.Forms), 3); n > 0 {
+		v := make([]string, 0, n)
+		for _, f := range ex.Forms[:n] {
+			v = append(v, f.Name)
+		}
+		samples["forms"] = v
+	}
+	if n := take(len(ex.Pages), 3); n > 0 {
+		v := make([]string, 0, n)
+		for _, pg := range ex.Pages[:n] {
+			v = append(v, pg.Slug)
+		}
+		samples["pages"] = v
+	}
+	return samples
+}
+
 // reconcileReport compares source counts against imported map rows.
 func reconcileReport(p *models.MigrationProject, ex *Export) bson.M {
 	imported := bson.M{}
@@ -350,7 +430,17 @@ func reconcileReport(p *models.MigrationProject, ex *Export) bson.M {
 	}
 }
 
+// piiEmail masks email local parts in error messages (MIG-013 log
+// redaction): row-level errors stay actionable via source id + row number
+// without spraying full addresses through reports and logs.
+var piiEmail = regexp.MustCompile(`([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*(@[A-Za-z0-9.-]+)`)
+
+func redactPII(msg string) string {
+	return piiEmail.ReplaceAllString(msg, "$1***$2")
+}
+
 func recordError(p *models.MigrationProject, phase, sourceType, sourceID string, row int, msg string) {
+	msg = redactPII(msg)
 	_ = db.GetCollection(models.MigrationErrorCollection).Insert(&models.MigrationError{
 		Id: bson.NewObjectId(), TenantID: p.TenantID, ProjectID: p.Id,
 		Phase: phase, SourceType: sourceType, SourceID: sourceID, Row: row,
@@ -392,9 +482,9 @@ func newRun(p *models.MigrationProject, ex *Export, dry bool) *run {
 	r := &run{
 		p: p, ex: ex, dry: dry,
 		created: map[string]int{}, matched: map[string]int{},
-		productByRef: map[string]bson.ObjectId{},
-		offerByRef:   map[string]bson.ObjectId{},
-		contactByRef: map[string]bson.ObjectId{},
+		productByRef:    map[string]bson.ObjectId{},
+		offerByRef:      map[string]bson.ObjectId{},
+		contactByRef:    map[string]bson.ObjectId{},
 		completedPhases: map[string]bool{},
 	}
 	if !dry {
@@ -878,8 +968,46 @@ func (r *run) importTransactions() {
 					}
 				}
 			}
+			// Migrated revenue is VISIBLE revenue: mirror the fact spine
+			// (PurchaseLog → RevenueFact) with source=migration so analytics
+			// can segment imported vs native income. Refunds net to zero via
+			// the paired refund fact (ANA-001 semantics).
+			r.writeMigrationRevenue(st, purchase, contactID, offerID, offer)
 		}
 		r.record(models.SourceTypeTransaction, st.SourceID, models.PurchaseCollection, purchase.Id, true)
+	}
+}
+
+// writeMigrationRevenue writes the PurchaseLog + revenue facts for one
+// imported transaction. Log identity rides StripeChargeId ("kajabi:<id>")
+// so rollback can find and remove exactly these rows.
+func (r *run) writeMigrationRevenue(st SourceTransaction, purchase *models.Purchase, contactID, offerID bson.ObjectId, offer models.Offer) {
+	var productID bson.ObjectId
+	if len(offer.IncludedProducts) > 0 {
+		productID = offer.IncludedProducts[0]
+	}
+	pl := &models.PurchaseLog{
+		Id: bson.NewObjectId(), PublicId: utils.GeneratePublicId(),
+		TenantID: r.p.TenantID, SubscriberId: r.p.TenantID.Hex(),
+		UserId: contactID, ProductId: productID, OfferID: offerID,
+		Amount: float64(st.AmountMinor) / 100.0, Currency: st.Currency,
+		StripeChargeId: "kajabi:" + st.SourceID,
+		Status:         st.Status,
+		Source:         "migration",
+	}
+	created := purchase.CreatedAt
+	if created == nil {
+		now := time.Now()
+		created = &now
+	}
+	pl.SoftDeletes.CreatedAt = created
+	if err := db.GetCollection(models.PurchaseLogCollection).Insert(pl); err != nil {
+		r.rowError(models.SourceTypeTransaction, st.SourceID, st.Row, "purchase log: "+err.Error())
+		return
+	}
+	analytics.WriteSaleFact(pl)
+	if st.Status == "refunded" {
+		analytics.WriteRefundFact(pl)
 	}
 }
 
@@ -983,6 +1111,11 @@ func (r *run) importAssets() {
 			name = "asset-" + sum[:12]
 		}
 		objectPath := fmt.Sprintf("%s/migration/%s/%s_%s", r.p.TenantID.Hex(), r.p.PublicId, sum[:16], name)
+		// DEL-018: scan the fetched bytes BEFORE they land in tenant storage.
+		if v := scan.GateBytes(r.p.TenantID, assetBucket, objectPath, "migration_asset", body); !v.Allowed {
+			r.rowError(models.SourceTypeAsset, sa.SourceID, sa.Row, "quarantined by malware scan: "+v.Reason)
+			continue
+		}
 		if _, err := assetStorage.UploadObject(assetBucket, objectPath, "application/octet-stream", bytes.NewReader(body)); err != nil {
 			r.rowError(models.SourceTypeAsset, sa.SourceID, sa.Row, "upload: "+err.Error())
 			continue

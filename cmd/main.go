@@ -29,6 +29,7 @@ import (
 	httputil "github.com/josephalai/sentanyl/pkg/http"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
+	"github.com/josephalai/sentanyl/pkg/scan"
 	"github.com/josephalai/sentanyl/pkg/storage"
 )
 
@@ -74,6 +75,7 @@ func main() {
 	// Migration control plane (MIG-001..005): source-map idempotency indexes
 	// + the durable execute job.
 	migration.EnsureIndexes()
+	scan.EnsureIndexes()
 	routes.RegisterMigrationJobs()
 	// Revenue facts projection (ANA-005): unique (tenant, log, kind).
 	analytics.EnsureIndexes()
@@ -214,6 +216,8 @@ func main() {
 	routes.RegisterEcommerceRoutes(legacyTenantAPI)
 	// Kajabi migration control plane (MIG-001..005) — owner-gated inside.
 	routes.RegisterMigrationRoutes(legacyTenantAPI)
+	// DEL-018 quarantine visibility + audited rescan/release (owner-gated inside).
+	routes.RegisterScanOpsRoutes(legacyTenantAPI)
 	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
 	routes.RegisterNewsletterTenantRoutes(legacyTenantAPI)
 	routes.RegisterInboxCloserRoutes(legacyTenantAPI)

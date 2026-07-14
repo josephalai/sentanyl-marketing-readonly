@@ -10,6 +10,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/migration"
+	"github.com/josephalai/sentanyl/pkg/audit"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/jobs"
@@ -27,6 +28,7 @@ func RegisterMigrationRoutes(rg *gin.RouterGroup) {
 		m.POST("/projects/:projectId/files/:kind", handleMigrationUpload)
 		m.POST("/projects/:projectId/validate", handleMigrationValidate)
 		m.POST("/projects/:projectId/dry-run", handleMigrationDryRun)
+		m.POST("/projects/:projectId/signoff", handleMigrationSignoff)
 		m.POST("/projects/:projectId/execute", handleMigrationExecute)
 		m.GET("/projects/:projectId/errors", handleMigrationErrors)
 		m.POST("/projects/:projectId/rollback", handleMigrationRollback)
@@ -163,6 +165,41 @@ func handleMigrationDryRun(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": p.Status, "report": report})
 }
 
+// handleMigrationSignoff records the audited MIG-011 cutover approval. Only
+// a reviewed dry-run may be signed off; execute requires it.
+func handleMigrationSignoff(c *gin.Context) {
+	p, ok := migrationProject(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Confirm bool `json:"confirm"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if !req.Confirm {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sign-off requires {\"confirm\": true} after reviewing the dry-run preview"})
+		return
+	}
+	if p.Status != pkgmodels.MigrationStatusDryRun {
+		c.JSON(http.StatusConflict, gin.H{"error": "run a dry-run first — sign-off approves its preview"})
+		return
+	}
+	now := time.Now()
+	actor := auth.GetAccountUserID(c)
+	if err := db.GetCollection(pkgmodels.MigrationProjectCollection).UpdateId(p.Id, bson.M{"$set": bson.M{
+		"status": pkgmodels.MigrationStatusSignedOff, "signed_off_by": actor,
+		"signed_off_at": now, "updated_at": now,
+	}}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record sign-off"})
+		return
+	}
+	e := audit.FromContext(c)
+	e.Action, e.Outcome = "migration.signoff", "success"
+	e.TargetType, e.TargetID = "migration_project", p.PublicId
+	audit.Record(e)
+	c.JSON(http.StatusOK, gin.H{"status": pkgmodels.MigrationStatusSignedOff})
+}
+
 func handleMigrationExecute(c *gin.Context) {
 	p, ok := migrationProject(c)
 	if !ok {
@@ -170,6 +207,12 @@ func handleMigrationExecute(c *gin.Context) {
 	}
 	if p.Status == pkgmodels.MigrationStatusImporting {
 		c.JSON(http.StatusConflict, gin.H{"error": "import already running"})
+		return
+	}
+	// MIG-011: first import of a project requires the sign-off gate. Reruns
+	// of an already-completed project (delta imports) keep their sign-off.
+	if p.Status != pkgmodels.MigrationStatusSignedOff && p.Status != pkgmodels.MigrationStatusCompleted && p.Status != pkgmodels.MigrationStatusFailed {
+		c.JSON(http.StatusConflict, gin.H{"error": "sign-off required — review the dry-run preview and POST /signoff first"})
 		return
 	}
 	job := jobs.NewJob(migrationExecuteJobType,

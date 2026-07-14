@@ -467,6 +467,9 @@ func handleServiceResourceAttach(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "object not uploaded"})
 		return
 	}
+	if !scanGateAttach(c, tenantID, req.ObjectPath, "service") {
+		return
+	}
 
 	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", downloadBucket, req.ObjectPath)
 	resource := pkgmodels.NewServiceInstanceResource(tenantID, instance.ProductID, instance.Id, intent.FileName, publicURL, req.ObjectPath, intent.ContentType, intent.SizeBytes)
@@ -802,6 +805,9 @@ func handleCustomerServiceResourceURL(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "resource missing object path"})
 		return
 	}
+	if !scanGateServe(c, tenantID, resource.ObjectPath) {
+		return
+	}
 	signed, err := downloadStorage.GenerateSignedDownloadURL(downloadBucket, resource.ObjectPath, 60*time.Second)
 	if err != nil {
 		log.Printf("services: sign GET failed: %v", err)
@@ -918,6 +924,9 @@ func handleCustomerServiceAttach(c *gin.Context) {
 	exists, err := downloadStorage.ObjectExists(downloadBucket, req.ObjectPath)
 	if err != nil || !exists {
 		c.JSON(http.StatusConflict, gin.H{"error": "object not uploaded"})
+		return
+	}
+	if !scanGateAttach(c, tenantID, req.ObjectPath, "service_intake") {
 		return
 	}
 	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", downloadBucket, req.ObjectPath)

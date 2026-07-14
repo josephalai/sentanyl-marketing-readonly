@@ -20,6 +20,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/entitlements"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/storage"
+	"github.com/josephalai/sentanyl/pkg/scan"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -266,6 +267,9 @@ func handleDownloadAttach(c *gin.Context) {
 	}
 	if !exists {
 		c.JSON(http.StatusConflict, gin.H{"error": "object not uploaded"})
+		return
+	}
+	if !scanGateAttach(c, tenantID, req.ObjectPath, "download") {
 		return
 	}
 
@@ -522,6 +526,9 @@ func handleCustomerDownloadURL(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "asset missing object path"})
 		return
 	}
+	if !scanGateServe(c, tenantID, asset.S3Key) {
+		return
+	}
 	signed, err := downloadStorage.GenerateSignedDownloadURL(downloadBucket, asset.S3Key, 60*time.Second)
 	if err != nil {
 		log.Printf("downloads: sign GET failed: %v", err)
@@ -574,6 +581,10 @@ func handleCustomerDownloadZip(c *gin.Context) {
 
 	for _, a := range assets {
 		if a.S3Key == "" {
+			continue
+		}
+		if blocked, _ := scan.Blocked(a.TenantID, a.S3Key); blocked {
+			log.Printf("downloads: zip skipping quarantined %s", a.S3Key)
 			continue
 		}
 		signed, err := downloadStorage.GenerateSignedDownloadURL(downloadBucket, a.S3Key, 5*time.Minute)
@@ -760,6 +771,10 @@ func SignProductDownloads(tenantID bson.ObjectId, productID string, ttl time.Dur
 	}
 	for _, a := range assets {
 		if a.S3Key == "" {
+			continue
+		}
+		if blocked, _ := scan.Blocked(a.TenantID, a.S3Key); blocked {
+			log.Printf("downloads: skipping quarantined %s", a.S3Key)
 			continue
 		}
 		signed, err := downloadStorage.GenerateSignedDownloadURL(downloadBucket, a.S3Key, ttl)

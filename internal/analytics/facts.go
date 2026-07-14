@@ -131,6 +131,7 @@ func writeFact(pl *models.PurchaseLog, kind string, attribute bool) {
 		ContactID:   pl.UserId,
 		OfferID:     pl.OfferID,
 		ProductID:   pl.ProductId,
+		Source:      pl.Source,
 		Synthetic:   syntheticEnv(),
 		OccurredAt:  occurred,
 		RecordedAt:  time.Now(),
