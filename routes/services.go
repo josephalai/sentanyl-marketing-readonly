@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -32,6 +33,7 @@ func RegisterServiceTenantRoutes(rg *gin.RouterGroup) {
 	rg.POST("/services/instances/:instanceId/resources/attach", handleServiceResourceAttach)
 	rg.DELETE("/services/instances/:instanceId/resources/:resourceId", handleServiceResourceDelete)
 	rg.POST("/services/instances/:instanceId/start", handleStartServiceInstance)
+	rg.POST("/services/instances/:instanceId/deliver", handleDeliverServiceInstance)
 	rg.POST("/services/instances/:instanceId/complete", handleCompleteServiceInstance)
 }
 
@@ -42,6 +44,54 @@ func RegisterServiceCustomerRoutes(rg *gin.RouterGroup) {
 	rg.GET("/services/instances/:instanceId", handleCustomerGetServiceInstance)
 	rg.POST("/services/instances/:instanceId/notes", handleCustomerCreateServiceNote)
 	rg.GET("/services/instances/:instanceId/resources/:resourceId/url", handleCustomerServiceResourceURL)
+	// FUL-015 customer lifecycle: intake (with client uploads), review outcome.
+	rg.POST("/services/instances/:instanceId/resources/upload-url", handleCustomerServiceUploadURL)
+	rg.POST("/services/instances/:instanceId/resources/attach", handleCustomerServiceAttach)
+	rg.POST("/services/instances/:instanceId/intake", handleCustomerServiceIntake)
+	rg.POST("/services/instances/:instanceId/request-revision", handleCustomerRequestRevision)
+	rg.POST("/services/instances/:instanceId/accept", handleCustomerAcceptDelivery)
+}
+
+// transitionServiceInstance is the FUL-003-style CAS transition: the update
+// applies only while the instance is still in one of the `from` states, so
+// concurrent/replayed transitions settle deterministically (loser gets
+// mgo.ErrNotFound → 409 at the handlers).
+func transitionServiceInstance(tenantID, instanceID bson.ObjectId, from []string, set bson.M) (*pkgmodels.ServiceInstance, error) {
+	set["timestamps.updated_at"] = time.Now()
+	if err := db.GetCollection(pkgmodels.ServiceInstanceCollection).Update(bson.M{
+		"_id":       instanceID,
+		"tenant_id": tenantID,
+		"status":    bson.M{"$in": from},
+	}, bson.M{"$set": set}); err != nil {
+		return nil, err
+	}
+	var i pkgmodels.ServiceInstance
+	if err := db.GetCollection(pkgmodels.ServiceInstanceCollection).FindId(instanceID).One(&i); err != nil {
+		return nil, err
+	}
+	return &i, nil
+}
+
+// serviceActiveStates are every non-terminal instance status — the set a
+// tenant force-complete may transition from.
+var serviceActiveStates = []string{
+	pkgmodels.ServiceInstanceStatusAwaitingIntake,
+	pkgmodels.ServiceInstanceStatusPending,
+	pkgmodels.ServiceInstanceStatusInProgress,
+	pkgmodels.ServiceInstanceStatusDelivered,
+	pkgmodels.ServiceInstanceStatusRevisionRequested,
+}
+
+// serviceProductConfig loads the ServiceConfig for an instance's product.
+// Returns an empty config when the product row is missing it (legacy).
+func serviceProductConfig(tenantID, productID bson.ObjectId) *pkgmodels.ServiceConfig {
+	var product pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"_id": productID, "tenant_id": tenantID,
+	}).One(&product); err != nil || product.Service == nil {
+		return &pkgmodels.ServiceConfig{}
+	}
+	return product.Service
 }
 
 // --- Tenant: program clients ---
@@ -481,18 +531,81 @@ func handleStartServiceInstance(c *gin.Context) {
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
-	now := time.Now()
-	if err := db.GetCollection(pkgmodels.ServiceInstanceCollection).Update(
-		bson.M{"_id": instance.Id, "tenant_id": tenantID},
-		bson.M{"$set": bson.M{
-			"status":     pkgmodels.ServiceInstanceStatusInProgress,
-			"started_at": now,
-		}},
-	); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start"})
+	// Tenants may also start straight from revision_requested (rework) or
+	// awaiting_intake (fulfilling without waiting on the customer's intake).
+	if _, err := transitionServiceInstance(tenantID, instance.Id, []string{
+		pkgmodels.ServiceInstanceStatusAwaitingIntake,
+		pkgmodels.ServiceInstanceStatusPending,
+		pkgmodels.ServiceInstanceStatusRevisionRequested,
+	}, bson.M{
+		"status":     pkgmodels.ServiceInstanceStatusInProgress,
+		"started_at": time.Now(),
+	}); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "instance is not startable from its current state"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "in_progress"})
+}
+
+// handleDeliverServiceInstance publishes the current work-product as a
+// deliverable version and hands the instance to the customer for review
+// (FUL-015). Unversioned tenant deliverable resources get stamped with the
+// new version number; delivering again after a revision request bumps it.
+func handleDeliverServiceInstance(c *gin.Context) {
+	tenantID := auth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	instance, status, msg := loadOwnedInstance(tenantID, c.Param("instanceId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	version := instance.DeliveredVersion + 1
+	now := time.Now()
+	updated, err := transitionServiceInstance(tenantID, instance.Id, []string{
+		pkgmodels.ServiceInstanceStatusPending,
+		pkgmodels.ServiceInstanceStatusInProgress,
+		pkgmodels.ServiceInstanceStatusRevisionRequested,
+	}, bson.M{
+		"status":            pkgmodels.ServiceInstanceStatusDelivered,
+		"delivered_version": version,
+		"delivered_at":      now,
+	})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "instance is not deliverable from its current state"})
+		return
+	}
+
+	// Stamp every unversioned tenant deliverable with this version so the
+	// customer sees exactly which files belong to v<N>.
+	if _, err := db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).UpdateAll(bson.M{
+		"tenant_id":             tenantID,
+		"instance_id":           instance.Id,
+		"uploaded_by":           "tenant",
+		"version":               bson.M{"$in": []interface{}{0, nil}},
+		"timestamps.deleted_at": nil,
+	}, bson.M{"$set": bson.M{"version": version, "kind": pkgmodels.ServiceResourceKindDeliverable}}); err != nil {
+		log.Printf("services: stamp deliverable version failed: %v", err)
+	}
+
+	if req.Note != "" {
+		note := pkgmodels.ServiceNote{
+			Id: bson.NewObjectId(), TenantID: tenantID, InstanceID: instance.Id,
+			ContactID: instance.ContactID, AuthoredBy: pkgmodels.ServiceNoteAuthorTenant,
+			Visibility: pkgmodels.ServiceNoteVisibilityShared, Body: req.Note,
+		}
+		_ = db.GetCollection(pkgmodels.ServiceNoteCollection).Insert(&note)
+	}
+
+	go emitServiceEvent(tenantID, "service.deliverable.delivered", updated, gin.H{"version": version})
+	c.JSON(http.StatusOK, gin.H{"status": "delivered", "version": version})
 }
 
 func handleCompleteServiceInstance(c *gin.Context) {
@@ -510,41 +623,40 @@ func handleCompleteServiceInstance(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "already_completed"})
 		return
 	}
-	now := time.Now()
-	if err := db.GetCollection(pkgmodels.ServiceInstanceCollection).Update(
-		bson.M{"_id": instance.Id, "tenant_id": tenantID},
-		bson.M{"$set": bson.M{
-			"status":       pkgmodels.ServiceInstanceStatusCompleted,
-			"completed_at": now,
-		}},
-	); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to complete"})
+	if _, err := transitionServiceInstance(tenantID, instance.Id, serviceActiveStates, bson.M{
+		"status":       pkgmodels.ServiceInstanceStatusCompleted,
+		"completed_at": time.Now(),
+	}); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "instance already completed"})
 		return
 	}
+	doneCount := recomputeEnrollmentDone(tenantID, instance.EnrollmentID)
+	c.JSON(http.StatusOK, gin.H{"status": "completed", "instances_done": doneCount})
+}
 
-	// Bump the parent enrollment's instances_done; if we just finished the
-	// last instance, stamp the enrollment CompletedAt so the customer
-	// dashboard can render the "all done" state and downstream automations
-	// can fire on a single signal.
+// recomputeEnrollmentDone bumps the parent enrollment's instances_done; if
+// the last instance just finished, it stamps CompletedAt so the customer
+// dashboard renders the "all done" state and downstream automations fire on
+// a single signal.
+func recomputeEnrollmentDone(tenantID, enrollmentID bson.ObjectId) int {
 	doneCount, _ := db.GetCollection(pkgmodels.ServiceInstanceCollection).Find(bson.M{
-		"enrollment_id": instance.EnrollmentID,
+		"enrollment_id": enrollmentID,
 		"tenant_id":     tenantID,
 		"status":        pkgmodels.ServiceInstanceStatusCompleted,
 	}).Count()
 
 	enrollUpdate := bson.M{"instances_done": doneCount}
 	var enroll pkgmodels.ServiceEnrollment
-	if err := db.GetCollection(pkgmodels.ServiceEnrollmentCollection).FindId(instance.EnrollmentID).One(&enroll); err == nil {
+	if err := db.GetCollection(pkgmodels.ServiceEnrollmentCollection).FindId(enrollmentID).One(&enroll); err == nil {
 		if doneCount >= enroll.InstancesTotal && enroll.CompletedAt == nil {
-			enrollUpdate["completed_at"] = now
+			enrollUpdate["completed_at"] = time.Now()
 		}
 	}
 	_ = db.GetCollection(pkgmodels.ServiceEnrollmentCollection).Update(
-		bson.M{"_id": instance.EnrollmentID, "tenant_id": tenantID},
+		bson.M{"_id": enrollmentID, "tenant_id": tenantID},
 		bson.M{"$set": enrollUpdate},
 	)
-
-	c.JSON(http.StatusOK, gin.H{"status": "completed", "instances_done": doneCount})
+	return doneCount
 }
 
 // --- Customer: dashboard + instance + notes + resource URL ---
@@ -614,10 +726,13 @@ func handleCustomerGetServiceInstance(c *gin.Context) {
 	}
 	notes := loadNotesForInstance(tenantID, instance.Id, false)
 	resources := loadResourcesForInstance(tenantID, instance.Id)
+	cfg := serviceProductConfig(tenantID, instance.ProductID)
 	c.JSON(http.StatusOK, gin.H{
-		"instance":  instance,
-		"notes":     notes,
-		"resources": resources,
+		"instance":          instance,
+		"notes":             notes,
+		"resources":         resources,
+		"intake_questions":  cfg.IntakeQuestions,
+		"revisions_allowed": cfg.RevisionsAllowed,
 	})
 }
 
@@ -702,6 +817,295 @@ func handleCustomerServiceResourceURL(c *gin.Context) {
 	})
 }
 
+// --- Customer: FUL-015 lifecycle (intake, review outcome) ---
+
+// handleCustomerServiceUploadURL mirrors the tenant upload-url flow for
+// customer intake files: same UploadIntent + path-prefix defenses, scoped to
+// the customer's own instance.
+func handleCustomerServiceUploadURL(c *gin.Context) {
+	if downloadStorage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "storage not configured"})
+		return
+	}
+	tenantID, contactID, ok := requireCustomer(c)
+	if !ok {
+		return
+	}
+	instance, status, msg := loadInstanceForCustomer(tenantID, contactID, c.Param("instanceId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var req struct {
+		FileName    string `json:"file_name" binding:"required"`
+		ContentType string `json:"content_type" binding:"required"`
+		SizeBytes   int64  `json:"size_bytes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_name and content_type are required"})
+		return
+	}
+	if !allowedDownloadMime[req.ContentType] {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "file type not allowed"})
+		return
+	}
+	objectPath := fmt.Sprintf("%s/services/%s/instances/%s/intake_%s_%s",
+		tenantID.Hex(), instance.ProductID.Hex(), instance.PublicId,
+		utils.GeneratePublicId(), safeFileName(req.FileName))
+	signed, err := downloadStorage.GenerateUploadURL(downloadBucket, objectPath, req.ContentType)
+	if err != nil {
+		log.Printf("services: customer signed upload URL failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue upload URL"})
+		return
+	}
+	intent := pkgmodels.NewUploadIntent(tenantID, instance.ProductID, objectPath, safeFileName(req.FileName), req.ContentType, req.SizeBytes)
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Insert(intent); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue upload URL"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"upload_url": signed, "object_path": objectPath,
+		"bucket": downloadBucket, "content_type": req.ContentType,
+	})
+}
+
+// handleCustomerServiceAttach finalizes a customer intake upload — same
+// UploadIntent/prefix/ObjectExists gate as the tenant attach, recorded with
+// UploadedBy=client + Kind=intake.
+func handleCustomerServiceAttach(c *gin.Context) {
+	if downloadStorage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "storage not configured"})
+		return
+	}
+	tenantID, contactID, ok := requireCustomer(c)
+	if !ok {
+		return
+	}
+	instance, status, msg := loadInstanceForCustomer(tenantID, contactID, c.Param("instanceId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var req struct {
+		FileName   string `json:"file_name" binding:"required"`
+		ObjectPath string `json:"object_path" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_name and object_path are required"})
+		return
+	}
+	if !strings.HasPrefix(req.ObjectPath, serviceObjectPathPrefix(tenantID, instance)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "object path not issued for this instance"})
+		return
+	}
+	var existing pkgmodels.ServiceInstanceResource
+	if err := db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).Find(bson.M{
+		"tenant_id": tenantID, "instance_id": instance.Id,
+		"object_path": req.ObjectPath, "timestamps.deleted_at": nil,
+	}).One(&existing); err == nil {
+		c.JSON(http.StatusOK, existing)
+		return
+	}
+	var intent pkgmodels.UploadIntent
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Find(bson.M{
+		"tenant_id": tenantID, "product_id": instance.ProductID,
+		"object_path": req.ObjectPath, "status": pkgmodels.UploadIntentStatusPending,
+		"expires_at": bson.M{"$gt": time.Now()},
+	}).One(&intent); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "object path not issued for this instance"})
+		return
+	}
+	exists, err := downloadStorage.ObjectExists(downloadBucket, req.ObjectPath)
+	if err != nil || !exists {
+		c.JSON(http.StatusConflict, gin.H{"error": "object not uploaded"})
+		return
+	}
+	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", downloadBucket, req.ObjectPath)
+	resource := pkgmodels.NewServiceInstanceResource(tenantID, instance.ProductID, instance.Id, intent.FileName, publicURL, req.ObjectPath, intent.ContentType, intent.SizeBytes)
+	resource.UploadedBy = "client"
+	resource.Kind = pkgmodels.ServiceResourceKindIntake
+	if err := db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).Insert(resource); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save resource"})
+		return
+	}
+	_ = db.GetCollection(pkgmodels.UploadIntentCollection).Update(
+		bson.M{"_id": intent.Id},
+		bson.M{"$set": bson.M{"status": pkgmodels.UploadIntentStatusAttached}},
+	)
+	c.JSON(http.StatusCreated, resource)
+}
+
+// handleCustomerServiceIntake records the customer's intake answers and moves
+// awaiting_intake → pending so the tenant can begin fulfillment (FUL-015).
+func handleCustomerServiceIntake(c *gin.Context) {
+	tenantID, contactID, ok := requireCustomer(c)
+	if !ok {
+		return
+	}
+	instance, status, msg := loadInstanceForCustomer(tenantID, contactID, c.Param("instanceId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var req struct {
+		Answers []struct {
+			QuestionID string `json:"question_id"`
+			Text       string `json:"text"`
+			ResourceID string `json:"resource_id"`
+		} `json:"answers"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "answers required"})
+		return
+	}
+
+	cfg := serviceProductConfig(tenantID, instance.ProductID)
+	answered := map[string]bool{}
+	answers := make([]*pkgmodels.ServiceIntakeAnswer, 0, len(req.Answers))
+	for _, a := range req.Answers {
+		if !bson.IsObjectIdHex(a.QuestionID) {
+			continue
+		}
+		ans := &pkgmodels.ServiceIntakeAnswer{
+			QuestionID: bson.ObjectIdHex(a.QuestionID),
+			Text:       a.Text,
+		}
+		if a.ResourceID != "" && bson.IsObjectIdHex(a.ResourceID) {
+			// The referenced upload must be this customer's intake file on
+			// this instance — no cross-instance/tenant references.
+			n, _ := db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).Find(bson.M{
+				"_id": bson.ObjectIdHex(a.ResourceID), "tenant_id": tenantID,
+				"instance_id": instance.Id, "uploaded_by": "client",
+				"timestamps.deleted_at": nil,
+			}).Count()
+			if n == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "resource_id is not an intake upload on this instance"})
+				return
+			}
+			ans.ResourceID = bson.ObjectIdHex(a.ResourceID)
+		}
+		for _, q := range cfg.IntakeQuestions {
+			if q.Id == ans.QuestionID {
+				ans.Prompt = q.Prompt
+			}
+		}
+		if ans.Text != "" || ans.ResourceID != "" {
+			answered[ans.QuestionID.Hex()] = true
+		}
+		answers = append(answers, ans)
+	}
+	for _, q := range cfg.IntakeQuestions {
+		if q.Required && !answered[q.Id.Hex()] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("required intake question unanswered: %s", q.Prompt)})
+			return
+		}
+	}
+
+	updated, err := transitionServiceInstance(tenantID, instance.Id,
+		[]string{pkgmodels.ServiceInstanceStatusAwaitingIntake}, bson.M{
+			"status":              pkgmodels.ServiceInstanceStatusPending,
+			"intake_answers":      answers,
+			"intake_submitted_at": time.Now(),
+		})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "intake already submitted or instance not awaiting intake"})
+		return
+	}
+	go emitServiceEvent(tenantID, "service.intake.submitted", updated, nil)
+	c.JSON(http.StatusOK, gin.H{"status": "pending"})
+}
+
+// handleCustomerRequestRevision moves delivered → revision_requested, bounded
+// by the product's RevisionsAllowed (0 = unlimited).
+func handleCustomerRequestRevision(c *gin.Context) {
+	tenantID, contactID, ok := requireCustomer(c)
+	if !ok {
+		return
+	}
+	instance, status, msg := loadInstanceForCustomer(tenantID, contactID, c.Param("instanceId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var req struct {
+		Note string `json:"note" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "note is required — tell the provider what to change"})
+		return
+	}
+	cfg := serviceProductConfig(tenantID, instance.ProductID)
+	if cfg.RevisionsAllowed > 0 && instance.RevisionsUsed >= cfg.RevisionsAllowed {
+		c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("revision limit reached (%d allowed)", cfg.RevisionsAllowed)})
+		return
+	}
+
+	updated, err := transitionServiceInstance(tenantID, instance.Id,
+		[]string{pkgmodels.ServiceInstanceStatusDelivered}, bson.M{
+			"status":         pkgmodels.ServiceInstanceStatusRevisionRequested,
+			"revisions_used": instance.RevisionsUsed + 1,
+			"revision_note":  req.Note,
+		})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "nothing delivered to revise"})
+		return
+	}
+	note := pkgmodels.ServiceNote{
+		Id: bson.NewObjectId(), TenantID: tenantID, InstanceID: instance.Id,
+		ContactID: contactID, AuthoredBy: pkgmodels.ServiceNoteAuthorClient,
+		Visibility: pkgmodels.ServiceNoteVisibilityShared, Body: "Revision requested: " + req.Note,
+	}
+	_ = db.GetCollection(pkgmodels.ServiceNoteCollection).Insert(&note)
+
+	go emitServiceEvent(tenantID, "service.revision.requested", updated, gin.H{"revisions_used": updated.RevisionsUsed})
+	c.JSON(http.StatusOK, gin.H{"status": "revision_requested", "revisions_used": updated.RevisionsUsed})
+}
+
+// handleCustomerAcceptDelivery moves delivered → completed on the customer's
+// approval and recomputes the enrollment counters.
+func handleCustomerAcceptDelivery(c *gin.Context) {
+	tenantID, contactID, ok := requireCustomer(c)
+	if !ok {
+		return
+	}
+	instance, status, msg := loadInstanceForCustomer(tenantID, contactID, c.Param("instanceId"))
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	now := time.Now()
+	updated, err := transitionServiceInstance(tenantID, instance.Id,
+		[]string{pkgmodels.ServiceInstanceStatusDelivered}, bson.M{
+			"status":       pkgmodels.ServiceInstanceStatusCompleted,
+			"accepted_at":  now,
+			"completed_at": now,
+		})
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "nothing delivered to accept"})
+		return
+	}
+	doneCount := recomputeEnrollmentDone(tenantID, instance.EnrollmentID)
+	go emitServiceEvent(tenantID, "service.deliverable.accepted", updated, gin.H{"version": updated.DeliveredVersion})
+	c.JSON(http.StatusOK, gin.H{"status": "completed", "instances_done": doneCount})
+}
+
+// emitServiceEvent publishes a FUL-015 lifecycle event on the signed outbound
+// webhook channel (same mechanism as purchase.completed).
+func emitServiceEvent(tenantID bson.ObjectId, eventType string, i *pkgmodels.ServiceInstance, extra gin.H) {
+	data := map[string]interface{}{
+		"instance_public_id": i.PublicId,
+		"product_id":         i.ProductID.Hex(),
+		"contact_id":         i.ContactID.Hex(),
+		"status":             i.Status,
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	if err := webhooks.Emit(tenantID, eventType, data); err != nil {
+		log.Printf("services: emit %s failed: %v", eventType, err)
+	}
+}
+
 // --- Helpers ---
 
 func loadOwnedEnrollment(tenantID bson.ObjectId, idParam string) (*pkgmodels.ServiceEnrollment, int, string) {
@@ -769,13 +1173,13 @@ func loadNotesForInstance(tenantID, instanceID bson.ObjectId, tenantView bool) [
 	if !tenantView {
 		q["visibility"] = pkgmodels.ServiceNoteVisibilityShared
 	}
-	var notes []pkgmodels.ServiceNote
+	notes := []pkgmodels.ServiceNote{}
 	_ = db.GetCollection(pkgmodels.ServiceNoteCollection).Find(q).All(&notes)
 	return notes
 }
 
 func loadResourcesForInstance(tenantID, instanceID bson.ObjectId) []pkgmodels.ServiceInstanceResource {
-	var resources []pkgmodels.ServiceInstanceResource
+	resources := []pkgmodels.ServiceInstanceResource{}
 	_ = db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).Find(bson.M{
 		"tenant_id":             tenantID,
 		"instance_id":           instanceID,

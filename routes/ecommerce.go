@@ -252,6 +252,11 @@ func handleTenantUpdateProduct(c *gin.Context) {
 				t.Id = bson.NewObjectId()
 			}
 		}
+		for _, q := range req.Service.IntakeQuestions {
+			if !q.Id.Valid() {
+				q.Id = bson.NewObjectId()
+			}
+		}
 		update["service"] = req.Service
 	}
 	if req.Downloads != nil {

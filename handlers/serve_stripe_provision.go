@@ -107,6 +107,11 @@ func provisionServiceEnrollment(tenantID, contactID bson.ObjectId, product *pkgm
 				continue
 			}
 			inst := pkgmodels.NewServiceInstance(tenantID, product.Id, enrollment.Id, contactID, tmpl.Id, tmpl.Order, tmpl.Title)
+			if len(product.Service.IntakeQuestions) > 0 {
+				// FUL-015: products with intake questions hold fulfillment
+				// until the customer submits their intake.
+				inst.Status = pkgmodels.ServiceInstanceStatusAwaitingIntake
+			}
 			inst.SoftDeletes.CreatedAt = &now
 			if _, uerr := instCol.Upsert(bson.M{
 				"enrollment_id":        enrollment.Id,
