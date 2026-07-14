@@ -45,7 +45,10 @@ type publicFormRequest struct {
 	Message string            `json:"message" form:"message"`
 	FormID  string            `json:"form_id" form:"form_id"`
 	NextURL string            `json:"next_url" form:"next_url"`
-	Fields  map[string]string `json:"fields" form:"-"`
+	// HoneypotField ("website") must stay empty — a real user never sees or
+	// fills it; a bot that auto-fills every field trips it (ACQ-009).
+	HoneypotField string           `json:"website" form:"website"`
+	Fields        map[string]string `json:"fields" form:"-"`
 	// VideoSessionID is set by the sentanyl-video.js fetch shim when the
 	// form lives on a page with an active video session. It propagates
 	// from form submit → MediaLeadCapture row + (when an offer is also
@@ -159,12 +162,24 @@ func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID stri
 		return
 	}
 
+	// ACQ-009 spam protection: a filled honeypot means a bot. Ack with 200 so
+	// the bot can't distinguish acceptance from rejection, but do nothing.
+	if strings.TrimSpace(req.HoneypotField) != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+
 	values := mergeFormValues(req)
 	if missing := validateRequiredFields(&form, values); len(missing) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":          "missing required fields",
 			"missing_fields": missing,
 		})
+		return
+	}
+	// ACQ-006: format-validate an email field when present.
+	if em := strings.TrimSpace(values["email"]); em != "" && !looksLikeEmail(em) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid email address"})
 		return
 	}
 
@@ -201,6 +216,17 @@ func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID stri
 		"offer_attached":    result.OfferAttached,
 		"warnings":          result.Warnings,
 	})
+}
+
+// looksLikeEmail is a cheap RFC-shaped sanity check (not full RFC 5322):
+// exactly one @, a dotted domain, no spaces (ACQ-006).
+func looksLikeEmail(s string) bool {
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at != strings.LastIndexByte(s, '@') || strings.ContainsAny(s, " \t\r\n") {
+		return false
+	}
+	domain := s[at+1:]
+	return strings.Contains(domain, ".") && !strings.HasPrefix(domain, ".") && !strings.HasSuffix(domain, ".")
 }
 
 // mergeFormValues collapses the flat name/email/phone/message fields and the
