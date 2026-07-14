@@ -12,6 +12,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/marketing-service/internal/channel"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
+	"github.com/josephalai/sentanyl/marketing-service/internal/migration"
 	"github.com/josephalai/sentanyl/marketing-service/internal/scheduler"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
@@ -66,6 +67,10 @@ func main() {
 	// AI executions are ledgered from the inbox/site AI paths (AI-001).
 	auth.EnsurePrincipalIndexes()
 	aigov.EnsureIndexes()
+	// Migration control plane (MIG-001..005): source-map idempotency indexes
+	// + the durable execute job.
+	migration.EnsureIndexes()
+	routes.RegisterMigrationJobs()
 	webhooks.RegisterHandlers()
 	routes.RegisterStoryStartJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
@@ -108,6 +113,7 @@ func main() {
 		log.Printf("marketing-service: GCS init failed (downloads will return 503): %v", err)
 	} else {
 		routes.SetDownloadsStorage(p, gcsBucket)
+		migration.SetAssetStorage(p, gcsBucket)
 		defer p.Close()
 	}
 
@@ -176,6 +182,8 @@ func main() {
 	legacyTenantAPI := r.Group("/api/tenant")
 	legacyTenantAPI.Use(auth.RequireTenantAuth(), auth.RequirePlatformSubscription())
 	routes.RegisterEcommerceRoutes(legacyTenantAPI)
+	// Kajabi migration control plane (MIG-001..005) — owner-gated inside.
+	routes.RegisterMigrationRoutes(legacyTenantAPI)
 	routes.RegisterLegacyTenantFunnelRoutes(legacyTenantAPI)
 	routes.RegisterNewsletterTenantRoutes(legacyTenantAPI)
 	routes.RegisterInboxCloserRoutes(legacyTenantAPI)
