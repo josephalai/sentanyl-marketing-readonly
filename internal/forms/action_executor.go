@@ -523,7 +523,12 @@ func startStory(tenantID bson.ObjectId, contactPublicID, storyPublicID string) (
 	if err := db.GetCollection(pkgmodels.StoryCollection).Find(q).One(&story); err != nil {
 		return "", false
 	}
-	go routes.TriggerStoryStart(story.Name, "", contactPublicID)
+	// ACQ-003: durable story-start command (retried, dead-lettered) instead
+	// of a fire-and-forget goroutine.
+	if err := routes.EnqueueStoryStart(tenantID.Hex(), story.Name, contactPublicID); err != nil {
+		log.Printf("forms.executor: enqueue story start failed: %v", err)
+		return "", false
+	}
 	return story.Name, true
 }
 
@@ -555,6 +560,24 @@ func grantProductAccess(tenantID bson.ObjectId, contact *pkgmodels.User, product
 	if err := db.GetCollection(pkgmodels.PurchaseLogCollection).Insert(logEntry); err != nil {
 		log.Printf("forms.executor: grantProductAccess insert failed: %v", err)
 		return false
+	}
+	// ACQ-005: the durable entitlement is an explicit AccessGrant (the same
+	// authority the library/authorization layer consults — survives the
+	// ACCESS_GRANTS_ONLY flip), not just the attribution PurchaseLog above.
+	// Idempotent per (tenant, contact, product, source).
+	grants := db.GetCollection(pkgmodels.AccessGrantCollection)
+	n, _ := grants.Find(bson.M{
+		"tenant_id":  tenantID,
+		"contact_id": contact.Id,
+		"product_id": product.Id,
+		"source":     "form_grant",
+		"status":     pkgmodels.GrantStatusActive,
+	}).Count()
+	if n == 0 {
+		grant := pkgmodels.NewAccessGrant(tenantID, contact.Id, product.Id, "", "", "form_grant")
+		if err := grants.Insert(grant); err != nil {
+			log.Printf("forms.executor: grantProductAccess grant insert failed: %v", err)
+		}
 	}
 	return true
 }

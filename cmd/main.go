@@ -62,6 +62,7 @@ func main() {
 	// outbound webhook delivery (WH-003) and future durable workloads.
 	jobs.EnsureIndexes()
 	webhooks.RegisterHandlers()
+	routes.RegisterStoryStartJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
 
 	// Ensure MongoDB indexes for frontend channels (coded websites, etc).

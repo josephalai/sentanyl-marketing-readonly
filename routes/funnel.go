@@ -2,7 +2,9 @@ package routes
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +15,7 @@ import (
 
 	pkgauth "github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
@@ -21,49 +24,64 @@ import (
 // Runs in a goroutine — fire and forget. Exported so other packages
 // (e.g. marketing-service/internal/forms) can reuse the same dispatch path
 // rather than duplicating the subscriber-id lookup logic.
-func TriggerStoryStart(storyName, funnelId, userPublicId string) {
-	triggerStoryStart(storyName, funnelId, userPublicId)
+// Story dispatch (ACQ-003): starting a story is a durable job, not a
+// fire-and-forget goroutine — the enqueue is acknowledged only after the
+// command is persisted, and the job kernel retries/dead-letters the
+// core-service call. Lookups are tenant-scoped by the caller.
+const storyStartJobType = "story.start"
+
+// RegisterStoryStartJob binds the story.start handler. Call at startup after
+// the jobs worker is configured.
+func RegisterStoryStartJob() {
+	jobs.Register(storyStartJobType, func(ctx context.Context, job *jobs.Job) error {
+		storyName, _ := job.Payload["story_name"].(string)
+		subscriberID, _ := job.Payload["subscriber_id"].(string)
+		userPublicID, _ := job.Payload["user_public_id"].(string)
+		if storyName == "" || subscriberID == "" || userPublicID == "" {
+			return fmt.Errorf("story.start: incomplete payload %v", job.Payload)
+		}
+		coreURL := os.Getenv("CORE_SERVICE_URL")
+		if coreURL == "" {
+			coreURL = "http://core-service:8081"
+		}
+		payload, _ := json.Marshal(map[string]string{
+			"story_name":     storyName,
+			"subscriber_id":  subscriberID,
+			"user_public_id": userPublicID,
+		})
+		req, err := http.NewRequest(http.MethodPost, coreURL+"/internal/story/start", bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		pkgauth.AttachServiceAuth(req, "marketing") // API-001 signed service identity
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("story.start call: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return fmt.Errorf("story.start returned %d", resp.StatusCode)
+		}
+		log.Printf("story.start: story=%q user=%s tenant=%s → HTTP %d", storyName, userPublicID, subscriberID, resp.StatusCode)
+		return nil
+	})
 }
 
-// triggerStoryStart calls core-service to start executing a story for a user.
-// Runs in a goroutine — fire and forget.
-func triggerStoryStart(storyName, funnelId, userPublicId string) {
-	// Look up subscriber_id from the user record.
-	var user pkgmodels.User
-	subscriberId := ""
-	if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{"public_id": userPublicId}).One(&user); err == nil {
-		subscriberId = user.SubscriberId
+// EnqueueStoryStart persists a durable story-start command for a
+// tenant-resolved contact. Bursts within the same minute collapse via the
+// idempotency key (StartStoryForUser also supersedes duplicate sessions).
+func EnqueueStoryStart(subscriberID, storyName, userPublicID string) error {
+	key := fmt.Sprintf("%s:%s:%s:%d", subscriberID, storyName, userPublicID, time.Now().Unix()/60)
+	env := jobs.Envelope{Actor: "funnel", Subject: "story:" + storyName, Version: 1}
+	if bson.IsObjectIdHex(subscriberID) {
+		env.TenantID = bson.ObjectIdHex(subscriberID)
 	}
-	if subscriberId == "" {
-		// Fall back: try to get subscriber_id from a funnel if funnelId is set.
-		if funnelId != "" {
-			var funnel pkgmodels.Funnel
-			if err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{"public_id": funnelId}).One(&funnel); err == nil {
-				subscriberId = funnel.SubscriberId
-			}
-		}
-	}
-	if subscriberId == "" {
-		log.Printf("triggerStoryStart: no subscriber_id for user %s, story=%s", userPublicId, storyName)
-		return
-	}
-
-	coreURL := os.Getenv("CORE_SERVICE_URL")
-	if coreURL == "" {
-		coreURL = "http://core-service:8081"
-	}
-	payload, _ := json.Marshal(map[string]string{
+	return jobs.Enqueue(jobs.NewJob(storyStartJobType, key, env, bson.M{
 		"story_name":     storyName,
-		"subscriber_id":  subscriberId,
-		"user_public_id": userPublicId,
-	})
-	resp, err := http.Post(coreURL+"/internal/story/start", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("triggerStoryStart: error calling core-service: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	log.Printf("triggerStoryStart: story=%q user=%s → HTTP %d", storyName, userPublicId, resp.StatusCode)
+		"subscriber_id":  subscriberID,
+		"user_public_id": userPublicID,
+	}))
 }
 
 // RegisterLegacyTenantFunnelRoutes wires the funnels list under /api/tenant/*
@@ -395,25 +413,32 @@ func handleFunnelEvent(c *gin.Context) {
 		return
 	}
 
-	// Stages are embedded inside Funnel → Routes → Stages; not in a separate collection.
-	// Search funnels for the matching stage by public_id (falling back to a funnel_id hint).
-	var stage *pkgmodels.FunnelStage
-	funnelQuery := bson.M{"timestamps.deleted_at": nil}
-	if req.FunnelId != "" {
-		funnelQuery["public_id"] = req.FunnelId
+	// ACQ-001: the event must carry a tenant-resolvable funnel identity —
+	// never search all tenants' funnels for a matching stage. The funnel row
+	// is the tenant anchor; the stage must belong to THAT funnel, and the
+	// acting user must belong to the same tenant.
+	if req.FunnelId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "funnel_id is required"})
+		return
 	}
-	var funnels []pkgmodels.Funnel
-	db.GetCollection(pkgmodels.FunnelCollection).Find(funnelQuery).All(&funnels)
-	for fi := range funnels {
-		for ri := range funnels[fi].Routes {
-			for si := range funnels[fi].Routes[ri].Stages {
-				s := funnels[fi].Routes[ri].Stages[si]
-				if s != nil && (req.StageId == "" || s.PublicId == req.StageId || s.Path == req.StageId) {
-					stage = s
-					break
-				}
-			}
-			if stage != nil {
+	var funnel pkgmodels.Funnel
+	if err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
+		"public_id":             req.FunnelId,
+		"timestamps.deleted_at": nil,
+	}).One(&funnel); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "funnel not found"})
+		return
+	}
+	tenantHex := funnel.SubscriberId
+	if funnel.TenantID.Valid() {
+		tenantHex = funnel.TenantID.Hex()
+	}
+	var stage *pkgmodels.FunnelStage
+	for ri := range funnel.Routes {
+		for si := range funnel.Routes[ri].Stages {
+			s := funnel.Routes[ri].Stages[si]
+			if s != nil && (req.StageId == "" || s.PublicId == req.StageId || s.Path == req.StageId) {
+				stage = s
 				break
 			}
 		}
@@ -424,6 +449,21 @@ func handleFunnelEvent(c *gin.Context) {
 	if stage == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "stage not found"})
 		return
+	}
+	// The acting user must exist inside the funnel's tenant — a user public
+	// id from another tenant is rejected, not silently acted on.
+	if req.UserId != "" {
+		n, _ := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+			"public_id": req.UserId,
+			"$or": []bson.M{
+				{"subscriber_id": tenantHex},
+				{"tenant_id": bson.ObjectIdHex(tenantHex)},
+			},
+		}).Count()
+		if n == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
 	}
 
 	var triggerType string
@@ -456,7 +496,7 @@ func handleFunnelEvent(c *gin.Context) {
 				}
 			}
 			if trigger.DoAction != nil {
-				actionResult := executeFunnelAction(trigger.DoAction, req.UserId, req.FunnelId)
+				actionResult := executeFunnelAction(tenantHex, trigger.DoAction, req.UserId, req.FunnelId)
 				commands = append(commands, actionResult...)
 			}
 		}
@@ -469,13 +509,22 @@ func handleFunnelEvent(c *gin.Context) {
 	})
 }
 
-func executeFunnelAction(action *pkgmodels.Action, userId string, funnelId string) []gin.H {
+func executeFunnelAction(tenantHex string, action *pkgmodels.Action, userId string, funnelId string) []gin.H {
 	var commands []gin.H
-	if action == nil {
+	if action == nil || tenantHex == "" {
 		return commands
 	}
 
-	log.Printf("executeFunnelAction: action=%s extraActions=%v userId=%q", action.ActionName, action.ExtraActions, userId)
+	log.Printf("executeFunnelAction: action=%s extraActions=%v userId=%q tenant=%s", action.ActionName, action.ExtraActions, userId, tenantHex)
+
+	// ACQ-002: every badge/user mutation is scoped to the funnel's resolved
+	// tenant. Badge and EmailList rows vary between tenant_id (ObjectId) and
+	// subscriber_id (string) generations, so both keys are matched — but
+	// always bound to THIS tenant.
+	tenantScope := []bson.M{{"subscriber_id": tenantHex}}
+	if bson.IsObjectIdHex(tenantHex) {
+		tenantScope = append(tenantScope, bson.M{"tenant_id": bson.ObjectIdHex(tenantHex)})
+	}
 
 	// parseColonCmd splits "type:value" into ("type", "value").
 	// If there is no colon the value is empty.
@@ -490,22 +539,22 @@ func executeFunnelAction(action *pkgmodels.Action, userId string, funnelId strin
 
 	applyBadge := func(badgeName string) {
 		var badge pkgmodels.Badge
-		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{"name": badgeName}).One(&badge); err == nil {
+		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{"name": badgeName, "$or": tenantScope}).One(&badge); err == nil {
 			db.GetCollection(pkgmodels.UserCollection).Update(
-				bson.M{"public_id": userId},
+				bson.M{"public_id": userId, "$or": tenantScope},
 				bson.M{"$addToSet": bson.M{"badges": badge.Id}},
 			)
 			log.Printf("executeFunnelAction: gave badge %q to user %q", badgeName, userId)
 		} else {
-			log.Printf("executeFunnelAction: badge %q not found: %v", badgeName, err)
+			log.Printf("executeFunnelAction: badge %q not found in tenant %s: %v", badgeName, tenantHex, err)
 		}
 	}
 
 	revokeBadge := func(badgeName string) {
 		var badge pkgmodels.Badge
-		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{"name": badgeName}).One(&badge); err == nil {
+		if err := db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{"name": badgeName, "$or": tenantScope}).One(&badge); err == nil {
 			db.GetCollection(pkgmodels.UserCollection).Update(
-				bson.M{"public_id": userId},
+				bson.M{"public_id": userId, "$or": tenantScope},
 				bson.M{"$pull": bson.M{"badges": badge.Id}},
 			)
 		}
@@ -543,9 +592,12 @@ func executeFunnelAction(action *pkgmodels.Action, userId string, funnelId strin
 			}
 		case "start_story":
 			commands = append(commands, gin.H{"action": "start_story", "story": val})
-			// Fire story execution engine in core-service asynchronously.
+			// ACQ-003: persist a durable story-start command (retried,
+			// dead-lettered) instead of an untracked goroutine.
 			if val != "" && userId != "" {
-				go triggerStoryStart(val, funnelId, userId)
+				if err := EnqueueStoryStart(tenantHex, val, userId); err != nil {
+					log.Printf("executeFunnelAction: enqueue story start failed: %v", err)
+				}
 			}
 		case "jump_to_stage":
 			commands = append(commands, gin.H{"action": "jump_to_stage", "stage": val})
