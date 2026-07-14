@@ -322,6 +322,15 @@ func handleServiceResourceUploadURL(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue upload URL"})
 		return
 	}
+	// FUL-005: record the issued path server-side (DEL-010 pattern) so attach
+	// can only finalize paths this tenant was actually granted for this
+	// instance's product, with metadata resolved from here.
+	intent := pkgmodels.NewUploadIntent(tenantID, instance.ProductID, objectPath, safeFileName(req.FileName), req.ContentType, req.SizeBytes)
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Insert(intent); err != nil {
+		log.Printf("services: insert upload intent failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue upload URL"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"upload_url":   signed,
 		"object_path":  objectPath,
@@ -330,7 +339,23 @@ func handleServiceResourceUploadURL(c *gin.Context) {
 	})
 }
 
+// serviceObjectPathPrefix is the only object-path prefix a tenant may attach
+// for a given service instance. Defense-in-depth alongside the UploadIntent
+// check — even a stray intent row can't cross tenant/instance namespaces.
+func serviceObjectPathPrefix(tenantID bson.ObjectId, instance *pkgmodels.ServiceInstance) string {
+	return fmt.Sprintf("%s/services/%s/instances/%s/", tenantID.Hex(), instance.ProductID.Hex(), instance.PublicId)
+}
+
+// handleServiceResourceAttach finalizes a successful upload. The object path
+// must match a pending UploadIntent issued to this tenant for this instance's
+// product and the object must actually exist in the bucket (FUL-005, mirrors
+// DEL-010); metadata comes from the intent, not the request. Idempotent on
+// the object path — re-attaching returns the existing resource.
 func handleServiceResourceAttach(c *gin.Context) {
+	if downloadStorage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "storage not configured"})
+		return
+	}
 	tenantID := auth.GetTenantObjectID(c)
 	if tenantID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -352,12 +377,59 @@ func handleServiceResourceAttach(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file_name and object_path are required"})
 		return
 	}
+
+	if !strings.HasPrefix(req.ObjectPath, serviceObjectPathPrefix(tenantID, instance)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "object path not issued for this instance"})
+		return
+	}
+
+	// Idempotency: the same object path re-attached returns the existing row.
+	var existing pkgmodels.ServiceInstanceResource
+	if err := db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).Find(bson.M{
+		"tenant_id":             tenantID,
+		"instance_id":           instance.Id,
+		"object_path":           req.ObjectPath,
+		"timestamps.deleted_at": nil,
+	}).One(&existing); err == nil {
+		c.JSON(http.StatusOK, existing)
+		return
+	}
+
+	var intent pkgmodels.UploadIntent
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Find(bson.M{
+		"tenant_id":   tenantID,
+		"product_id":  instance.ProductID,
+		"object_path": req.ObjectPath,
+		"status":      pkgmodels.UploadIntentStatusPending,
+		"expires_at":  bson.M{"$gt": time.Now()},
+	}).One(&intent); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "object path not issued for this instance"})
+		return
+	}
+
+	exists, err := downloadStorage.ObjectExists(downloadBucket, req.ObjectPath)
+	if err != nil {
+		log.Printf("services: attach object check failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify uploaded object"})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusConflict, gin.H{"error": "object not uploaded"})
+		return
+	}
+
 	publicURL := fmt.Sprintf("https://storage.googleapis.com/%s/%s", downloadBucket, req.ObjectPath)
-	resource := pkgmodels.NewServiceInstanceResource(tenantID, instance.ProductID, instance.Id, req.FileName, publicURL, req.ObjectPath, req.ContentType, req.SizeBytes)
+	resource := pkgmodels.NewServiceInstanceResource(tenantID, instance.ProductID, instance.Id, intent.FileName, publicURL, req.ObjectPath, intent.ContentType, intent.SizeBytes)
 	resource.UploadedBy = "tenant"
 	if err := db.GetCollection(pkgmodels.ServiceInstanceResourceCollection).Insert(resource); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save resource"})
 		return
+	}
+	if err := db.GetCollection(pkgmodels.UploadIntentCollection).Update(
+		bson.M{"_id": intent.Id},
+		bson.M{"$set": bson.M{"status": pkgmodels.UploadIntentStatusAttached}},
+	); err != nil {
+		log.Printf("services: mark intent attached failed: %v", err)
 	}
 	c.JSON(http.StatusCreated, resource)
 }
