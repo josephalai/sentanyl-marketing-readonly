@@ -21,9 +21,10 @@ const maxInboxActionsPerEmail = 3
 
 // runInboxActionPass lets the agent take in-app actions for an inbound email,
 // strictly limited to its ToolWhitelist. The LLM proposes actions as JSON;
-// each is executed through the shared MCP tool registry as the tenant owner
-// and logged to the activity log. Failures are non-fatal — the reply pipeline
-// never blocks on actions. Never called for suppressed contacts.
+// each is executed through the shared MCP tool registry as the tenant's
+// "inbox-agent" machine principal (MCP-001, content scope only) and logged to
+// the activity log. Failures are non-fatal — the reply pipeline never blocks
+// on actions. Never called for suppressed contacts.
 func runInboxActionPass(tenant *pkgmodels.Tenant, agent *pkgmodels.InboxAgent, contact *pkgmodels.User, thread *pkgmodels.EmailThread, msg *pkgmodels.EmailMessage, draft *pkgmodels.AIReplyDraft, c inboxClassification) {
 	if tenant == nil || agent == nil || len(agent.ToolWhitelist) == 0 {
 		return
@@ -35,14 +36,14 @@ func runInboxActionPass(tenant *pkgmodels.Tenant, agent *pkgmodels.InboxAgent, c
 	if len(actions) == 0 {
 		return
 	}
-	jwt, err := pkgauth.MintTenantOwnerJWT(tenant.Id)
+	jwt, err := pkgauth.MintMachineJWT(tenant.Id, pkgmodels.ServicePrincipalInboxAgent, []pkgauth.Permission{pkgauth.PermContentManage})
 	if err != nil {
-		log.Printf("inbox actions: owner jwt for tenant %s: %v", tenant.Id.Hex(), err)
+		log.Printf("inbox actions: machine jwt for tenant %s: %v", tenant.Id.Hex(), err)
 		return
 	}
 	for _, a := range actions {
 		result, err := mcptools.Invoke(jwt, a.Tool, a.Args, agent.ToolWhitelist)
-		meta := bson.M{"tool": a.Tool, "draft_id": draft.Id.Hex()}
+		meta := bson.M{"tool": a.Tool, "draft_id": draft.Id.Hex(), "principal": pkgmodels.ServicePrincipalInboxAgent}
 		if err != nil {
 			meta["error"] = err.Error()
 		} else if isErr, _ := result["isError"].(bool); isErr {

@@ -61,6 +61,8 @@ func main() {
 	// Durable job kernel: indexes, handlers, and a background worker for
 	// outbound webhook delivery (WH-003) and future durable workloads.
 	jobs.EnsureIndexes()
+	// Inbox-agent machine principals are minted from this service (MCP-001).
+	auth.EnsurePrincipalIndexes()
 	webhooks.RegisterHandlers()
 	routes.RegisterStoryStartJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
