@@ -55,7 +55,7 @@ func RegisterMigrationJobs() {
 		if err != nil {
 			return err
 		}
-		_, err = migration.Execute(p)
+		_, err = migration.ExecuteWithJob(p, job.Id, job.LeaseOwner)
 		return err
 	})
 }
@@ -63,7 +63,7 @@ func RegisterMigrationJobs() {
 var migrationFileKinds = map[string]bool{
 	"contacts": true, "products": true, "offers": true,
 	"transactions": true, "grants": true, "courses": true, "assets": true,
-	"subscriptions": true, "forms": true, "pages": true,
+	"subscriptions": true, "forms": true, "pages": true, "automations": true,
 }
 
 func migrationProject(c *gin.Context) (*pkgmodels.MigrationProject, bool) {

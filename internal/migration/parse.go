@@ -176,6 +176,7 @@ type Export struct {
 	Subscriptions []SourceSubscription
 	Forms         []SourceForm
 	Pages         []SourcePage
+	Automations   []SourceAutomation
 }
 
 // ParseError is one recoverable per-row parse failure.

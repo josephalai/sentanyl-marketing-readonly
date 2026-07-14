@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/egress"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/plans"
 	"github.com/josephalai/sentanyl/pkg/storage"
@@ -136,6 +139,8 @@ func loadExport(p *models.MigrationProject) (*Export, []ParseError, error) {
 			ex.Forms, pe = ParseForms(f.Content)
 		case "pages":
 			ex.Pages, pe = ParsePages(f.Content)
+		case "automations":
+			ex.Automations, pe = ParseAutomations(f.Content)
 		default:
 			pe = []ParseError{{Kind: f.Kind, Message: "unknown file kind"}}
 		}
@@ -178,9 +183,10 @@ func DryRun(p *models.MigrationProject) (bson.M, error) {
 		return nil, err
 	}
 	sim := newRun(p, ex, true)
-	sim.importAll()
+	translations := sim.importAll()
 	report := bson.M{
 		"phase":              "dry_run",
+		"automation_translation": translations,
 		"counts":             exportCounts(ex),
 		"parse_errors":       len(errs),
 		"would_create":       sim.created,
@@ -196,15 +202,36 @@ func DryRun(p *models.MigrationProject) (bson.M, error) {
 // keyed in the SourceObjectMap, so a rerun (or a resume after a crash) skips
 // what already landed and finishes the rest.
 func Execute(p *models.MigrationProject) (bson.M, error) {
+	return ExecuteWithJob(p, "", "")
+}
+
+// ExecuteWithJob is Execute with job-lease context: long phases heartbeat
+// the lease every batch, and a retry after a crash resumes from the
+// per-phase checkpoint instead of restarting (MIG-010). A deliberate rerun
+// of a COMPLETED project resets the checkpoints (row idempotency still
+// dedupes); a retry of an interrupted import keeps them.
+func ExecuteWithJob(p *models.MigrationProject, jobID bson.ObjectId, worker string) (bson.M, error) {
+	resuming := p.Status == models.MigrationStatusImporting
+	if !resuming && len(p.CompletedPhases) > 0 {
+		p.CompletedPhases = nil
+		if err := db.GetCollection(models.MigrationProjectCollection).UpdateId(p.Id, bson.M{
+			"$unset": bson.M{"completed_phases": ""},
+		}); err != nil {
+			log.Printf("migration: reset phase checkpoints: %v", err)
+		}
+	}
 	saveProjectState(p, models.MigrationStatusImporting, nil, "")
 	ex, errs, err := loadExport(p)
 	if err != nil {
 		saveProjectState(p, models.MigrationStatusFailed, nil, err.Error())
 		return nil, err
 	}
-	clearErrors(p, "import")
+	if !resuming {
+		clearErrors(p, "import")
+	}
 	run := newRun(p, ex, false)
-	run.importAll()
+	run.jobID, run.worker = jobID, worker
+	translations := run.importAll()
 	plans.Invalidate(p.TenantID)
 
 	report := reconcileReport(p, ex)
@@ -212,6 +239,10 @@ func Execute(p *models.MigrationProject) (bson.M, error) {
 	report["created"] = run.created
 	report["matched"] = run.matched
 	report["row_errors"] = run.errors
+	report["resumed"] = resuming
+	if len(translations) > 0 {
+		report["automation_translation"] = translations
+	}
 	saveProjectState(p, models.MigrationStatusCompleted, report, "")
 	return report, nil
 }
@@ -290,6 +321,7 @@ func exportCounts(ex *Export) bson.M {
 		"transactions": len(ex.Transactions), "grants": len(ex.Grants),
 		"courses": len(ex.Courses), "assets": len(ex.Assets),
 		"subscriptions": len(ex.Subscriptions), "forms": len(ex.Forms), "pages": len(ex.Pages),
+		"automations": len(ex.Automations),
 	}
 }
 
@@ -301,6 +333,7 @@ func reconcileReport(p *models.MigrationProject, ex *Export) bson.M {
 		models.SourceTypeOffer, models.SourceTypeTransaction, models.SourceTypeGrant,
 		models.SourceTypeCourse, models.SourceTypeAsset,
 		models.SourceTypeSubscription, models.SourceTypeForm, models.SourceTypePage,
+		"automation",
 	} {
 		n, _ := db.GetCollection(models.SourceObjectMapCollection).Find(bson.M{
 			"tenant_id": p.TenantID, "source_system": p.SourceSystem, "source_type": st,
@@ -339,6 +372,16 @@ type run struct {
 	matched map[string]int
 	errors  int
 
+	// MIG-010 checkpointing: currentPhase names the running import phase;
+	// completedPhases (loaded from the project row) are skipped on resume;
+	// jobID/worker let long phases heartbeat their lease; rowsSinceTick
+	// drives the batch throttle.
+	currentPhase    string
+	completedPhases map[string]bool
+	jobID           bson.ObjectId
+	worker          string
+	rowsSinceTick   int
+
 	// resolved source-id → local id caches for cross-references
 	productByRef map[string]bson.ObjectId
 	offerByRef   map[string]bson.ObjectId
@@ -346,26 +389,111 @@ type run struct {
 }
 
 func newRun(p *models.MigrationProject, ex *Export, dry bool) *run {
-	return &run{
+	r := &run{
 		p: p, ex: ex, dry: dry,
 		created: map[string]int{}, matched: map[string]int{},
 		productByRef: map[string]bson.ObjectId{},
 		offerByRef:   map[string]bson.ObjectId{},
 		contactByRef: map[string]bson.ObjectId{},
+		completedPhases: map[string]bool{},
+	}
+	if !dry {
+		for _, ph := range p.CompletedPhases {
+			r.completedPhases[ph] = true
+		}
+	}
+	return r
+}
+
+// migrationBatchSize is how many processed rows pass between ticks
+// (heartbeat + throttle + phase-progress persist).
+const migrationBatchSize = 200
+
+// batchThrottle reads MIGRATION_BATCH_THROTTLE_MS once per tick so imports
+// can be slowed on shared infrastructure without redeploying.
+func batchThrottle() time.Duration {
+	if v := os.Getenv("MIGRATION_BATCH_THROTTLE_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 0
+}
+
+// tick runs every processed row; every migrationBatchSize rows it extends
+// the job lease and applies the throttle.
+func (r *run) tick() {
+	r.rowsSinceTick++
+	if r.rowsSinceTick < migrationBatchSize {
+		return
+	}
+	r.rowsSinceTick = 0
+	if r.dry {
+		return
+	}
+	if r.jobID != "" && r.worker != "" {
+		if err := jobs.Heartbeat(r.jobID, r.worker, 2*time.Minute); err != nil {
+			log.Printf("migration: heartbeat: %v", err)
+		}
+	}
+	if d := batchThrottle(); d > 0 {
+		time.Sleep(d)
 	}
 }
 
-func (r *run) importAll() {
-	r.importProducts()
-	r.importOffers()
-	r.importContacts()
-	r.importCourses()
-	r.importTransactions()
-	r.importGrants()
-	r.importAssets()
-	r.importSubscriptions()
-	r.importForms()
-	r.importPages()
+// phaseDone checkpoints a finished phase on the project row so a resumed
+// execute never re-walks it (MIG-010).
+func (r *run) phaseDone(name string) {
+	if r.dry {
+		return
+	}
+	r.completedPhases[name] = true
+	if err := db.GetCollection(models.MigrationProjectCollection).UpdateId(r.p.Id, bson.M{
+		"$addToSet": bson.M{"completed_phases": name},
+		"$set":      bson.M{"updated_at": time.Now()},
+	}); err != nil {
+		log.Printf("migration: phase checkpoint %s: %v", name, err)
+	}
+}
+
+func (r *run) importAll() []AutomationTranslation {
+	var translations []AutomationTranslation
+	phases := []struct {
+		name string
+		fn   func()
+	}{
+		{"products", r.importProducts},
+		{"offers", r.importOffers},
+		{"contacts", r.importContacts},
+		{"courses", r.importCourses},
+		{"transactions", r.importTransactions},
+		{"grants", r.importGrants},
+		{"assets", r.importAssets},
+		{"subscriptions", r.importSubscriptions},
+		{"forms", r.importForms},
+		{"pages", r.importPages},
+		{"automations", func() { translations = r.importAutomations() }},
+	}
+	for _, ph := range phases {
+		// The offers/products/contacts phases also build the in-memory
+		// cross-reference caches later phases resolve against, so completed
+		// reference phases re-walk in cache-only mode via the SourceObjectMap
+		// (lookupMap hits mark them matched without writes).
+		if r.completedPhases[ph.name] && !phaseBuildsCaches(ph.name) {
+			continue
+		}
+		r.currentPhase = ph.name
+		ph.fn()
+		r.phaseDone(ph.name)
+	}
+	return translations
+}
+
+// phaseBuildsCaches marks phases whose walk populates resolution caches
+// needed by later phases — they rerun even when checkpointed (idempotent:
+// every row lookupMap-matches).
+func phaseBuildsCaches(name string) bool {
+	return name == "products" || name == "offers" || name == "contacts"
 }
 
 // lookupMap returns the existing map row's local id, if the source object
@@ -383,6 +511,7 @@ func (r *run) lookupMap(sourceType, sourceID string) (bson.ObjectId, bool) {
 }
 
 func (r *run) record(sourceType, sourceID, localCollection string, localID bson.ObjectId, created bool) {
+	r.tick()
 	kind := map[bool]string{true: "created", false: "matched"}[created]
 	if created {
 		r.created[sourceType]++
@@ -404,6 +533,7 @@ func (r *run) record(sourceType, sourceID, localCollection string, localID bson.
 }
 
 func (r *run) rowError(sourceType, sourceID string, row int, msg string) {
+	r.tick()
 	r.errors++
 	if !r.dry {
 		recordError(r.p, "import", sourceType, sourceID, row, msg)
