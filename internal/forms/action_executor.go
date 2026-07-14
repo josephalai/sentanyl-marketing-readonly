@@ -233,6 +233,13 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, e
 		Email:        pkgmodels.EmailAddress(email),
 	}
 	contact.Subscribed = true
+	// ACQ-007: capture consent provenance — the contact opted in by submitting
+	// this form. Recorded before the plan-hold masks Subscribed so consent
+	// survives a limit-hold/release (BILL-010).
+	consent := true
+	contact.ConsentSubscribed = &consent
+	contact.ConsentSource = "form:" + form.PublicId
+	contact.ConsentedAt = &now
 	contact.SoftDeletes.CreatedAt = &now
 	plans.ApplyHold(&contact)
 	if err := col.Insert(contact); err != nil {
