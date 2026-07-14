@@ -13,6 +13,7 @@ import (
 	mgo "gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
@@ -148,7 +149,13 @@ func provisionCoachingEnrollment(tenantID, contactID bson.ObjectId, product *pkg
 		payload["purchase_item_id"] = purchaseItemID.Hex()
 	}
 	body, _ := json.Marshal(payload)
-	resp, err := http.Post(url+"/internal/provision-coaching", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url+"/internal/provision-coaching", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("coaching provision request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	auth.AttachServiceAuth(req, "marketing") // API-001 signed service identity
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("coaching provision request: %w", err)
 	}
@@ -191,7 +198,14 @@ func revokeProductEntitlements(tenantID, contactID, productID bson.ObjectId, off
 			"product_id": productID.Hex(),
 			"offer_id":   offerID.Hex(),
 		})
-		resp, err := http.Post(url+"/internal/revoke-coaching", "application/json", bytes.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, url+"/internal/revoke-coaching", bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[stripe webhook] revoke coaching: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		auth.AttachServiceAuth(req, "marketing") // API-001 signed service identity
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			log.Printf("[stripe webhook] revoke coaching: %v", err)
 			return

@@ -268,8 +268,9 @@ func main() {
 	// resolves tenant from the request Host header.
 	handlers.RegisterCheckoutLookupRoute(r.Group("/api/customer"))
 
-	// Internal routes (no auth — internal network only).
-	internal := r.Group("/internal")
+	// Internal routes — signed service identity required (API-001); network
+	// position is not identity.
+	internal := r.Group("/internal", auth.RequireServiceAuth())
 	routes.RegisterInternalRoutes(internal)
 
 	// E2E test-only routes, gated by SENTANYL_E2E_MODE=1 inside each handler.
