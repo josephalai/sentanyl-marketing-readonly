@@ -229,6 +229,13 @@ func handleTenantUpdateProduct(c *gin.Context) {
 		update["thumbnail_url"] = req.ThumbnailURL
 	}
 	if req.Status != "" {
+		var current pkgmodels.Product
+		_ = db.GetCollection(pkgmodels.ProductCollection).Find(
+			bson.M{"_id": bson.ObjectIdHex(productID), "tenant_id": tenantID}).One(&current)
+		if !pkgmodels.ValidProductStatusTransition(current.Status, req.Status) {
+			c.JSON(http.StatusConflict, gin.H{"error": "invalid product status transition from " + current.Status + " to " + req.Status})
+			return
+		}
 		update["status"] = req.Status
 	}
 	if req.Modules != nil {
@@ -350,6 +357,7 @@ func handleCreateOffer(c *gin.Context) {
 		PricingModel     string   `json:"pricing_model" binding:"required"`
 		Amount           int64    `json:"amount"`
 		Currency         string   `json:"currency"`
+		Status           string                    `json:"status"`
 		GrantedBadges    []string                  `json:"granted_badges"`
 		IncludedProducts []string                  `json:"included_products"`
 		Coaching         *pkgmodels.OfferCoaching  `json:"coaching"`
@@ -360,6 +368,14 @@ func handleCreateOffer(c *gin.Context) {
 	}
 
 	offer := pkgmodels.NewOffer(req.Title, tenantID)
+	offer.Status = pkgmodels.OfferStatusDraft
+	if req.Status != "" {
+		if req.Status != pkgmodels.OfferStatusDraft && req.Status != pkgmodels.OfferStatusPublished {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "offer may be created as draft or published only"})
+			return
+		}
+		offer.Status = req.Status
+	}
 	offer.PricingModel = req.PricingModel
 	offer.Amount = req.Amount
 	if req.Currency != "" {
@@ -436,6 +452,7 @@ func handleUpdateOffer(c *gin.Context) {
 		PricingModel     string   `json:"pricing_model"`
 		Amount           *int64   `json:"amount"`
 		Currency         string   `json:"currency"`
+		Status           string                   `json:"status"`
 		GrantedBadges    []string                 `json:"granted_badges"`
 		IncludedProducts []string                 `json:"included_products"`
 		Coaching         *pkgmodels.OfferCoaching `json:"coaching"`
@@ -445,7 +462,34 @@ func handleUpdateOffer(c *gin.Context) {
 		return
 	}
 
+	var current pkgmodels.Offer
+	if err := db.GetCollection(pkgmodels.OfferCollection).Find(
+		bson.M{"_id": bson.ObjectIdHex(offerID), "tenant_id": tenantID, "timestamps.deleted_at": nil}).One(&current); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "offer not found"})
+		return
+	}
+
 	update := bson.M{}
+	if req.Status != "" {
+		if !pkgmodels.ValidOfferStatusTransition(current.Status, req.Status) {
+			c.JSON(http.StatusConflict, gin.H{"error": "invalid offer status transition from " + current.Status + " to " + req.Status})
+			return
+		}
+		// Publishing requires at least one included product (COM-CC-008/003):
+		// a live offer that grants nothing is invalid.
+		if req.Status == pkgmodels.OfferStatusPublished {
+			effective := current.IncludedProducts
+			if req.IncludedProducts != nil {
+				resolved, _ := resolveTenantProducts(tenantID, req.IncludedProducts)
+				effective = resolved
+			}
+			if len(effective) == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot publish an offer with no included products"})
+				return
+			}
+		}
+		update["status"] = req.Status
+	}
 	if req.Title != "" {
 		update["title"] = req.Title
 	}

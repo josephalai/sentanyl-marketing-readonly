@@ -125,6 +125,10 @@ func handleStripeWebhook(c *gin.Context) {
 		if err := processChargeRefunded(tenantID, evt.Data.Object); err != nil {
 			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
 		}
+	case "charge.dispute.created", "charge.dispute.updated":
+		if err := processChargeDisputed(tenantID, evt.Data.Object); err != nil {
+			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
+		}
 	default:
 		// Acknowledge unhandled events so Stripe stops retrying.
 	}
@@ -649,6 +653,25 @@ func processInvoicePaid(tenantID bson.ObjectId, raw json.RawMessage) error {
 	)
 }
 
+// subscriptionAccessState maps a Stripe subscription status onto its access
+// consequence (BILL-007): a lossless enum instead of copying the raw string.
+//   active     — access on (restore a prior suspension)
+//   suspend    — access paused (past_due/unpaid/paused/incomplete)
+//   revoke     — access ends (canceled/incomplete_expired)
+//   noop       — no access change (unknown/blank → leave grants as-is)
+func subscriptionAccessState(status string) string {
+	switch status {
+	case "active", "trialing":
+		return "active"
+	case "past_due", "unpaid", "paused", "incomplete":
+		return "suspend"
+	case "canceled", "incomplete_expired":
+		return "revoke"
+	default:
+		return "noop"
+	}
+}
+
 func processSubscriptionStateChange(tenantID bson.ObjectId, raw json.RawMessage) error {
 	var sub stripeSubscription
 	if err := json.Unmarshal(raw, &sub); err != nil {
@@ -661,10 +684,88 @@ func processSubscriptionStateChange(tenantID bson.ObjectId, raw json.RawMessage)
 	if newStatus == "" {
 		newStatus = "canceled"
 	}
-	return db.GetCollection(pkgmodels.SubscriptionCollection).Update(
+	if err := db.GetCollection(pkgmodels.SubscriptionCollection).Update(
 		bson.M{"tenant_id": tenantID, "stripe_subscription_id": sub.ID},
 		bson.M{"$set": bson.M{"status": newStatus, "timestamps.updated_at": time.Now()}},
+	); err != nil {
+		return err
+	}
+
+	// COM-CC-014/BILL-007: propagate the billing state onto the AccessGrant
+	// authority so a lapsed/canceled subscription actually gates delivery.
+	var subs []pkgmodels.Subscription
+	_ = db.GetCollection(pkgmodels.SubscriptionCollection).Find(
+		bson.M{"tenant_id": tenantID, "stripe_subscription_id": sub.ID}).All(&subs)
+	action := subscriptionAccessState(newStatus)
+	now := time.Now()
+	for _, srow := range subs {
+		grantFilter := bson.M{"tenant_id": tenantID, "contact_id": srow.ContactID, "offer_id": srow.OfferID}
+		switch action {
+		case "suspend":
+			grantFilter["status"] = pkgmodels.GrantStatusActive
+			_, _ = db.GetCollection(pkgmodels.AccessGrantCollection).UpdateAll(grantFilter,
+				bson.M{"$set": bson.M{"status": pkgmodels.GrantStatusSuspended, "timestamps.updated_at": now}})
+		case "active":
+			// Restore only rows suspended by a prior billing lapse — never
+			// un-revoke a refund/dispute revocation.
+			grantFilter["status"] = pkgmodels.GrantStatusSuspended
+			_, _ = db.GetCollection(pkgmodels.AccessGrantCollection).UpdateAll(grantFilter,
+				bson.M{"$set": bson.M{"status": pkgmodels.GrantStatusActive, "timestamps.updated_at": now}})
+		case "revoke":
+			grantFilter["status"] = bson.M{"$in": []string{pkgmodels.GrantStatusActive, pkgmodels.GrantStatusSuspended}}
+			_, _ = db.GetCollection(pkgmodels.AccessGrantCollection).UpdateAll(grantFilter,
+				bson.M{"$set": bson.M{"status": pkgmodels.GrantStatusRevoked, "timestamps.updated_at": now}})
+		}
+	}
+	return nil
+}
+
+// processChargeDisputed handles charge.dispute.created (COM-CC-014): a
+// chargeback suspends the buyer's access immediately — the money is being
+// clawed back — and marks the Purchase disputed for audit. Reuses the same
+// offer-resolution chain as refunds. Suspension (not revocation) leaves room
+// for a won dispute to restore access via a subsequent subscription.updated.
+func processChargeDisputed(tenantID bson.ObjectId, raw json.RawMessage) error {
+	var charge stripeCharge
+	if err := json.Unmarshal(raw, &charge); err != nil {
+		return err
+	}
+	offerHex := charge.Metadata["offer_id"]
+	if offerHex == "" {
+		offerHex = charge.PaymentIntentMeta["offer_id"]
+	}
+	if !bson.IsObjectIdHex(offerHex) {
+		log.Printf("[stripe webhook] dispute: no resolvable offer_id on charge %s — skipping", charge.ID)
+		return nil
+	}
+	offerID := bson.ObjectIdHex(offerHex)
+	var offer pkgmodels.Offer
+	if err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{"_id": offerID, "tenant_id": tenantID}).One(&offer); err != nil {
+		return nil
+	}
+	contactEmail := strings.ToLower(strings.TrimSpace(charge.Metadata["contact_email"]))
+	var contact pkgmodels.User
+	if contactEmail != "" {
+		_ = db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+			"tenant_id": tenantID, "email": pkgmodels.EmailAddress(contactEmail),
+		}).One(&contact)
+	}
+	now := time.Now()
+	if contact.Id.Valid() && len(offer.IncludedProducts) > 0 {
+		_, _ = db.GetCollection(pkgmodels.AccessGrantCollection).UpdateAll(
+			bson.M{"tenant_id": tenantID, "contact_id": contact.Id,
+				"product_id": bson.M{"$in": offer.IncludedProducts},
+				"status":     bson.M{"$in": []string{pkgmodels.GrantStatusActive, pkgmodels.GrantStatusSuspended}}},
+			bson.M{"$set": bson.M{"status": pkgmodels.GrantStatusSuspended, "timestamps.updated_at": now}},
+		)
+	}
+	// Mark the purchase disputed for audit (idempotent).
+	_, _ = db.GetCollection(pkgmodels.PurchaseCollection).UpdateAll(
+		bson.M{"tenant_id": tenantID, "offer_id": offerID, "stripe_charge_id": charge.ID},
+		bson.M{"$set": bson.M{"disputed_at": now, "timestamps.updated_at": now}},
 	)
+	log.Printf("[stripe webhook] dispute on charge %s → suspended access for offer %s", charge.ID, offerID.Hex())
+	return nil
 }
 
 // stripeCharge is the subset of Charge fields we use for refund handling.

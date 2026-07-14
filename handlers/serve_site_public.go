@@ -379,6 +379,14 @@ func startCheckoutSession(c *gin.Context, pubCtx *publicchannel.PublicRequestCon
 	tenantID := pubCtx.TenantID
 	domain := pubCtx.Domain
 
+	// COM-CC-008: only a published offer is purchasable. Draft offers aren't
+	// live yet; archived offers are retired (existing access preserved, no
+	// new checkouts). Blank status = legacy live offer.
+	if offer.Status == pkgmodels.OfferStatusDraft || offer.Status == pkgmodels.OfferStatusArchived {
+		c.JSON(http.StatusConflict, gin.H{"error": "this offer is not available for purchase"})
+		return
+	}
+
 	// Duplicate-course guard: if the buyer already owns every product in
 	// this offer (via a prior purchase), don't start a second Stripe charge.
 	// The returned redirect sends them to the portal login, where a flash
