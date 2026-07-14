@@ -17,6 +17,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
+	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -92,6 +93,8 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	res.ContactID = contact.Id.Hex()
 	res.ContactPublicID = contact.PublicId
 	recordSubmission(form, sub, contact)
+	// ANA-006: a form submit is an acquisition touch for revenue attribution.
+	analytics.RecordTouch(form.TenantID, contact.Id, "form", form.Id, form.Name)
 
 	on := form.OnSubmit
 	if on == nil {

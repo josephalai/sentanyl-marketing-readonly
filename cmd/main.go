@@ -10,6 +10,7 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/handlers"
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
+	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/marketing-service/internal/channel"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/marketing-service/internal/migration"
@@ -71,6 +72,8 @@ func main() {
 	// + the durable execute job.
 	migration.EnsureIndexes()
 	routes.RegisterMigrationJobs()
+	// Revenue facts projection (ANA-005): unique (tenant, log, kind).
+	analytics.EnsureIndexes()
 	webhooks.RegisterHandlers()
 	routes.RegisterStoryStartJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
@@ -207,6 +210,8 @@ func main() {
 	// Phase 5 — admin Purchases + Revenue surfaces.
 	handlers.RegisterPurchasesRoutes(legacyTenantAPI)
 	handlers.RegisterRevenueRoutes(legacyTenantAPI)
+	// Canonical analytics: metric registry, facts, attribution (ANA-004..008).
+	handlers.RegisterAnalyticsRoutes(legacyTenantAPI)
 
 	// Email AI generation and editing.
 	handlers.RegisterEmailAIRoutes(legacyTenantAPI)

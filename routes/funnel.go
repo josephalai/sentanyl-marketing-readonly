@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	pkgauth "github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/jobs"
@@ -479,6 +480,21 @@ func handleFunnelEvent(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid event_type"})
 		return
+	}
+
+	// ANA-006/007: stamp the acting contact's last acquisition touch for
+	// revenue attribution — bot traffic never creates touches.
+	if req.UserId != "" && !analytics.LooksLikeBot(c.Request.UserAgent()) {
+		var actor pkgmodels.User
+		if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+			"public_id": req.UserId,
+			"$or": []bson.M{
+				{"subscriber_id": tenantHex},
+				{"tenant_id": bson.ObjectIdHex(tenantHex)},
+			},
+		}).One(&actor); err == nil {
+			analytics.RecordTouch(bson.ObjectIdHex(tenantHex), actor.Id, "funnel", funnel.Id, funnel.Name)
+		}
 	}
 
 	var commands []gin.H

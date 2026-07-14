@@ -17,6 +17,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
+	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
@@ -422,6 +423,9 @@ func recordPurchaseLog(tenantID bson.ObjectId, contact *pkgmodels.User, offer *p
 		if err := col.Insert(entry); err != nil {
 			return err
 		}
+		// ANA-005/006: project the immutable sale fact (idempotent), with
+		// last-touch attribution resolved inside the window.
+		analytics.WriteSaleFact(&entry)
 	}
 	return nil
 }
@@ -825,6 +829,19 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 		purchaseFilter,
 		bson.M{"$set": bson.M{"status": "refunded", "timestamps.updated_at": now}},
 	)
+	// ANA-005: a refund is a separate immutable fact per refunded log row,
+	// never a mutation of the sale fact (idempotent on replays). Re-query
+	// with the same filter shape, now matching status refunded.
+	refundedFilter := bson.M{}
+	for k, v := range purchaseFilter {
+		refundedFilter[k] = v
+	}
+	refundedFilter["status"] = "refunded"
+	var refunded []pkgmodels.PurchaseLog
+	_ = db.GetCollection(pkgmodels.PurchaseLogCollection).Find(refundedFilter).All(&refunded)
+	for i := range refunded {
+		analytics.WriteRefundFact(&refunded[i])
+	}
 
 	log.Printf("[stripe webhook] refund: revoked offer %s for contact %s (charge %s)",
 		offerHex, contact.Id.Hex(), charge.ID)
