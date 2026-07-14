@@ -122,6 +122,7 @@ func main() {
 
 	// COM-EM-005: durable campaign dispatch (recipient uniqueness + job).
 	routes.EnsureCampaignIndexes()
+	httputil.EnsureIdempotencyIndexes()
 	routes.RegisterCampaignDispatchJob()
 	routes.StartTimerApprovalLoop()
 
@@ -282,6 +283,9 @@ func main() {
 	// that triggers writes and emails (double-opt-in, autoresponders).
 	publicFormGroup := r.Group("/api/marketing")
 	publicFormGroup.Use(httputil.RateLimit(60, 30))
+	// API-003: honor an Idempotency-Key on public writes so a retried form
+	// submit / checkout start cannot create a duplicate.
+	publicFormGroup.Use(httputil.Idempotency())
 	handlers.RegisterPublicFormRoutes(publicFormGroup)
 
 	// Frontend-channel public integration surface (no auth — for coded
@@ -291,6 +295,7 @@ func main() {
 	// checkout-session spam, form/newsletter abuse).
 	publicGroup := r.Group("/api/public")
 	publicGroup.Use(httputil.RateLimit(60, 30))
+	publicGroup.Use(httputil.Idempotency()) // API-003
 	handlers.RegisterPublicChannelRoutes(publicGroup)
 
 	// Public newsletter subscribe / confirm / unsubscribe routes (no auth).
