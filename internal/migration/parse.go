@@ -38,9 +38,10 @@ import (
 var ExternallyBlocked = []string{
 	"course lesson content bodies (Kajabi provides no content export; courses.json carries structure metadata only)",
 	"products catalog (no native export; supply products.csv in the normalized format or products are created as stubs from offers)",
-	"website pages, funnels, and landing pages (no export; rebuild in the builder)",
-	"email automations and broadcast history (no export; semantic translation impossible without source data)",
+	"website page/landing-page CONTENT (no export; pages.csv imports title/slug placeholders only — rebuild bodies in the builder)",
+	"email automation logic bodies and broadcast history (no export; automations.csv imports a feasibility-translated manifest only)",
 	"video/media files (no bulk export; re-upload or use assets.csv references where you host the files)",
+	"stored payment methods / billing agreements (never exported by Kajabi; subscription takeover requires the customer to authorize payment)",
 }
 
 // SourceContact is one parsed contacts.csv row.
@@ -123,15 +124,58 @@ type SourceAsset struct {
 	Row        int
 }
 
+// SourceSubscription is one parsed subscriptions.csv row — an active or
+// cancelled recurring-billing relationship on Kajabi. Imported strictly as
+// non-charging records (MIG-007).
+type SourceSubscription struct {
+	SourceID      string
+	Email         string
+	OfferRef      string
+	Status        string // active | cancelled
+	AmountMinor   int64
+	Currency      string
+	Interval      string // month | year
+	NextBillingAt time.Time
+	Row           int
+}
+
+// SourceForm is one parsed forms.csv row. Fields is "name:type" pairs.
+type SourceForm struct {
+	SourceID string
+	Name     string
+	Fields   []SourceFormField
+	Row      int
+}
+
+// SourceFormField is one declared field on an imported form.
+type SourceFormField struct {
+	Name     string
+	Type     string // text | email | phone | select | checkbox …
+	Required bool
+}
+
+// SourcePage is one parsed pages.csv row — title/slug/type placeholders
+// only; Kajabi does not export page content (MIG-008).
+type SourcePage struct {
+	SourceID string
+	Title    string
+	Slug     string
+	PageType string // page | landing
+	Row      int
+}
+
 // Export is the fully parsed input set.
 type Export struct {
-	Contacts     []SourceContact
-	Products     []SourceProduct
-	Offers       []SourceOffer
-	Transactions []SourceTransaction
-	Grants       []SourceGrant
-	Courses      []SourceCourse
-	Assets       []SourceAsset
+	Contacts      []SourceContact
+	Products      []SourceProduct
+	Offers        []SourceOffer
+	Transactions  []SourceTransaction
+	Grants        []SourceGrant
+	Courses       []SourceCourse
+	Assets        []SourceAsset
+	Subscriptions []SourceSubscription
+	Forms         []SourceForm
+	Pages         []SourcePage
 }
 
 // ParseError is one recoverable per-row parse failure.
@@ -479,6 +523,172 @@ func ParseAssets(content []byte) ([]SourceAsset, []ParseError) {
 	return out, errs
 }
 
+// parseFlexDate tries the same layouts the transaction parser accepts.
+func parseFlexDate(s string) time.Time {
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02", "01/02/2006", "January 2, 2006"} {
+		if ts, err := time.Parse(layout, s); err == nil {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+// ParseSubscriptions parses subscriptions.csv (recurring billing, MIG-007).
+func ParseSubscriptions(content []byte) ([]SourceSubscription, []ParseError) {
+	rows, err := readCSV(content)
+	if err != nil || len(rows) == 0 {
+		return nil, []ParseError{{Kind: "subscriptions", Message: "unreadable CSV: " + errString(err)}}
+	}
+	h := rows[0]
+	iID := headerIndex(h, "id", "subscription_id")
+	iEmail := headerIndex(h, "email", "member_email", "customer_email")
+	iOffer := headerIndex(h, "offer", "offer_id", "offer_title", "product")
+	iStatus := headerIndex(h, "status", "subscription_status")
+	iAmount := headerIndex(h, "amount", "price", "recurring_amount")
+	iCurrency := headerIndex(h, "currency")
+	iInterval := headerIndex(h, "interval", "billing_interval", "period", "frequency")
+	iNext := headerIndex(h, "next_billing_date", "next_billing_at", "next_payment_date", "renews_at")
+	if iEmail < 0 || iOffer < 0 {
+		return nil, []ParseError{{Kind: "subscriptions", Message: "email and offer columns are required"}}
+	}
+	var out []SourceSubscription
+	var errs []ParseError
+	for n, rec := range rows[1:] {
+		row := n + 2
+		email := strings.ToLower(cell(rec, iEmail))
+		offer := cell(rec, iOffer)
+		if email == "" || !strings.Contains(email, "@") || offer == "" {
+			errs = append(errs, ParseError{Kind: "subscriptions", Row: row, Message: "missing email or offer reference"})
+			continue
+		}
+		amount, aerr := parseAmountMinor(cell(rec, iAmount))
+		if aerr != nil {
+			errs = append(errs, ParseError{Kind: "subscriptions", Row: row, Message: aerr.Error()})
+			continue
+		}
+		s := SourceSubscription{Email: email, OfferRef: offer, AmountMinor: amount, Row: row}
+		s.SourceID = cell(rec, iID)
+		if s.SourceID == "" {
+			s.SourceID = fmt.Sprintf("%s|%s", email, strings.ToLower(offer))
+		}
+		s.Currency = strings.ToLower(cell(rec, iCurrency))
+		if s.Currency == "" {
+			s.Currency = "usd"
+		}
+		switch strings.ToLower(cell(rec, iStatus)) {
+		case "cancelled", "canceled", "inactive", "expired":
+			s.Status = "cancelled"
+		default:
+			s.Status = "active"
+		}
+		switch strings.ToLower(cell(rec, iInterval)) {
+		case "year", "yearly", "annual", "annually":
+			s.Interval = "year"
+		default:
+			s.Interval = "month"
+		}
+		if d := cell(rec, iNext); d != "" {
+			if ts := parseFlexDate(d); !ts.IsZero() {
+				s.NextBillingAt = ts
+			}
+		}
+		out = append(out, s)
+	}
+	return out, errs
+}
+
+// ParseForms parses forms.csv. `fields` is a semicolon list of
+// "name:type[:required]" declarations, e.g. "Email:email:required;Phone:phone".
+func ParseForms(content []byte) ([]SourceForm, []ParseError) {
+	rows, err := readCSV(content)
+	if err != nil || len(rows) == 0 {
+		return nil, []ParseError{{Kind: "forms", Message: "unreadable CSV: " + errString(err)}}
+	}
+	h := rows[0]
+	iID := headerIndex(h, "id", "form_id")
+	iName := headerIndex(h, "name", "title", "form_name")
+	iFields := headerIndex(h, "fields", "form_fields")
+	if iName < 0 {
+		return nil, []ParseError{{Kind: "forms", Message: "name column is required"}}
+	}
+	var out []SourceForm
+	var errs []ParseError
+	for n, rec := range rows[1:] {
+		row := n + 2
+		name := cell(rec, iName)
+		if name == "" {
+			errs = append(errs, ParseError{Kind: "forms", Row: row, Message: "missing form name"})
+			continue
+		}
+		f := SourceForm{Name: name, Row: row}
+		f.SourceID = cell(rec, iID)
+		if f.SourceID == "" {
+			f.SourceID = strings.ToLower(name)
+		}
+		for _, spec := range strings.Split(cell(rec, iFields), ";") {
+			spec = strings.TrimSpace(spec)
+			if spec == "" {
+				continue
+			}
+			parts := strings.Split(spec, ":")
+			field := SourceFormField{Name: strings.TrimSpace(parts[0]), Type: "text"}
+			if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+				field.Type = strings.ToLower(strings.TrimSpace(parts[1]))
+			}
+			if len(parts) > 2 && strings.EqualFold(strings.TrimSpace(parts[2]), "required") {
+				field.Required = true
+			}
+			f.Fields = append(f.Fields, field)
+		}
+		out = append(out, f)
+	}
+	return out, errs
+}
+
+// ParsePages parses pages.csv — title/slug placeholders (content is
+// externally blocked, MIG-008).
+func ParsePages(content []byte) ([]SourcePage, []ParseError) {
+	rows, err := readCSV(content)
+	if err != nil || len(rows) == 0 {
+		return nil, []ParseError{{Kind: "pages", Message: "unreadable CSV: " + errString(err)}}
+	}
+	h := rows[0]
+	iID := headerIndex(h, "id", "page_id")
+	iTitle := headerIndex(h, "title", "name", "page_title")
+	iSlug := headerIndex(h, "slug", "path", "url_slug")
+	iType := headerIndex(h, "type", "page_type", "kind")
+	if iTitle < 0 {
+		return nil, []ParseError{{Kind: "pages", Message: "title column is required"}}
+	}
+	var out []SourcePage
+	var errs []ParseError
+	for n, rec := range rows[1:] {
+		row := n + 2
+		title := cell(rec, iTitle)
+		if title == "" {
+			errs = append(errs, ParseError{Kind: "pages", Row: row, Message: "missing page title"})
+			continue
+		}
+		p := SourcePage{Title: title, Row: row}
+		p.SourceID = cell(rec, iID)
+		p.Slug = strings.Trim(strings.ToLower(cell(rec, iSlug)), "/")
+		if p.Slug == "" {
+			p.Slug = strings.Trim(strings.ToLower(strings.ReplaceAll(title, " ", "-")), "/")
+		}
+		if p.SourceID == "" {
+			p.SourceID = p.Slug
+		}
+		switch strings.ToLower(cell(rec, iType)) {
+		case "landing", "landing_page":
+			p.PageType = "landing"
+		default:
+			p.PageType = "page"
+		}
+		out = append(out, p)
+	}
+	return out, errs
+}
+
 // DeriveOffers fills in offer stubs for transaction/grant offer references
 // not covered by offers.csv, so purchases always resolve to an Offer.
 func DeriveOffers(ex *Export) {
@@ -503,6 +713,9 @@ func DeriveOffers(ex *Export) {
 	}
 	for _, g := range ex.Grants {
 		addRef(g.OfferRef, 0, "")
+	}
+	for _, s := range ex.Subscriptions {
+		addRef(s.OfferRef, s.AmountMinor, s.Currency)
 	}
 }
 

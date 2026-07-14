@@ -17,6 +17,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/email"
 	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
 	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
+	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	badgecmd "github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
@@ -146,6 +147,15 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 	var session stripeCheckoutSession
 	if err := json.Unmarshal(raw, &session); err != nil {
 		return fmt.Errorf("decode session: %w", err)
+	}
+
+	// MIG-007: subscription-takeover journeys carry no offer metadata — they
+	// settle the MigratedSubscription record instead of provisioning.
+	if msubID := session.Metadata["migrated_subscription_id"]; msubID != "" {
+		if routes.SettleMigratedSubscription(tenantID, msubID, session.Subscription) {
+			log.Printf("[stripe webhook] migrated subscription %s activated (stripe sub %s)", msubID, session.Subscription)
+		}
+		return nil
 	}
 
 	offerIDHex := session.Metadata["offer_id"]

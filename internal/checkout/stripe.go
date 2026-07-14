@@ -109,3 +109,73 @@ func CreateStripeCheckoutSessionWithExtras(stripeKey, stripeAccount string, offe
 	}
 	return stripeResp.URL, nil
 }
+
+// SubscriptionCheckoutResult carries the minted subscription-mode session.
+type SubscriptionCheckoutResult struct {
+	SessionID string
+	URL       string
+}
+
+// CreateStripeSubscriptionCheckout mints a subscription-mode Checkout
+// Session for a migrated-subscription takeover (MIG-007): the customer
+// authorizes payment themselves — no stored payment method is ever charged.
+// idempotencyKey makes retried/concurrent activations converge on one
+// session; metadata routes the completion webhook back to the record.
+func CreateStripeSubscriptionCheckout(stripeKey, stripeAccount string, tenantID bson.ObjectId,
+	migratedSubID, title, currency string, amountMinor int64, interval, customerEmail,
+	successURL, cancelURL, idempotencyKey string) (*SubscriptionCheckoutResult, error) {
+
+	form := url.Values{}
+	form.Set("mode", "subscription")
+	form.Set("line_items[0][quantity]", "1")
+	form.Set("line_items[0][price_data][currency]", currency)
+	form.Set("line_items[0][price_data][unit_amount]", fmt.Sprintf("%d", amountMinor))
+	form.Set("line_items[0][price_data][recurring][interval]", interval)
+	form.Set("line_items[0][price_data][product_data][name]", title)
+	form.Set("success_url", successURL)
+	form.Set("cancel_url", cancelURL)
+	if customerEmail != "" {
+		form.Set("customer_email", customerEmail)
+	}
+	form.Set("metadata[tenant_id]", tenantID.Hex())
+	form.Set("metadata[migrated_subscription_id]", migratedSubID)
+	form.Set("subscription_data[metadata][tenant_id]", tenantID.Hex())
+	form.Set("subscription_data[metadata][migrated_subscription_id]", migratedSubID)
+
+	httpReq, err := http.NewRequest("POST", "https://api.stripe.com/v1/checkout/sessions", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.SetBasicAuth(stripeKey, "")
+	if stripeAccount != "" {
+		httpReq.Header.Set("Stripe-Account", stripeAccount)
+	}
+	if idempotencyKey != "" {
+		httpReq.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("stripe API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var stripeResp struct {
+		ID    string `json:"id"`
+		URL   string `json:"url"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stripeResp); err != nil {
+		return nil, fmt.Errorf("failed to decode stripe response: %w", err)
+	}
+	if stripeResp.Error != nil {
+		return nil, fmt.Errorf("stripe error: %s", stripeResp.Error.Message)
+	}
+	if stripeResp.URL == "" || stripeResp.ID == "" {
+		return nil, fmt.Errorf("stripe returned no checkout session")
+	}
+	return &SubscriptionCheckoutResult{SessionID: stripeResp.ID, URL: stripeResp.URL}, nil
+}

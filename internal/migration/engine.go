@@ -130,6 +130,12 @@ func loadExport(p *models.MigrationProject) (*Export, []ParseError, error) {
 			ex.Courses, pe = ParseCourses(f.Content)
 		case "assets":
 			ex.Assets, pe = ParseAssets(f.Content)
+		case "subscriptions":
+			ex.Subscriptions, pe = ParseSubscriptions(f.Content)
+		case "forms":
+			ex.Forms, pe = ParseForms(f.Content)
+		case "pages":
+			ex.Pages, pe = ParsePages(f.Content)
 		default:
 			pe = []ParseError{{Kind: f.Kind, Message: "unknown file kind"}}
 		}
@@ -221,6 +227,22 @@ func Rollback(p *models.MigrationProject) (bson.M, error) {
 	}
 	removed := map[string]int{}
 	for _, m := range maps {
+		// An activated (or in-flight) migrated subscription is a live Stripe
+		// billing relationship — deleting the record would orphan it. The
+		// operator must cancel it in Stripe first; rollback reports it and
+		// moves on (MIG-007).
+		if m.SourceType == models.SourceTypeSubscription {
+			var msub models.MigratedSubscription
+			if err := db.GetCollection(models.MigratedSubscriptionCollection).Find(bson.M{
+				"_id": m.LocalID, "tenant_id": p.TenantID,
+			}).One(&msub); err == nil &&
+				(msub.TakeoverState == models.MigratedSubStateActivated ||
+					msub.TakeoverState == models.MigratedSubStateRequiresAction) {
+				recordError(p, "rollback", m.SourceType, m.SourceID, 0,
+					"subscription is "+msub.TakeoverState+" — cancel in Stripe before removing")
+				continue
+			}
+		}
 		// A transaction's Purchase carries dependent rows created with it —
 		// purchase items and their migration grants — that must go with it.
 		if m.SourceType == models.SourceTypeTransaction {
@@ -267,6 +289,7 @@ func exportCounts(ex *Export) bson.M {
 		"contacts": len(ex.Contacts), "products": len(ex.Products), "offers": len(ex.Offers),
 		"transactions": len(ex.Transactions), "grants": len(ex.Grants),
 		"courses": len(ex.Courses), "assets": len(ex.Assets),
+		"subscriptions": len(ex.Subscriptions), "forms": len(ex.Forms), "pages": len(ex.Pages),
 	}
 }
 
@@ -277,6 +300,7 @@ func reconcileReport(p *models.MigrationProject, ex *Export) bson.M {
 		models.SourceTypeContact, models.SourceTypeTag, models.SourceTypeProduct,
 		models.SourceTypeOffer, models.SourceTypeTransaction, models.SourceTypeGrant,
 		models.SourceTypeCourse, models.SourceTypeAsset,
+		models.SourceTypeSubscription, models.SourceTypeForm, models.SourceTypePage,
 	} {
 		n, _ := db.GetCollection(models.SourceObjectMapCollection).Find(bson.M{
 			"tenant_id": p.TenantID, "source_system": p.SourceSystem, "source_type": st,
@@ -339,6 +363,9 @@ func (r *run) importAll() {
 	r.importTransactions()
 	r.importGrants()
 	r.importAssets()
+	r.importSubscriptions()
+	r.importForms()
+	r.importPages()
 }
 
 // lookupMap returns the existing map row's local id, if the source object

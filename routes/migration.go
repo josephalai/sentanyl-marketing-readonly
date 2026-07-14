@@ -30,6 +30,12 @@ func RegisterMigrationRoutes(rg *gin.RouterGroup) {
 		m.POST("/projects/:projectId/execute", handleMigrationExecute)
 		m.GET("/projects/:projectId/errors", handleMigrationErrors)
 		m.POST("/projects/:projectId/rollback", handleMigrationRollback)
+
+		// MIG-007 subscription takeover: review + explicit, audited owner
+		// decisions. Import never touches Stripe; these do.
+		m.GET("/projects/:projectId/subscriptions", handleMigrationSubscriptionList)
+		m.POST("/subscriptions/:subId/activate", handleMigrationSubscriptionActivate)
+		m.POST("/subscriptions/:subId/decline", handleMigrationSubscriptionDecline)
 	}
 }
 
@@ -57,6 +63,7 @@ func RegisterMigrationJobs() {
 var migrationFileKinds = map[string]bool{
 	"contacts": true, "products": true, "offers": true,
 	"transactions": true, "grants": true, "courses": true, "assets": true,
+	"subscriptions": true, "forms": true, "pages": true,
 }
 
 func migrationProject(c *gin.Context) (*pkgmodels.MigrationProject, bool) {
