@@ -95,8 +95,19 @@ func rewriteCampaignLinks(body, campaignPubID string, rules []pkgmodels.Campaign
 		}
 
 		badge := matchClickBadge(href, rules)
-		tracked := fmt.Sprintf("%s/api/marketing/campaigns/track/click?c=%s&r={{REC_PUBLIC_ID}}&e={{SEND_PUBLIC_ID}}&u=%s",
-			publicBaseURL(), campaignPubID, urlQueryEscape(href))
+		// COM-EM-006: absolute destinations ride a signed token minted per
+		// recipient (the {{CLICK_TOKEN|…}} placeholder resolves at send
+		// time), so the tracker never sees a raw external redirect target.
+		// Relative destinations keep the legacy u= form, which the tracker
+		// only honors same-origin.
+		var tracked string
+		if strings.HasPrefix(hl, "http://") || strings.HasPrefix(hl, "https://") {
+			tracked = fmt.Sprintf("%s/api/marketing/campaigns/track/click?c=%s&r={{REC_PUBLIC_ID}}&e={{SEND_PUBLIC_ID}}&t=%s",
+				publicBaseURL(), campaignPubID, clickTokenPlaceholder(href))
+		} else {
+			tracked = fmt.Sprintf("%s/api/marketing/campaigns/track/click?c=%s&r={{REC_PUBLIC_ID}}&e={{SEND_PUBLIC_ID}}&u=%s",
+				publicBaseURL(), campaignPubID, urlQueryEscape(href))
+		}
 		if badge != "" {
 			tracked += "&b=" + urlQueryEscape(badge)
 		}
@@ -104,10 +115,11 @@ func rewriteCampaignLinks(body, campaignPubID string, rules []pkgmodels.Campaign
 	})
 }
 
-// campaignOpenPixel appends the unified 1x1 open pixel; the send id is
-// substituted per recipient alongside {{REC_PUBLIC_ID}}.
+// campaignOpenPixel appends the unified 1x1 open pixel. The pixel carries a
+// signed open token minted per recipient (COM-EM-006) instead of a bare
+// send id, so opens cannot be stamped by enumeration.
 func campaignOpenPixel(body string) string {
-	pixel := `<img src="` + publicBaseURL() + `/api/marketing/track/open?e={{SEND_PUBLIC_ID}}" width="1" height="1" style="display:none" alt=""/>`
+	pixel := `<img src="` + publicBaseURL() + `/api/marketing/track/open?t={{OPEN_TOKEN}}" width="1" height="1" style="display:none" alt=""/>`
 	if i := strings.LastIndex(body, "</body>"); i >= 0 {
 		return body[:i] + pixel + body[i:]
 	}
@@ -205,6 +217,7 @@ func dispatchCampaign(camp *pkgmodels.Campaign, scheduled bool, scheduledAt time
 		msg.SubjectLine = camp.Subject
 		msg.Html = strings.ReplaceAll(bodyHTML, "{{REC_PUBLIC_ID}}", recipient.PublicId)
 		msg.Html = strings.ReplaceAll(msg.Html, "{{SEND_PUBLIC_ID}}", send.PublicId)
+		msg.Html = signEmailTrackingPlaceholders(msg.Html, camp.TenantID.Hex(), send.PublicId)
 		// Visible opt-out footer rides the stored HTML so scheduled sends keep
 		// it; the RFC 8058 headers attach on the instant path below.
 		msg.Html = emailer.AppendUnsubFooter(msg.Html, unsubURL, postal)

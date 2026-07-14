@@ -79,18 +79,14 @@ func handleViewSite(c *gin.Context) {
 		}
 	}
 
-	// Serve PublishedHTML if available (cloned sites), otherwise render from DraftDocument
+	// Public path serves published output ONLY (ACQ-015). Drafts are never
+	// rendered here — unpublished work stays invisible until the owner
+	// publishes; the authenticated preview endpoint is the draft surface.
 	if pg.PublishedHTML != "" {
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(pg.PublishedHTML))
 		return
 	}
-	if pg.DraftDocument != nil {
-		html := site.RenderPuckDocumentToHTML(pg.DraftDocument, pg.SEO, &s)
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
-		return
-	}
-	html := site.RenderStubPage(&pg, &s)
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	c.String(http.StatusNotFound, "Page not found")
 }
 
 func handlePreviewPage(c *gin.Context) {

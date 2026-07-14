@@ -160,7 +160,7 @@ func broadcastNewsletterPost(p *pkgmodels.Product, post *pkgmodels.NewsletterPos
 		msg.From = from
 		msg.To = sub.Email
 		msg.SubjectLine = subject
-		msg.Html = personalizeEmail(bodyHTML, sub)
+		msg.Html = signEmailTrackingPlaceholders(personalizeEmail(bodyHTML, sub), post.TenantID.Hex(), send.PublicId)
 		msg.ReplyTo = cfg.ReplyToEmail
 		if msg.ReplyTo == "" {
 			msg.ReplyTo = verpReplyTo
@@ -222,7 +222,7 @@ func wrapEmailHTML(post *pkgmodels.NewsletterPost, body string, postalAddress st
 	// fired all other resource loads by the time they reach it. Width/height
 	// 1px so it renders silently. Some clients block remote images by default
 	// — that's an accepted floor for open-rate accuracy.
-	pixel := fmt.Sprintf(`<img src="/api/marketing/newsletters/track/open?p=%s&s={{SUB_PUBLIC_ID}}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0">`, post.PublicId)
+	pixel := fmt.Sprintf(`<img src="/api/marketing/newsletters/track/open?p=%s&s={{SUB_PUBLIC_ID}}&t={{OPEN_TOKEN}}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0">`, post.PublicId)
 	address := ""
 	if strings.TrimSpace(postalAddress) != "" {
 		address = "<br/>" + htmlEscape(strings.TrimSpace(postalAddress))
@@ -262,8 +262,17 @@ func rewriteLinksForTracking(body, postPublicID string) string {
 		if strings.HasPrefix(hl, "mailto:") || strings.HasPrefix(hl, "tel:") || strings.HasPrefix(hl, "#") || strings.Contains(href, "/track/") || strings.Contains(href, "{{") {
 			return match
 		}
-		tracked := fmt.Sprintf("/api/marketing/newsletters/track/click?p=%s&s={{SUB_PUBLIC_ID}}&u=%s",
-			postPublicID, urlQueryEscape(href))
+		// COM-EM-006: absolute destinations ride a signed per-recipient
+		// token; the tracker refuses raw external destinations. Relative
+		// destinations keep the legacy u= form (same-origin only).
+		var tracked string
+		if strings.HasPrefix(hl, "http://") || strings.HasPrefix(hl, "https://") {
+			tracked = fmt.Sprintf("/api/marketing/newsletters/track/click?p=%s&s={{SUB_PUBLIC_ID}}&t=%s",
+				postPublicID, clickTokenPlaceholder(href))
+		} else {
+			tracked = fmt.Sprintf("/api/marketing/newsletters/track/click?p=%s&s={{SUB_PUBLIC_ID}}&u=%s",
+				postPublicID, urlQueryEscape(href))
+		}
 		return fmt.Sprintf(`<a %shref="%s"%s>`, pre, tracked, post)
 	})
 }

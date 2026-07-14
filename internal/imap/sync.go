@@ -75,6 +75,17 @@ func syncAllAccounts() {
 	}
 }
 
+// SyncAccountNow runs one immediate sync pass for a single account — the
+// "Sync now" button's real backend (the endpoint previously answered with a
+// manual_ready stub while the actual sync only ran on the background sweep).
+func SyncAccountNow(accountID bson.ObjectId) error {
+	var acct pkgmodels.InboxAccount
+	if err := db.GetCollection(pkgmodels.InboxAccountCollection).FindId(accountID).One(&acct); err != nil {
+		return err
+	}
+	return syncAccount(acct)
+}
+
 func syncAccount(acct pkgmodels.InboxAccount) error {
 	if acct.CredentialsEncrypted == "" {
 		return nil

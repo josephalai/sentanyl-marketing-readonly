@@ -3,7 +3,6 @@ package handlers
 import (
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
@@ -90,12 +89,14 @@ func handleCheckoutLookup(c *gin.Context) {
 		return
 	}
 
-	// New buyer: return the reset token as long as it's still valid. Expired
-	// token (past 48h) falls through to the "check email" path.
-	tokenValid := contact.PasswordResetToken != "" &&
-		contact.PasswordResetExpires != nil &&
-		time.Now().Before(*contact.PasswordResetExpires)
-	if !tokenValid {
+	// New buyer: only a hash of the setup token is stored (ID-015), so the
+	// stored value can't be echoed back. Mint a fresh token for this success-
+	// page visit instead — the plaintext handoff happens exactly once per
+	// mint, and re-minting invalidates any earlier emailed link (same
+	// last-request-wins semantics as the forgot-password flow).
+	token, _, err := setPasswordResetToken(contact.Id)
+	if err != nil {
+		log.Printf("[checkout lookup] setup-token mint for %s: %v", contact.Email, err)
 		c.JSON(http.StatusOK, checkoutLookupResponse{
 			Status: "existing_account",
 			Email:  string(contact.Email),
@@ -106,6 +107,6 @@ func handleCheckoutLookup(c *gin.Context) {
 	c.JSON(http.StatusOK, checkoutLookupResponse{
 		Status:     "new_account",
 		Email:      string(contact.Email),
-		SetupToken: contact.PasswordResetToken,
+		SetupToken: token,
 	})
 }

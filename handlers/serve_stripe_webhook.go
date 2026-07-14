@@ -2,8 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -570,17 +568,19 @@ func callInternalEnroll(tenantID, contactID, productID bson.ObjectId) error {
 	return nil
 }
 
+// setPasswordResetToken mints a setup token for the contact. Only the hash
+// is persisted (ID-015); the returned plaintext is the single handoff and
+// must reach the customer directly (email link / checkout success page).
 func setPasswordResetToken(contactID bson.ObjectId) (string, time.Time, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
+	token, hashed, err := auth.MintResetToken()
+	if err != nil {
 		return "", time.Time{}, err
 	}
-	token := hex.EncodeToString(buf)
 	expires := time.Now().Add(48 * time.Hour)
-	err := db.GetCollection(pkgmodels.UserCollection).Update(
+	err = db.GetCollection(pkgmodels.UserCollection).Update(
 		bson.M{"_id": contactID},
 		bson.M{"$set": bson.M{
-			"password_reset_token":   token,
+			"password_reset_token":   hashed,
 			"password_reset_expires": expires,
 		}},
 	)

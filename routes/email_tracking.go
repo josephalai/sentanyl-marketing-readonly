@@ -1,8 +1,10 @@
 package routes
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,10 +36,22 @@ var emailTrackingGIF = []byte{
 	0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B,
 }
 
-// handleEmailTrackOpen is GET /api/marketing/track/open?e=<send public id>.
-// Sets opened_at once (first open wins) and always returns the pixel.
+// handleEmailTrackOpen is GET /api/marketing/track/open.
+//
+// COM-EM-006: the canonical form carries a signed token (?t=) binding tenant
+// and send id, so opens cannot be stamped by guessing/enumerating send ids.
+// The legacy unsigned ?e=<send public id> form is honored only for emails
+// rendered before signing shipped. Always returns the pixel.
 func handleEmailTrackOpen(c *gin.Context) {
-	if sendID := c.Query("e"); sendID != "" {
+	sendID := ""
+	if tok := c.Query("t"); tok != "" {
+		if _, sid, ok := linktoken.VerifyOpen(tok); ok {
+			sendID = sid
+		}
+	} else {
+		sendID = c.Query("e")
+	}
+	if sendID != "" {
 		_ = db.GetCollection(pkgmodels.EmailSendCollection).Update(
 			bson.M{"public_id": sendID, "opened_at": nil},
 			bson.M{"$set": bson.M{"opened_at": time.Now()}},
@@ -46,6 +60,54 @@ func handleEmailTrackOpen(c *gin.Context) {
 	c.Header("Content-Type", "image/gif")
 	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 	_, _ = c.Writer.Write(emailTrackingGIF)
+}
+
+// ---------- Renderer-side signing (COM-EM-006) ----------
+
+// Renderers rewrite links/pixels at template time, before per-recipient send
+// rows exist, so they embed placeholders instead of tokens:
+//
+//	{{CLICK_TOKEN|<base64url of destination>}}
+//	{{OPEN_TOKEN}}
+//
+// signEmailTrackingPlaceholders resolves them per recipient once the
+// EmailSend row's public id is known, minting linktoken-signed values that
+// bind (tenant, send, destination).
+var (
+	clickTokenPlaceholderRE = regexp.MustCompile(`\{\{CLICK_TOKEN\|([A-Za-z0-9_-]+)\}\}`)
+	openTokenPlaceholder    = "{{OPEN_TOKEN}}"
+)
+
+// clickTokenPlaceholder encodes a destination URL into the placeholder a
+// renderer embeds in the tracked link's t= parameter.
+func clickTokenPlaceholder(destURL string) string {
+	return "{{CLICK_TOKEN|" + base64.RawURLEncoding.EncodeToString([]byte(destURL)) + "}}"
+}
+
+func signEmailTrackingPlaceholders(html, tenantID, sendPublicID string) string {
+	html = clickTokenPlaceholderRE.ReplaceAllStringFunc(html, func(m string) string {
+		groups := clickTokenPlaceholderRE.FindStringSubmatch(m)
+		if len(groups) != 2 {
+			return ""
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(groups[1])
+		if err != nil {
+			return ""
+		}
+		tok, err := linktoken.Sign(tenantID, sendPublicID, string(raw), 0)
+		if err != nil {
+			return ""
+		}
+		return tok
+	})
+	if strings.Contains(html, openTokenPlaceholder) {
+		if tok, err := linktoken.SignOpen(tenantID, sendPublicID); err == nil {
+			html = strings.ReplaceAll(html, openTokenPlaceholder, tok)
+		} else {
+			html = strings.ReplaceAll(html, openTokenPlaceholder, "")
+		}
+	}
+	return html
 }
 
 // handleEmailTrackClick is GET /api/marketing/track/click.

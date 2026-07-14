@@ -8,6 +8,7 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -253,9 +254,15 @@ func handleInboxSyncAccount(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "inbox account not found"})
 		return
 	}
-	now := time.Now()
-	_ = db.GetCollection(pkgmodels.InboxAccountCollection).UpdateId(account.Id, bson.M{"$set": bson.M{"last_synced_at": now, "sync_status": "manual_ready"}})
-	c.JSON(http.StatusAccepted, gin.H{"status": "manual_ready", "message": "Provider sync is not wired yet; use /inbox/process-inbound for dev ingestion."})
+	// Trigger a real sync pass for this account (the same code path the
+	// durable imap.sync.sweep runs); the UI polls sync_status/last_synced_at.
+	_ = db.GetCollection(pkgmodels.InboxAccountCollection).UpdateId(account.Id, bson.M{"$set": bson.M{"sync_status": "syncing"}})
+	go func(id bson.ObjectId) {
+		if err := imapsync.SyncAccountNow(id); err != nil {
+			log.Printf("[inbox] manual sync for account %s: %v", id.Hex(), err)
+		}
+	}(account.Id)
+	c.JSON(http.StatusAccepted, gin.H{"status": "syncing"})
 }
 
 func handleInboxCreateAgent(c *gin.Context) {
@@ -453,6 +460,13 @@ func handleInboxGetMessage(c *gin.Context) {
 }
 
 func handleInboxProcessInbound(c *gin.Context) {
+	// Dev/e2e ingestion only (COM-EM-003): production inbound mail arrives
+	// via the authenticated IMAP sync and the inbound-smtp relay. A
+	// fabricated-payload injection endpoint must not exist in production.
+	if auth.IsProductionEnv() && os.Getenv("SENTANYL_E2E_MODE") != "1" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
 	tenantID, ok := tenantIDFromContext(c)
 	if !ok {
 		return

@@ -21,6 +21,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/linktoken"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/render"
 	"github.com/josephalai/sentanyl/pkg/utils"
@@ -1380,6 +1381,15 @@ func handleNewsletterTrackOpen(c *gin.Context) {
 		respondPixel()
 		return
 	}
+	// COM-EM-006: pixels rendered after signing shipped carry a signed open
+	// token; when present it must verify or the hit is not stamped. Pixels
+	// from older emails (no t=) keep the legacy p/s-only stamping.
+	if tok := c.Query("t"); tok != "" {
+		if _, _, ok := linktoken.VerifyOpen(tok); !ok {
+			respondPixel()
+			return
+		}
+	}
 	var post pkgmodels.NewsletterPost
 	if err := db.GetCollection(pkgmodels.NewsletterPostCollection).Find(bson.M{
 		"public_id": postPublicID,
@@ -1417,19 +1427,36 @@ func handleNewsletterTrackOpen(c *gin.Context) {
 }
 
 // handleNewsletterTrackClick increments the click counter, dedupes per
-// (subscriber, post) the same way as opens, and 302s to the decoded target
-// URL. The original URL is in the `u` query param (URL-escaped at email
-// composition time).
+// (subscriber, post) the same way as opens, and 302s to the destination.
+//
+// COM-EM-006: absolute destinations are honored only from a signed token
+// (?t=) — this endpoint was an open redirect via raw ?u=. The legacy ?u=
+// form survives for relative (same-origin) destinations only.
 func handleNewsletterTrackClick(c *gin.Context) {
 	postPublicID := c.Query("p")
 	subPublicID := c.Query("s")
-	target := c.Query("u")
-	if target == "" {
-		c.String(http.StatusBadRequest, "missing target")
-		return
-	}
-	if decoded, err := decodeQueryURL(target); err == nil {
-		target = decoded
+	target := ""
+	if tok := c.Query("t"); tok != "" {
+		if _, _, dest, ok := linktoken.Verify(tok); ok {
+			target = dest
+		} else {
+			c.Redirect(http.StatusFound, "/")
+			return
+		}
+	} else {
+		raw := c.Query("u")
+		if raw == "" {
+			c.String(http.StatusBadRequest, "missing target")
+			return
+		}
+		if decoded, err := decodeQueryURL(raw); err == nil {
+			raw = decoded
+		}
+		if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
+			target = raw
+		} else {
+			target = "/" // refuse external raw destinations (open-redirect fix)
+		}
 	}
 	if postPublicID != "" && subPublicID != "" {
 		var post pkgmodels.NewsletterPost

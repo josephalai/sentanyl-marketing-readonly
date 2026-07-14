@@ -151,12 +151,20 @@ func handleSimulatePurchase(c *gin.Context) {
 		return
 	}
 
+	// Only a hash is stored (ID-015), so the DB row can't be echoed back —
+	// mint a fresh token the same way the checkout success page does.
+	setupToken, _, err := setPasswordResetToken(contact.Id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "setup token mint failed"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"contact_id":             contact.Id.Hex(),
-		"contact_public_id":      contact.PublicId,
-		"email":                  string(contact.Email),
-		"password_reset_token":   contact.PasswordResetToken,
-		"set_password_url":       buildPortalSetPasswordURL(domain, contact.PasswordResetToken),
-		"session_id":             sessionID,
+		"contact_id":           contact.Id.Hex(),
+		"contact_public_id":    contact.PublicId,
+		"email":                string(contact.Email),
+		"password_reset_token": setupToken,
+		"set_password_url":     buildPortalSetPasswordURL(domain, setupToken),
+		"session_id":           sessionID,
 	})
 }
