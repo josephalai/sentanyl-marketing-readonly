@@ -3,9 +3,12 @@ package routes
 import (
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,10 +17,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	mgo "gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/marketing-service/internal/checkout"
+	"github.com/josephalai/sentanyl/marketing-service/internal/deliveryverify"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
@@ -1526,6 +1531,8 @@ type deliveryWebhookEvent struct {
 // deliveryWebhookAuthorized checks the shared delivery-webhook secret. In
 // production a missing secret fails closed (no request is accepted); in
 // non-production an unset secret is tolerated so local/e2e keep working.
+// Kept for the generic/shared path; named providers verify natively via
+// internal/deliveryverify (COM-EM-001).
 func deliveryWebhookAuthorized(c *gin.Context) bool {
 	secret := os.Getenv("DELIVERY_WEBHOOK_SECRET")
 	if secret == "" {
@@ -1538,48 +1545,55 @@ func deliveryWebhookAuthorized(c *gin.Context) bool {
 	return hmac.Equal([]byte(got), []byte(secret))
 }
 
-// resolveDeliveryTenant binds a provider event to exactly one tenant via the
-// EmailSend row identified by the provider message id. It never resolves by
-// email alone: if the message id is missing or unknown, or the address matches
-// sends in more than one tenant, it refuses so a bounce/complaint cannot spill
-// suppression across tenants.
-func resolveDeliveryTenant(messageID, email string) (bson.ObjectId, bool) {
-	if messageID != "" {
-		var send pkgmodels.EmailSend
-		if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"message_id": messageID}).One(&send); err == nil && send.TenantID != "" {
-			return send.TenantID, true
-		}
+// EnsureDeliveryEventIndexes creates the immutable provider-event invariant
+// (COM-EM-001): one stored row per (provider, event id), duplicates acked
+// without reprocessing. Same collection/keys as the core-service Stripe
+// events (BILL-002).
+func EnsureDeliveryEventIndexes() {
+	if err := db.GetCollection(pkgmodels.ProviderEventCollection).EnsureIndex(mgo.Index{
+		Key:        []string{"provider", "event_id"},
+		Unique:     true,
+		Background: true,
+	}); err != nil {
+		log.Printf("newsletters: provider event index: %v", err)
 	}
-	// Fallback: the address must be unambiguous — sends to exactly one tenant.
-	var sends []pkgmodels.EmailSend
-	_ = db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"recipient_email": email}).Select(bson.M{"tenant_id": 1}).All(&sends)
-	tenantSet := map[string]bson.ObjectId{}
-	for _, s := range sends {
-		if s.TenantID != "" {
-			tenantSet[s.TenantID.Hex()] = s.TenantID
-		}
+}
+
+// resolveDeliverySend binds a provider event to the exact EmailSend row via
+// the provider message id — the only accepted binding (COM-EM-007). There is
+// deliberately NO email-address fallback: an event that cannot be bound is
+// stored unattributed for reconciliation instead of guessed onto a send.
+func resolveDeliverySend(messageID string) (*pkgmodels.EmailSend, bool) {
+	if messageID == "" {
+		return nil, false
 	}
-	if len(tenantSet) == 1 {
-		for _, tid := range tenantSet {
-			return tid, true
-		}
+	var send pkgmodels.EmailSend
+	if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(bson.M{"message_id": messageID}).One(&send); err != nil || send.TenantID == "" {
+		return nil, false
 	}
-	return "", false
+	return &send, true
 }
 
 func handleNewsletterDeliveryWebhook(c *gin.Context) {
 	provider := c.Param("provider")
 
-	// COM-EM-001: this endpoint is public but must not be an unauthenticated,
-	// cross-tenant suppression primitive. Require a shared delivery secret
-	// (the provider config carries it); fail closed in production when unset.
-	if !deliveryWebhookAuthorized(c) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unreadable body"})
+		return
+	}
+
+	// COM-EM-001: named providers authenticate with their NATIVE signature
+	// scheme (fail-closed in production when unconfigured); the generic path
+	// keeps the platform shared secret.
+	if err := deliveryverify.Verify(provider, c.Request.Header, c.Request.URL.Query(), body); err != nil {
+		log.Printf("[delivery webhook] %s verification failed: %v", provider, err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized delivery webhook"})
 		return
 	}
 
 	var ev deliveryWebhookEvent
-	if err := c.ShouldBindJSON(&ev); err != nil {
+	if err := json.Unmarshal(body, &ev); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
 		return
 	}
@@ -1589,14 +1603,53 @@ func handleNewsletterDeliveryWebhook(c *gin.Context) {
 		return
 	}
 
-	// Resolve the exact tenant from the provider message id via the EmailSend
-	// row. Never suppress by email alone (that would let one tenant's event —
-	// or a forged one — suppress the same address in unrelated tenants).
-	tenantID, ok := resolveDeliveryTenant(ev.MessageID, email)
-	if !ok {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "could not bind event to a tenant send"})
+	// Immutable ProviderEvent store (COM-EM-001): persist BEFORE processing;
+	// a redelivered event id is acked without reprocessing. Providers that
+	// don't carry a native event id get a content hash.
+	eventID := ""
+	if raw, ok := ev.Raw["event_id"].(string); ok {
+		eventID = raw
+	}
+	if eventID == "" {
+		sum := sha256.Sum256(body)
+		eventID = hex.EncodeToString(sum[:])
+	}
+	now := time.Now()
+	pe := &pkgmodels.ProviderEvent{
+		Id:        bson.NewObjectId(),
+		Provider:  "email:" + provider,
+		EventID:   eventID,
+		Type:      ev.Type,
+		Status:    pkgmodels.ProviderEventReceived,
+		Attempts:  1,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.GetCollection(pkgmodels.ProviderEventCollection).Insert(pe); err != nil {
+		if mgo.IsDup(err) {
+			c.JSON(http.StatusOK, gin.H{"status": "duplicate", "provider": provider})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "event store failed"})
 		return
 	}
+	markEvent := func(status, note string) {
+		_ = db.GetCollection(pkgmodels.ProviderEventCollection).UpdateId(pe.Id, bson.M{"$set": bson.M{
+			"status": status, "last_error": note, "updated_at": time.Now(),
+		}})
+	}
+
+	// Exact attribution only (COM-EM-007): the event must bind to the send
+	// row named by its provider message id. Unbindable events are stored for
+	// reconciliation — never guessed onto an address or a recent post.
+	send, ok := resolveDeliverySend(ev.MessageID)
+	if !ok {
+		markEvent("unattributed", "no send row for message_id")
+		c.JSON(http.StatusAccepted, gin.H{"status": "unattributed", "provider": provider})
+		return
+	}
+	tenantID := send.TenantID
+
 	var newStatus string
 	var statField string
 	switch ev.Type {
@@ -1610,14 +1663,16 @@ func handleNewsletterDeliveryWebhook(c *gin.Context) {
 		newStatus = pkgmodels.NewsletterSubscriptionStatusUnsubscribed
 		statField = "stats.unsubscribes"
 	case "delivered":
-		// Informational only — no status change.
+		// Informational — recorded, no status change.
+		markEvent(pkgmodels.ProviderEventProcessed, "")
 		c.JSON(http.StatusOK, gin.H{"status": "ack"})
 		return
 	default:
+		markEvent(pkgmodels.ProviderEventFailed, "unsupported event type")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported event type"})
 		return
 	}
-	now := time.Now()
+
 	info, err := db.GetCollection(pkgmodels.NewsletterSubscriptionCollection).UpdateAll(
 		bson.M{"email": email, "tenant_id": tenantID, "status": pkgmodels.NewsletterSubscriptionStatusActive},
 		bson.M{"$set": bson.M{
@@ -1629,48 +1684,32 @@ func handleNewsletterDeliveryWebhook(c *gin.Context) {
 	if info != nil {
 		matched = info.Updated
 	}
-	// Bump per-post stats too, attributing to whichever post this subscriber
-	// last received — the email_id query param would be the cleanest binding
-	// but we don't carry it through MailHog. For now bump the most recent
-	// published post for each affected subscription.
-	if matched > 0 && statField != "" {
-		var subs []pkgmodels.NewsletterSubscription
-		_ = db.GetCollection(pkgmodels.NewsletterSubscriptionCollection).Find(bson.M{
-			"email":  email,
-			"status": newStatus,
-		}).All(&subs)
-		for _, s := range subs {
-			var latest pkgmodels.NewsletterPost
-			if err := db.GetCollection(pkgmodels.NewsletterPostCollection).Find(bson.M{
-				"product_id": s.ProductID,
-				"status":     pkgmodels.NewsletterPostStatusPublished,
-			}).Sort("-published_at").One(&latest); err == nil {
-				_ = db.GetCollection(pkgmodels.NewsletterPostCollection).Update(
-					bson.M{"_id": latest.Id},
-					bson.M{"$inc": bson.M{statField: 1}},
-				)
-			}
-		}
-	}
 	_ = err
-	// Stamp the unified per-email tracking rows: message_id when the
-	// provider carries it, else the most recent send to this address.
+
+	// Per-post stats attribute to the EXACT post the bound send delivered —
+	// never "the most recent post" (COM-EM-007).
+	if matched > 0 && statField != "" && send.NewsletterPostPublicID != "" {
+		_ = db.GetCollection(pkgmodels.NewsletterPostCollection).Update(
+			bson.M{"public_id": send.NewsletterPostPublicID},
+			bson.M{"$inc": bson.M{statField: 1}},
+		)
+	}
+
+	// Stamp the unified per-email tracking row — the bound send, exactly.
 	switch ev.Type {
 	case "bounce", "complaint":
-		MarkEmailSendBounced("", ev.MessageID, email, now)
+		_ = db.GetCollection(pkgmodels.EmailSendCollection).Update(
+			bson.M{"_id": send.Id, "bounced_at": nil},
+			bson.M{"$set": bson.M{"bounced_at": now}},
+		)
 	case "unsubscribe":
-		var row pkgmodels.EmailSend
-		q := bson.M{"recipient_email": email, "unsubscribed_at": nil}
-		if ev.MessageID != "" {
-			q = bson.M{"message_id": ev.MessageID}
-		}
-		if err := db.GetCollection(pkgmodels.EmailSendCollection).Find(q).Sort("-sent_at").One(&row); err == nil {
-			_ = db.GetCollection(pkgmodels.EmailSendCollection).Update(
-				bson.M{"_id": row.Id},
-				bson.M{"$set": bson.M{"unsubscribed_at": now}},
-			)
-		}
+		_ = db.GetCollection(pkgmodels.EmailSendCollection).Update(
+			bson.M{"_id": send.Id, "unsubscribed_at": nil},
+			bson.M{"$set": bson.M{"unsubscribed_at": now}},
+		)
 	}
+
+	markEvent(pkgmodels.ProviderEventProcessed, "")
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "provider": provider, "matched": matched})
 }
 

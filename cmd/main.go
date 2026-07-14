@@ -115,6 +115,9 @@ func main() {
 	// server-side video badge qualifications.
 	badges.EnsureIndexes()
 	badges.RegisterMediaQualifiedConsumer()
+
+	// COM-EM-001: immutable delivery ProviderEvent invariant.
+	routes.EnsureDeliveryEventIndexes()
 	routes.StartTimerApprovalLoop()
 
 	// Initialize the GCS storage provider used by digital download deliveries
