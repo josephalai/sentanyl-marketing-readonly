@@ -1,12 +1,14 @@
 package imap
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 	"gopkg.in/mgo.v2/bson"
@@ -29,17 +31,31 @@ func RegisterHandler(h InboundHandler) {
 	registeredHandler = h
 }
 
+const syncSweepJobType = "imap.sync.sweep"
+
 // StartSyncLoop polls all active IMAP inbox accounts every interval.
-// Call once from main, runs as a goroutine.
+// Call once from main.
+//
+// OPS-001/OPS-004: the pass runs as a durable self-rescheduling job on
+// pkg/jobs (was an in-process ticker), so it survives restarts, panics are
+// retried/dead-lettered by the worker, and the job lease guarantees a single
+// syncer across replicas.
 func StartSyncLoop(interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for range ticker.C {
-			syncAllAccounts()
+	jobs.Register(syncSweepJobType, func(ctx context.Context, job *jobs.Job) error {
+		// Re-arm the chain FIRST so a crash mid-sync never stalls the loop.
+		if err := jobs.EnqueueSweep(syncSweepJobType, time.Now().Add(interval), interval); err != nil {
+			return err
 		}
-	}()
-	log.Printf("imap: sync loop started (interval=%s)", interval)
+		syncAllAccounts()
+		if job.RunAt.Unix()%3600 < int64(interval/time.Second) {
+			jobs.PruneSucceeded(syncSweepJobType, 24*time.Hour)
+		}
+		return nil
+	})
+	if err := jobs.EnqueueSweep(syncSweepJobType, time.Now(), interval); err != nil {
+		log.Printf("imap: bootstrap sweep enqueue failed: %v", err)
+	}
+	log.Printf("imap: durable sync sweep registered (interval=%s)", interval)
 }
 
 func syncAllAccounts() {

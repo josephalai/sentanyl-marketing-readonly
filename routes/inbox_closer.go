@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/emailer"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/mcptools"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/plans"
@@ -1887,17 +1889,31 @@ func handleInboxAgentSetContextPacks(c *gin.Context) {
 
 // ─── Timer Approval Job ───────────────────────────────────────────────────────
 
+const timerApprovalSweepJobType = "inbox.timer_approvals.sweep"
+
 // StartTimerApprovalLoop runs every minute and auto-sends timer_pending drafts
 // whose send_after_at has passed and have not been rejected or edited.
+//
+// OPS-001/OPS-004: durable self-rescheduling sweep on pkg/jobs (was an
+// in-process ticker) — restart-proof, retried/dead-lettered on panic, and
+// leased so only one replica sends a due draft.
 func StartTimerApprovalLoop() {
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			runTimerApprovals()
+	const interval = time.Minute
+	jobs.Register(timerApprovalSweepJobType, func(ctx context.Context, job *jobs.Job) error {
+		// Re-arm the chain FIRST so a crash mid-pass never stalls approvals.
+		if err := jobs.EnqueueSweep(timerApprovalSweepJobType, time.Now().Add(interval), interval); err != nil {
+			return err
 		}
-	}()
-	log.Printf("inbox: timer approval loop started")
+		runTimerApprovals()
+		if job.RunAt.Unix()%3600 < int64(interval/time.Second) {
+			jobs.PruneSucceeded(timerApprovalSweepJobType, 24*time.Hour)
+		}
+		return nil
+	})
+	if err := jobs.EnqueueSweep(timerApprovalSweepJobType, time.Now(), interval); err != nil {
+		log.Printf("inbox: bootstrap timer-approval sweep enqueue failed: %v", err)
+	}
+	log.Printf("inbox: durable timer approval sweep registered")
 }
 
 func runTimerApprovals() {
