@@ -19,6 +19,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
 	"github.com/josephalai/sentanyl/pkg/aigov"
+	"github.com/josephalai/sentanyl/pkg/audit"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/config"
@@ -146,7 +147,9 @@ func main() {
 	// Tenant mailbox OAuth callback (COM-EM-003) — public; auth is the
 	// HMAC-signed state minted by the authorize-url endpoint.
 	routes.RegisterInboxOAuthPublicRoutes(r)
+	audit.Init("marketing-service")
 	r.Use(httputil.CORSMiddleware())
+	r.Use(audit.Middleware())
 
 	r.GET("/health", httputil.HealthHandler("marketing-service"))
 
