@@ -16,6 +16,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/marketing-service/internal/webhooks"
 	"github.com/josephalai/sentanyl/marketing-service/routes"
+	"github.com/josephalai/sentanyl/pkg/aigov"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/config"
@@ -61,8 +62,10 @@ func main() {
 	// Durable job kernel: indexes, handlers, and a background worker for
 	// outbound webhook delivery (WH-003) and future durable workloads.
 	jobs.EnsureIndexes()
-	// Inbox-agent machine principals are minted from this service (MCP-001).
+	// Inbox-agent machine principals are minted from this service (MCP-001);
+	// AI executions are ledgered from the inbox/site AI paths (AI-001).
 	auth.EnsurePrincipalIndexes()
+	aigov.EnsureIndexes()
 	webhooks.RegisterHandlers()
 	routes.RegisterStoryStartJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})

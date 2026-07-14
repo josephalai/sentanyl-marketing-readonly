@@ -6,10 +6,29 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/aigov"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
+
+// inboxReplyOutcome maps the guardrail verdict onto the AIExecution outcome
+// vocabulary, downgrading a failed auto-send to error.
+func inboxReplyOutcome(action string, sendErr error) string {
+	switch action {
+	case "auto_send":
+		if sendErr != nil {
+			return pkgmodels.AIOutcomeError
+		}
+		return pkgmodels.AIOutcomeSent
+	case "escalate":
+		return pkgmodels.AIOutcomeEscalated
+	case "timer_send":
+		return pkgmodels.AIOutcomeTimer
+	default: // save_draft
+		return pkgmodels.AIOutcomeDraft
+	}
+}
 
 // inboundEmail is a provider-agnostic inbound message. Every ingestion path
 // (IMAP sync, the dev simulate endpoint, the platform inbound relay) reduces
@@ -140,9 +159,28 @@ func processInboundEmail(tenantID bson.ObjectId, agent *pkgmodels.InboxAgent, ac
 		runInboxActionPass(tenant, agent, contact, thread, msg, draft, classification)
 	}
 
+	var sendErr error
 	if verdict.Action == "auto_send" {
-		_ = sendDraftNow(agent, account, *draft)
+		sendErr = sendDraftNow(agent, account, *draft)
 	}
+
+	// AI-001/AI-002: ledger the reply decision — what the AI proposed and
+	// whether the guardrail ladder let it stay a draft, escalate, queue on a
+	// timer, or actually send. The draft-vs-send boundary is decided here and
+	// nowhere else; this row is that boundary's audit record.
+	aigov.Record(&pkgmodels.AIExecution{
+		TenantID:      tenantID,
+		PrincipalKind: pkgmodels.AuthSessionKindMachine,
+		PrincipalID:   agent.Id.Hex(),
+		Surface:       pkgmodels.AISurfaceInboxReply,
+		Outcome:       inboxReplyOutcome(verdict.Action, sendErr),
+		Reason:        verdict.Reason,
+		Refs: map[string]string{
+			"draft_id":  draft.Id.Hex(),
+			"thread_id": thread.Id.Hex(),
+			"agent_id":  agent.Id.Hex(),
+		},
+	})
 
 	return &inboundResult{
 		Classification: classification,

@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/aigov"
 	pkgauth "github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/mcptools"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -41,18 +42,41 @@ func runInboxActionPass(tenant *pkgmodels.Tenant, agent *pkgmodels.InboxAgent, c
 		log.Printf("inbox actions: machine jwt for tenant %s: %v", tenant.Id.Hex(), err)
 		return
 	}
+	proposals := make([]bson.M, 0, len(actions))
+	anyOK := false
 	for _, a := range actions {
 		result, err := mcptools.Invoke(jwt, a.Tool, a.Args, agent.ToolWhitelist)
 		meta := bson.M{"tool": a.Tool, "draft_id": draft.Id.Hex(), "principal": pkgmodels.ServicePrincipalInboxAgent}
+		proposal := bson.M{"tool": a.Tool}
 		if err != nil {
 			meta["error"] = err.Error()
+			proposal["error"] = err.Error()
 		} else if isErr, _ := result["isError"].(bool); isErr {
 			meta["error"] = "tool returned error"
+			proposal["error"] = "tool returned error"
 		} else {
 			meta["ok"] = true
+			proposal["ok"] = true
+			anyOK = true
 		}
+		proposals = append(proposals, proposal)
 		logInboxActivity(tenant.Id, agent.Id, "tool_invoked", thread.Id, msg.Id, contact.Id, meta)
 	}
+
+	// AI-001: ledger the action pass under the inbox-agent principal.
+	outcome := pkgmodels.AIOutcomeMutated
+	if !anyOK {
+		outcome = pkgmodels.AIOutcomeError
+	}
+	aigov.Record(&pkgmodels.AIExecution{
+		TenantID:      tenant.Id,
+		PrincipalKind: pkgmodels.AuthSessionKindMachine,
+		PrincipalID:   pkgauth.EnsureServicePrincipalID(tenant.Id, pkgmodels.ServicePrincipalInboxAgent),
+		Surface:       pkgmodels.AISurfaceInboxAction,
+		Proposals:     proposals,
+		Outcome:       outcome,
+		Refs:          map[string]string{"draft_id": draft.Id.Hex(), "agent_id": agent.Id.Hex()},
+	})
 }
 
 type inboxAction struct {

@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,9 +17,31 @@ import (
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
+	"github.com/josephalai/sentanyl/pkg/aigov"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
+
+// recordSiteAIExecution ledgers one site AI operation (AI-001) under the
+// request's real actor — the human account by default, the machine principal
+// when the call came through MCP. Site generation mutates directly today
+// (outcome "mutated", not "draft") — AI-002 remains open until a proposal
+// step fronts these paths; the ledger makes the boundary visible meanwhile.
+func recordSiteAIExecution(c *gin.Context, tenantID bson.ObjectId, surface string, refs map[string]string) {
+	principalID := auth.GetPrincipalID(c)
+	if principalID == "" {
+		principalID = auth.GetAccountUserID(c)
+	}
+	aigov.Record(&pkgmodels.AIExecution{
+		TenantID:      tenantID,
+		PrincipalKind: auth.GetActorType(c),
+		PrincipalID:   principalID,
+		Surface:       surface,
+		Provider:      os.Getenv("AI_PROVIDER"),
+		Outcome:       pkgmodels.AIOutcomeMutated,
+		Refs:          refs,
+	})
+}
 
 // RegisterSiteAIRoutes registers AI generation/editing routes.
 func RegisterSiteAIRoutes(tenantAPI *gin.RouterGroup) {
@@ -133,6 +157,9 @@ func handleAIGenerateSite(c *gin.Context) {
 		createdPages = append(createdPages, *page)
 	}
 
+	recordSiteAIExecution(c, tenantID, pkgmodels.AISurfaceSiteGenerate, map[string]string{
+		"site_id": siteID, "pages_created": strconv.Itoa(len(createdPages)),
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"status":        "ok",
 		"site":          result,
@@ -188,6 +215,7 @@ func handleAIGeneratePage(c *gin.Context) {
 		return
 	}
 
+	recordSiteAIExecution(c, tenantID, pkgmodels.AISurfacePageGenerate, map[string]string{"page_id": pageID})
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "document": doc})
 }
 
@@ -257,6 +285,7 @@ func handleAIEditPage(c *gin.Context) {
 		return
 	}
 
+	recordSiteAIExecution(c, tenantID, pkgmodels.AISurfacePageEdit, map[string]string{"page_id": pageID})
 	c.JSON(http.StatusOK, gin.H{
 		"status":   "ok",
 		"document": result.Document,
