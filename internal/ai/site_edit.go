@@ -23,10 +23,15 @@ func GetConfiguredProvider() (SiteAIProvider, error) {
 		}
 		model := os.Getenv("GEMINI_MODEL")
 		return NewGeminiProvider(apiKey, model), nil
+	case "fixture":
+		if os.Getenv("SENTANYL_E2E_MODE") != "1" {
+			return nil, fmt.Errorf("AI_PROVIDER=fixture is only available in E2E mode")
+		}
+		return NewFixtureProvider(), nil
 	case "":
 		// No AI provider configured — AI features will not be available.
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("unknown AI_PROVIDER: %s (supported: openai, gemini)", provider)
+		return nil, fmt.Errorf("unknown AI_PROVIDER: %s (supported: openai, gemini, fixture in E2E mode)", provider)
 	}
 }

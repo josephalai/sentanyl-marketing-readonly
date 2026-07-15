@@ -52,6 +52,23 @@ func TestGetConfiguredProviderEmpty(t *testing.T) {
 	}
 }
 
+func TestFixtureProviderIsE2EOnly(t *testing.T) {
+	t.Setenv("AI_PROVIDER", "fixture")
+	t.Setenv("SENTANYL_E2E_MODE", "")
+	if _, err := GetConfiguredProvider(); err == nil {
+		t.Fatal("expected fixture provider to fail outside E2E mode")
+	}
+	t.Setenv("SENTANYL_E2E_MODE", "1")
+	provider, err := GetConfiguredProvider()
+	if err != nil {
+		t.Fatalf("fixture provider: %v", err)
+	}
+	result, err := provider.GenerateSite(SiteGenerationRequest{PageCount: 3})
+	if err != nil || len(result.Pages) != 3 || !result.Pages[0].IsHome {
+		t.Fatalf("unexpected fixture result: pages=%d err=%v", len(result.Pages), err)
+	}
+}
+
 func TestNewOpenAIProvider(t *testing.T) {
 	p := NewOpenAIProvider("test-key", "")
 	if p.Model != "gpt-4o" {
