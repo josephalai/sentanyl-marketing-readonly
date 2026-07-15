@@ -243,6 +243,7 @@ func main() {
 	routes.RegisterCustomerLibraryRoutes(customerAPI)
 	routes.RegisterCustomerLibraryDetailRoutes(customerAPI)
 	routes.RegisterNewsletterCustomerRoutes(customerAPI)
+	routes.RegisterCustomerSubscriptionRoutes(customerAPI)
 
 	// Forms management (tenant-scoped CRUD for PageForm entities).
 	handlers.RegisterFormsRoutes(legacyTenantAPI)

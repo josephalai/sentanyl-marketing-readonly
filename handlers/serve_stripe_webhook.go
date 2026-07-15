@@ -78,9 +78,14 @@ type stripeCheckoutSession struct {
 
 // stripeSubscription is the subset of Subscription fields we use.
 type stripeSubscription struct {
-	ID       string            `json:"id"`
-	Status   string            `json:"status"`
-	Metadata map[string]string `json:"metadata"`
+	ID                string            `json:"id"`
+	Status            string            `json:"status"`
+	Metadata          map[string]string `json:"metadata"`
+	CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+	CurrentPeriodEnd  int64             `json:"current_period_end"`
+	PauseCollection   *struct {
+		Behavior string `json:"behavior"`
+	} `json:"pause_collection"`
 }
 
 // stripeInvoice is the subset of Invoice fields we use.
@@ -770,9 +775,20 @@ func processSubscriptionStateChange(tenantID bson.ObjectId, raw json.RawMessage)
 	if newStatus == "" {
 		newStatus = "canceled"
 	}
+	// Mirror the billing-schedule flags so the customer portal can render
+	// "cancels on …" / "paused" without a live Stripe round-trip.
+	set := bson.M{
+		"status":                newStatus,
+		"cancel_at_period_end":  sub.CancelAtPeriodEnd,
+		"paused":                sub.PauseCollection != nil,
+		"timestamps.updated_at": time.Now(),
+	}
+	if sub.CurrentPeriodEnd > 0 {
+		set["current_period_end"] = time.Unix(sub.CurrentPeriodEnd, 0).UTC()
+	}
 	if err := db.GetCollection(pkgmodels.RecurringAgreementCollection).Update(
 		bson.M{"tenant_id": tenantID, "stripe_subscription_id": sub.ID},
-		bson.M{"$set": bson.M{"status": newStatus, "timestamps.updated_at": time.Now()}},
+		bson.M{"$set": set},
 	); err != nil {
 		return err
 	}
