@@ -418,6 +418,13 @@ func validPricingModel(model string) bool {
 	}
 }
 
+func validOfferAmount(pricingModel string, amount int64) bool {
+	if pricingModel == "free" {
+		return amount == 0
+	}
+	return amount > 0
+}
+
 func legacyOfferItemRequests(ids []string) []offerItemRequest {
 	out := make([]offerItemRequest, 0, len(ids))
 	for _, id := range ids {
@@ -510,8 +517,8 @@ func handleCreateOffer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "pricing_model must be free, one_time, recurring, or payment_plan"})
 		return
 	}
-	if req.Amount < 0 || (req.PricingModel == "free" && req.Amount != 0) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be zero for free offers and non-negative otherwise"})
+	if !validOfferAmount(req.PricingModel, req.Amount) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be zero for free offers and greater than zero otherwise"})
 		return
 	}
 
@@ -735,8 +742,8 @@ func handleUpdateOffer(c *gin.Context) {
 	if req.Amount != nil {
 		effectiveAmount = *req.Amount
 	}
-	if effectivePricingModel == "free" && effectiveAmount != 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "free offers must have an amount of zero"})
+	if !validOfferAmount(effectivePricingModel, effectiveAmount) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be zero for free offers and greater than zero otherwise"})
 		return
 	}
 
