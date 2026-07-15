@@ -187,6 +187,9 @@ func handleTenantListProducts(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list products"})
 		return
 	}
+	if products == nil {
+		products = []pkgmodels.Product{}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"products": products})
 }
@@ -528,6 +531,9 @@ func handleListOffers(c *gin.Context) {
 		log.Println("Error listing offers:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list offers"})
 		return
+	}
+	if offers == nil {
+		offers = []pkgmodels.Offer{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"offers": offers})

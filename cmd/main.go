@@ -152,6 +152,7 @@ func main() {
 
 	// Set up Gin router.
 	r := gin.Default()
+	r.Use(httputil.RequestID())
 
 	// Tenant mailbox OAuth callback (COM-EM-003) — public; auth is the
 	// HMAC-signed state minted by the authorize-url endpoint.
