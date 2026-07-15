@@ -38,11 +38,11 @@ const (
 
 // ComponentDef describes a component's server-side definition.
 type ComponentDef struct {
-	Type         string             `json:"type"`
-	Label        string             `json:"label"`
-	Category     ComponentCategory  `json:"category"`
-	Fields       []ComponentField   `json:"fields"`
-	DefaultProps map[string]any     `json:"default_props"`
+	Type         string            `json:"type"`
+	Label        string            `json:"label"`
+	Category     ComponentCategory `json:"category"`
+	Fields       []ComponentField  `json:"fields"`
+	DefaultProps map[string]any    `json:"default_props"`
 }
 
 // componentRegistryMap holds the full component registry.
@@ -524,6 +524,20 @@ func buildComponentRegistry() []ComponentDef {
 			},
 			DefaultProps: map[string]any{
 				"heading": "Our Courses",
+				"columns": 3,
+			},
+		},
+		{
+			Type:     "SentanylDownloadGrid",
+			Label:    "Download Grid",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Section Heading", Type: FieldTypeText, DefaultValue: "Digital Downloads"},
+				{Name: "downloadIds", Label: "Download Product IDs (comma-separated)", Type: FieldTypeText},
+				{Name: "columns", Label: "Grid Columns", Type: FieldTypeNumber, DefaultValue: 3},
+			},
+			DefaultProps: map[string]any{
+				"heading": "Digital Downloads",
 				"columns": 3,
 			},
 		},

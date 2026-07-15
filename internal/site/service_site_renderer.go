@@ -360,6 +360,7 @@ func resolveOfferPageByPath(domain string, path string) (string, error) {
 	err = db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"public_id":             slug,
 		"tenant_id":             tenantID,
+		"status":                bson.M{"$nin": []string{pkgmodels.OfferStatusDraft, pkgmodels.OfferStatusArchived}},
 		"timestamps.deleted_at": nil,
 	}).One(&offer)
 	if err != nil {

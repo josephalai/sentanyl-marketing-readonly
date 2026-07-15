@@ -16,6 +16,11 @@ var publicVisibleStatus = bson.M{"$nin": []string{
 	pkgmodels.ProductStatusArchived,
 }}
 
+var publicVisibleOfferStatus = bson.M{"$nin": []string{
+	pkgmodels.OfferStatusDraft,
+	pkgmodels.OfferStatusArchived,
+}}
+
 // ListPublicProducts returns public-safe product cards for a tenant.
 func ListPublicProducts(tenantID bson.ObjectId) ([]PublicProduct, error) {
 	var products []pkgmodels.Product
@@ -59,6 +64,7 @@ func ListPublicOffers(tenantID bson.ObjectId) ([]PublicOffer, error) {
 	var offers []pkgmodels.Offer
 	err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{
 		"tenant_id":             tenantID,
+		"status":                publicVisibleOfferStatus,
 		"timestamps.deleted_at": nil,
 	}).All(&offers)
 	if err != nil {
@@ -87,6 +93,7 @@ func GetPublicOffer(tenantID bson.ObjectId, idParam string) (*PublicOffer, error
 func FindOfferForTenant(tenantID bson.ObjectId, idParam string) (*pkgmodels.Offer, error) {
 	q := bson.M{
 		"tenant_id":             tenantID,
+		"status":                publicVisibleOfferStatus,
 		"timestamps.deleted_at": nil,
 	}
 	if bson.IsObjectIdHex(idParam) {

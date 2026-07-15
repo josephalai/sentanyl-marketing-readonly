@@ -49,6 +49,8 @@
 
   if (window.Sentanyl) return;
 
+  var SDK_VERSION = '1.0.0';
+
   var cfg = {
     apiBase: '',
     publicKey: '',
@@ -91,6 +93,11 @@
       payload.video_session_id = window.__sentanylVideoSession.sessionId;
     }
     return payload;
+  }
+
+  function eventId() {
+    try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+    return 'evt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
   }
 
   function query() {
@@ -147,6 +154,7 @@
   }
 
   var api = {
+    version: SDK_VERSION,
     init: function (opts) {
       opts = opts || {};
       if (opts.publicKey) cfg.publicKey = opts.publicKey;
@@ -251,15 +259,21 @@
       // Low-level event tracker for custom players. The declarative
       // <video data-sentanyl-video> path delegates to sentanyl-video.js.
       track: function (mediaId, eventName, extra) {
+        extra = extra || {};
         return channel().then(function (ch) {
           return post('/api/video/events', {
+            event_id: extra.event_id || eventId(),
             tenant_id: ch.tenant_id,
             media_id: mediaId,
+            player_token: extra.player_token,
+            session_id: extra.session_id,
             event_name: eventName,
+            current_second: extra.current_second || 0,
+            progress_percent: extra.progress_percent || 0,
             page_url: location.href,
             domain: cfg.domain || location.host,
             referrer: document.referrer || '',
-            data: extra || {},
+            data: extra.data || {},
           });
         });
       },
@@ -435,7 +449,7 @@
       });
       if (!window.__sentanylVideoLoaded) {
         var s = document.createElement('script');
-        s.src = cfg.apiBase + '/static/sentanyl-video.js';
+        s.src = cfg.apiBase + '/static/sentanyl-video-v1.js';
         document.head.appendChild(s);
       }
     }).catch(function () {});

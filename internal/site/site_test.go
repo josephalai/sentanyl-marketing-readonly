@@ -1,9 +1,11 @@
 package site
 
 import (
+	"strings"
 	"testing"
 
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"gopkg.in/mgo.v2/bson"
 )
 
 func TestValidateSiteCreate(t *testing.T) {
@@ -154,6 +156,44 @@ func TestIsKnownComponentType(t *testing.T) {
 	}
 	if IsKnownComponentType("NonExistentComponent") {
 		t.Error("expected NonExistentComponent to be unknown")
+	}
+}
+
+func TestDeliveryBuilderBlockContracts(t *testing.T) {
+	for _, componentType := range []string{
+		"SentanylVideoPlayer",
+		"SentanylCourseGrid",
+		"SentanylDownloadGrid",
+	} {
+		def, ok := GetComponentDef(componentType)
+		if !ok {
+			t.Errorf("component %s is not registered", componentType)
+			continue
+		}
+		if def.Category != CategorySentanyl {
+			t.Errorf("component %s category = %s", componentType, def.Category)
+		}
+	}
+
+	doc := map[string]any{"content": []any{
+		map[string]any{"type": "SentanylCourseGrid", "props": map[string]any{"heading": "Courses"}},
+		map[string]any{"type": "SentanylDownloadGrid", "props": map[string]any{"heading": "Downloads"}},
+	}}
+	if err := ValidatePuckDocument(doc); err != nil {
+		t.Fatalf("delivery block document rejected: %v", err)
+	}
+	html := RenderPuckDocumentToHTML(doc, nil, nil)
+	for _, marker := range []string{"Courses", "No courses available", "Downloads", "No downloads available"} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("rendered delivery blocks missing %q", marker)
+		}
+	}
+	videoDoc := map[string]any{"content": []any{
+		map[string]any{"type": "SentanylVideoPlayer", "props": map[string]any{"videoUrl": "https://cdn.example/video.mp4", "mediaPublicId": "media-contract"}},
+	}}
+	videoHTML := RenderPuckDocumentToHTML(videoDoc, nil, &pkgmodels.Site{TenantID: bson.NewObjectId()})
+	if !strings.Contains(videoHTML, "data-sentanyl") || !strings.Contains(videoHTML, "/static/sentanyl-video-v1.js") {
+		t.Error("published video block is missing the versioned smart-player contract")
 	}
 }
 

@@ -19,23 +19,37 @@ import (
 // end-of-video CTAs, and watch-event ingestion via /api/video/events.
 func RegisterPublicSiteAssetRoutes(r *gin.Engine) {
 	r.GET("/static/sentanyl-video.js", handleSentanylVideoJS)
+	r.GET("/static/sentanyl-video-v1.js", handleSentanylVideoV1JS)
 	r.GET("/static/sentanyl.js", handleSentanylJS)
+	r.GET("/static/sentanyl-v1.js", handleSentanylV1JS)
 }
 
 func handleSentanylVideoJS(c *gin.Context) {
-	serveEmbeddedJS(c, assets.SentanylVideoJS())
+	serveEmbeddedJS(c, assets.SentanylVideoJS(), false)
+}
+
+func handleSentanylVideoV1JS(c *gin.Context) {
+	serveEmbeddedJS(c, assets.SentanylVideoJS(), true)
 }
 
 // handleSentanylJS serves the frontend-channel browser SDK used by coded
 // (tenant-hosted) websites: Sentanyl.init/mountAll + data-sentanyl-*
 // declarative embeds over the /api/public/* contract.
 func handleSentanylJS(c *gin.Context) {
-	serveEmbeddedJS(c, assets.SentanylJS())
+	serveEmbeddedJS(c, assets.SentanylJS(), false)
 }
 
-func serveEmbeddedJS(c *gin.Context, body []byte) {
+func handleSentanylV1JS(c *gin.Context) {
+	serveEmbeddedJS(c, assets.SentanylJS(), true)
+}
+
+func serveEmbeddedJS(c *gin.Context, body []byte, immutable bool) {
 	c.Header("Content-Type", "application/javascript; charset=utf-8")
-	c.Header("Cache-Control", "public, max-age=86400")
+	if immutable {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		c.Header("Cache-Control", "public, max-age=86400")
+	}
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Status(http.StatusOK)
 	_, _ = c.Writer.Write(body)

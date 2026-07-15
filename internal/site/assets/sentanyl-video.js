@@ -27,6 +27,9 @@
 (function () {
   'use strict';
 
+  var SDK_VERSION = '1.0.0';
+  window.SentanylVideoVersion = SDK_VERSION;
+
   if (window.__sentanylVideoLoaded) return;
   window.__sentanylVideoLoaded = true;
 
@@ -149,6 +152,7 @@
     /* event POSTer */
     function post(eventName, extra) {
       var body = {
+        event_id: randId(),
         tenant_id: tenantId,
         media_id: mediaId,
         viewer_id: viewerId || sessionId,

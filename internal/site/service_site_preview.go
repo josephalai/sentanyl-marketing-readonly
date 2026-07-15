@@ -294,7 +294,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		// stateless and the browser dedupes the asset fetch via
 		// Cache-Control: max-age.
 		if dataAttrs != "" {
-			sb.WriteString(`<script src="/static/sentanyl-video.js" defer></script>` + "\n")
+			sb.WriteString(`<script src="/static/sentanyl-video-v1.js" defer></script>` + "\n")
 		}
 
 	case "CTASection":
@@ -708,6 +708,21 @@ function submitSentanylForm(ev,f){
 			sb.WriteString(cards)
 		} else {
 			sb.WriteString("<div class=\"card\"><p>No courses available</p></div>\n")
+		}
+		sb.WriteString("</div>\n</section>\n")
+
+	case "SentanylDownloadGrid":
+		heading, _ := props["heading"].(string)
+		if heading == "" {
+			heading = "Digital Downloads"
+		}
+		sb.WriteString("<section class=\"section\">\n")
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+		sb.WriteString("<div class=\"columns\">\n")
+		if cards := renderProductGrid(props, "digital_download", tenantID); cards != "" {
+			sb.WriteString(cards)
+		} else {
+			sb.WriteString("<div class=\"card\"><p>No downloads available</p></div>\n")
 		}
 		sb.WriteString("</div>\n</section>\n")
 
@@ -1662,13 +1677,15 @@ func renderOfferGrid(props map[string]any) string {
 }
 
 // renderProductGrid fetches products by comma-separated IDs and renders HTML cards.
-// If productType is non-empty, filters by product_type (e.g. "course").
-// When ids are empty and productType == "course", auto-loads up to 12 active
-// courses for tenantID so the block is useful without explicit picks.
+// If productType is non-empty, filters by product_type (e.g. "course" or
+// "digital_download"). When ids are empty for a typed grid, auto-loads up to
+// 12 active tenant products so the block is useful without explicit picks.
 func renderProductGrid(props map[string]any, productType string, tenantID bson.ObjectId) string {
 	idsKey := "productIds"
 	if productType == "course" {
 		idsKey = "courseIds"
+	} else if productType == "digital_download" {
+		idsKey = "downloadIds"
 	}
 	idsStr, _ := props[idsKey].(string)
 	ids := parseObjectIDs(idsStr)
@@ -1679,7 +1696,7 @@ func renderProductGrid(props map[string]any, productType string, tenantID bson.O
 	}
 	if len(ids) > 0 {
 		query["_id"] = bson.M{"$in": ids}
-	} else if productType == "course" && tenantID != "" {
+	} else if productType != "" && tenantID != "" {
 		query["tenant_id"] = tenantID
 		query["status"] = "active"
 	} else {
