@@ -133,3 +133,19 @@ func TestParseCoursesAndAssets(t *testing.T) {
 		t.Fatalf("assets parse wrong: %+v %+v", assets, errs)
 	}
 }
+
+func TestParseCourseProgress(t *testing.T) {
+	rows, errs := ParseCourseProgress([]byte("id,email,course,module,lesson,watch_percent,status,completed_at\n" +
+		"p1,Member@Example.com,c1,Intro,Welcome,42,in_progress,\n" +
+		"p2,member@example.com,c1,Intro,Setup,8,completed,2026-07-01T12:00:00Z\n" +
+		"p3,bad@example.com,c1,Intro,Missing,101,false,\n"))
+	if len(rows) != 2 || len(errs) != 1 {
+		t.Fatalf("course progress parse wrong: %+v %+v", rows, errs)
+	}
+	if rows[0].Email != "member@example.com" || rows[0].WatchPercent != 42 || rows[0].Completed {
+		t.Fatalf("in-progress row wrong: %+v", rows[0])
+	}
+	if !rows[1].Completed || rows[1].WatchPercent != 100 || rows[1].CompletedAt.IsZero() {
+		t.Fatalf("completed row wrong: %+v", rows[1])
+	}
+}

@@ -135,6 +135,8 @@ func loadExport(p *models.MigrationProject) (*Export, []ParseError, error) {
 			ex.Grants, pe = ParseGrants(f.Content)
 		case "courses":
 			ex.Courses, pe = ParseCourses(f.Content)
+		case "course_progress":
+			ex.CourseProgress, pe = ParseCourseProgress(f.Content)
 		case "assets":
 			ex.Assets, pe = ParseAssets(f.Content)
 		case "subscriptions":
@@ -370,7 +372,8 @@ func exportCounts(ex *Export) bson.M {
 		"contacts": len(ex.Contacts), "products": len(ex.Products), "offers": len(ex.Offers),
 		"transactions": len(ex.Transactions), "grants": len(ex.Grants),
 		"courses": len(ex.Courses), "assets": len(ex.Assets),
-		"subscriptions": len(ex.Subscriptions), "forms": len(ex.Forms), "pages": len(ex.Pages),
+		"course_progress": len(ex.CourseProgress),
+		"subscriptions":   len(ex.Subscriptions), "forms": len(ex.Forms), "pages": len(ex.Pages),
 		"automations": len(ex.Automations),
 	}
 }
@@ -437,6 +440,7 @@ func reconcileReport(p *models.MigrationProject, ex *Export) bson.M {
 		models.SourceTypeContact, models.SourceTypeTag, models.SourceTypeProduct,
 		models.SourceTypeOffer, models.SourceTypeTransaction, models.SourceTypeGrant,
 		models.SourceTypeCourse, models.SourceTypeAsset,
+		models.SourceTypeCourseProgress,
 		models.SourceTypeSubscription, models.SourceTypeForm, models.SourceTypePage,
 		"automation",
 	} {
@@ -581,6 +585,7 @@ func (r *run) importAll() []AutomationTranslation {
 		{"offers", r.importOffers},
 		{"contacts", r.importContacts},
 		{"courses", r.importCourses},
+		{"course_progress", r.importCourseProgress},
 		{"transactions", r.importTransactions},
 		{"grants", r.importGrants},
 		{"assets", r.importAssets},
@@ -944,6 +949,192 @@ func (r *run) importCourses() {
 		}
 		r.record(models.SourceTypeCourse, sc.SourceID, models.ProductCollection, pid, false)
 	}
+}
+
+// importCourseProgress reconciles only progress explicitly supplied in the
+// normalized companion export. It never infers completion from purchases or
+// grants, and refuses rows that do not match the imported course structure.
+func (r *run) importCourseProgress() {
+	for _, sp := range r.ex.CourseProgress {
+		if _, ok := r.lookupMap(models.SourceTypeCourseProgress, sp.SourceID); ok {
+			r.matched[models.SourceTypeCourseProgress]++
+			continue
+		}
+		contactID, ok := r.contactByRef[sp.Email]
+		if !ok {
+			if id, found := r.findLocalContact(sp.Email); found {
+				contactID = id
+			} else {
+				r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "unknown contact "+sp.Email)
+				continue
+			}
+		}
+
+		pid := r.courseProductRef(sp.CourseRef)
+		if pid == "" {
+			r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "unknown course "+sp.CourseRef)
+			continue
+		}
+		moduleSlug, lessonSlug, totalLessons, found := r.courseLessonRef(pid, sp.CourseRef, sp.ModuleRef, sp.LessonRef)
+		if !found {
+			r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "module/lesson does not match imported course structure")
+			continue
+		}
+		if r.dry {
+			r.record(models.SourceTypeCourseProgress, sp.SourceID, models.CourseEnrollmentCollection, bson.NewObjectId(), true)
+			continue
+		}
+
+		var enrollment models.CourseEnrollment
+		created := false
+		err := db.GetCollection(models.CourseEnrollmentCollection).Find(bson.M{
+			"tenant_id": r.p.TenantID, "contact_id": contactID, "product_id": pid,
+			"revoked_at": nil, "timestamps.deleted_at": nil,
+		}).Sort("enrolled_at").One(&enrollment)
+		if err == mgo.ErrNotFound {
+			var product models.Product
+			if loadErr := db.GetCollection(models.ProductCollection).FindId(pid).One(&product); loadErr != nil {
+				r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "course load: "+loadErr.Error())
+				continue
+			}
+			enrollment = *models.NewCourseEnrollment(r.p.TenantID, contactID, pid, product.PublicId, "")
+			enrollment.SubscriberId = r.p.TenantID.Hex()
+			enrollment.Source = "migration"
+			if insertErr := db.GetCollection(models.CourseEnrollmentCollection).Insert(&enrollment); insertErr != nil {
+				r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "enrollment insert: "+insertErr.Error())
+				continue
+			}
+			created = true
+		} else if err != nil {
+			r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "enrollment lookup: "+err.Error())
+			continue
+		}
+
+		progress := &models.LessonProgress{ModuleSlug: moduleSlug, LessonSlug: lessonSlug}
+		for _, existing := range enrollment.Progress {
+			if existing.ModuleSlug == moduleSlug && existing.LessonSlug == lessonSlug {
+				progress = existing
+				break
+			}
+		}
+		if progress.WatchPercent < sp.WatchPercent {
+			progress.WatchPercent = sp.WatchPercent
+		}
+		if sp.Completed {
+			progress.Completed = true
+			if !sp.CompletedAt.IsZero() {
+				completedAt := sp.CompletedAt
+				progress.CompletedAt = &completedAt
+			}
+		}
+		seen := false
+		for _, existing := range enrollment.Progress {
+			if existing == progress {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			enrollment.Progress = append(enrollment.Progress, progress)
+		}
+		completed := 0
+		for _, item := range enrollment.Progress {
+			if item.Completed {
+				completed++
+			}
+		}
+		if totalLessons > 0 {
+			enrollment.OverallPercent = completed * 100 / totalLessons
+		}
+		if enrollment.OverallPercent == 100 {
+			enrollment.Status = "completed"
+			if enrollment.CompletedAt == nil {
+				if progress.CompletedAt != nil {
+					enrollment.CompletedAt = progress.CompletedAt
+				} else {
+					now := time.Now().UTC()
+					enrollment.CompletedAt = &now
+				}
+			}
+		}
+		if err := db.GetCollection(models.CourseEnrollmentCollection).UpdateId(enrollment.Id, bson.M{"$set": bson.M{
+			"progress": enrollment.Progress, "overall_percent": enrollment.OverallPercent,
+			"status": enrollment.Status, "completed_at": enrollment.CompletedAt,
+		}}); err != nil {
+			r.rowError(models.SourceTypeCourseProgress, sp.SourceID, sp.Row, "progress write: "+err.Error())
+			continue
+		}
+		r.record(models.SourceTypeCourseProgress, sp.SourceID, models.CourseEnrollmentCollection, enrollment.Id, created)
+	}
+}
+
+func (r *run) courseProductRef(ref string) bson.ObjectId {
+	key := strings.ToLower(strings.TrimSpace(ref))
+	if id, ok := r.productByRef[key]; ok {
+		return id
+	}
+	for _, course := range r.ex.Courses {
+		if strings.EqualFold(course.SourceID, ref) || strings.EqualFold(course.ProductRef, ref) || strings.EqualFold(course.Title, ref) {
+			if id, ok := r.productByRef[strings.ToLower(course.ProductRef)]; ok {
+				return id
+			}
+			if id, ok := r.lookupMap(models.SourceTypeCourse, course.SourceID); ok {
+				return id
+			}
+		}
+	}
+	if id, ok := r.lookupMap(models.SourceTypeProduct, ref); ok {
+		return id
+	}
+	if id, ok := r.lookupMap(models.SourceTypeCourse, ref); ok {
+		return id
+	}
+	return ""
+}
+
+func (r *run) courseLessonRef(pid bson.ObjectId, courseRef, moduleRef, lessonRef string) (string, string, int, bool) {
+	var modules []*models.CourseModule
+	if r.dry {
+		for _, course := range r.ex.Courses {
+			if strings.EqualFold(course.SourceID, courseRef) || strings.EqualFold(course.ProductRef, courseRef) || strings.EqualFold(course.Title, courseRef) {
+				for order, sourceModule := range course.Modules {
+					module := &models.CourseModule{Slug: slugify(sourceModule.Title, order), Title: sourceModule.Title}
+					for lessonOrder, title := range sourceModule.Lessons {
+						module.Lessons = append(module.Lessons, &models.CourseLesson{Slug: slugify(title, lessonOrder), Title: title})
+					}
+					modules = append(modules, module)
+				}
+				break
+			}
+		}
+	} else {
+		var product models.Product
+		if err := db.GetCollection(models.ProductCollection).Find(bson.M{"_id": pid, "tenant_id": r.p.TenantID}).One(&product); err != nil {
+			return "", "", 0, false
+		}
+		modules = product.CourseModules
+	}
+	total := 0
+	for _, module := range modules {
+		total += len(module.Lessons)
+		if !strings.EqualFold(module.Slug, moduleRef) && !strings.EqualFold(module.Title, moduleRef) {
+			continue
+		}
+		for _, lesson := range module.Lessons {
+			if strings.EqualFold(lesson.Slug, lessonRef) || strings.EqualFold(lesson.Title, lessonRef) {
+				return module.Slug, lesson.Slug, totalLessons(modules), true
+			}
+		}
+	}
+	return "", "", total, false
+}
+
+func totalLessons(modules []*models.CourseModule) int {
+	total := 0
+	for _, module := range modules {
+		total += len(module.Lessons)
+	}
+	return total
 }
 
 // ─── transactions → imported Purchases + grants ─────────────────────────────

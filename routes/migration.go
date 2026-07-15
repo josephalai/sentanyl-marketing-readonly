@@ -65,7 +65,8 @@ func RegisterMigrationJobs() {
 var migrationFileKinds = map[string]bool{
 	"contacts": true, "products": true, "offers": true,
 	"transactions": true, "grants": true, "courses": true, "assets": true,
-	"subscriptions": true, "forms": true, "pages": true, "automations": true,
+	"course_progress": true,
+	"subscriptions":   true, "forms": true, "pages": true, "automations": true,
 }
 
 func migrationProject(c *gin.Context) (*pkgmodels.MigrationProject, bool) {

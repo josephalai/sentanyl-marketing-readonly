@@ -16,6 +16,8 @@
 //	grants.csv       — optional; direct member→offer/product grants
 //	courses.json     — optional (Kajabi does NOT export course content —
 //	                   externally blocked; structure metadata only)
+//	course_progress.csv — optional normalized lesson progress (Kajabi does
+//	                   NOT provide this in its native exports)
 //	assets.csv       — optional; downloadable asset references (url,
 //	                   file_name, product)
 //
@@ -37,6 +39,8 @@ import (
 // Reported verbatim on every validate/dry-run/import so the gap is explicit.
 var ExternallyBlocked = []string{
 	"course lesson content bodies (Kajabi provides no content export; courses.json carries structure metadata only)",
+	"course lesson progress/completion (Kajabi provides no native export; supply course_progress.csv in the normalized format when independently available)",
+	"course drip/lock rules, quizzes, and certificate settings (Kajabi provides no native export; rebuild and review these controls before publishing imported draft courses)",
 	"products catalog (no native export; supply products.csv in the normalized format or products are created as stubs from offers)",
 	"website page/landing-page CONTENT (no export; pages.csv imports title/slug placeholders only — rebuild bodies in the builder)",
 	"email automation logic bodies and broadcast history (no export; automations.csv imports a feasibility-translated manifest only)",
@@ -115,6 +119,21 @@ type SourceModule struct {
 	Lessons []string `json:"lessons"`
 }
 
+// SourceCourseProgress is one normalized lesson-progress row. Kajabi does
+// not export these rows itself; the format exists so independently retained
+// progress can be reconciled without inventing completion state.
+type SourceCourseProgress struct {
+	SourceID     string
+	Email        string
+	CourseRef    string
+	ModuleRef    string
+	LessonRef    string
+	WatchPercent int
+	Completed    bool
+	CompletedAt  time.Time
+	Row          int
+}
+
 // SourceAsset is one downloadable-asset reference from assets.csv.
 type SourceAsset struct {
 	SourceID   string
@@ -166,17 +185,18 @@ type SourcePage struct {
 
 // Export is the fully parsed input set.
 type Export struct {
-	Contacts      []SourceContact
-	Products      []SourceProduct
-	Offers        []SourceOffer
-	Transactions  []SourceTransaction
-	Grants        []SourceGrant
-	Courses       []SourceCourse
-	Assets        []SourceAsset
-	Subscriptions []SourceSubscription
-	Forms         []SourceForm
-	Pages         []SourcePage
-	Automations   []SourceAutomation
+	Contacts       []SourceContact
+	Products       []SourceProduct
+	Offers         []SourceOffer
+	Transactions   []SourceTransaction
+	Grants         []SourceGrant
+	Courses        []SourceCourse
+	CourseProgress []SourceCourseProgress
+	Assets         []SourceAsset
+	Subscriptions  []SourceSubscription
+	Forms          []SourceForm
+	Pages          []SourcePage
+	Automations    []SourceAutomation
 }
 
 // ParseError is one recoverable per-row parse failure.
@@ -489,6 +509,66 @@ func ParseCourses(content []byte) ([]SourceCourse, []ParseError) {
 		kept = append(kept, c)
 	}
 	return kept, errs
+}
+
+// ParseCourseProgress parses the documented normalized course_progress.csv:
+// id,email,course,module,lesson,watch_percent,completed,completed_at.
+func ParseCourseProgress(content []byte) ([]SourceCourseProgress, []ParseError) {
+	rows, err := readCSV(content)
+	if err != nil || len(rows) == 0 {
+		return nil, []ParseError{{Kind: "course_progress", Message: "unreadable CSV: " + errString(err)}}
+	}
+	h := rows[0]
+	iID := headerIndex(h, "id", "progress_id", "source_id")
+	iEmail := headerIndex(h, "email", "member_email", "contact_email")
+	iCourse := headerIndex(h, "course", "course_id", "product", "product_id")
+	iModule := headerIndex(h, "module", "module_title", "module_slug")
+	iLesson := headerIndex(h, "lesson", "lesson_title", "lesson_slug")
+	iWatch := headerIndex(h, "watch_percent", "percent", "progress_percent")
+	iCompleted := headerIndex(h, "completed", "status")
+	iCompletedAt := headerIndex(h, "completed_at", "completion_date")
+	if iEmail < 0 || iCourse < 0 || iModule < 0 || iLesson < 0 {
+		return nil, []ParseError{{Kind: "course_progress", Message: "email, course, module, and lesson columns are required"}}
+	}
+	var out []SourceCourseProgress
+	var errs []ParseError
+	for n, rec := range rows[1:] {
+		row := n + 2
+		p := SourceCourseProgress{
+			Email: strings.ToLower(cell(rec, iEmail)), CourseRef: cell(rec, iCourse),
+			ModuleRef: cell(rec, iModule), LessonRef: cell(rec, iLesson), Row: row,
+		}
+		if p.Email == "" || !strings.Contains(p.Email, "@") || p.CourseRef == "" || p.ModuleRef == "" || p.LessonRef == "" {
+			errs = append(errs, ParseError{Kind: "course_progress", Row: row, Message: "valid email, course, module, and lesson are required"})
+			continue
+		}
+		if raw := cell(rec, iWatch); raw != "" {
+			f, parseErr := strconv.ParseFloat(strings.TrimSuffix(raw, "%"), 64)
+			if parseErr != nil || f < 0 || f > 100 {
+				errs = append(errs, ParseError{Kind: "course_progress", Row: row, Message: "watch_percent must be between 0 and 100"})
+				continue
+			}
+			p.WatchPercent = int(math.Round(f))
+		}
+		switch strings.ToLower(cell(rec, iCompleted)) {
+		case "true", "yes", "1", "completed", "complete":
+			p.Completed = true
+		case "", "false", "no", "0", "started", "in_progress", "in progress":
+		default:
+			errs = append(errs, ParseError{Kind: "course_progress", Row: row, Message: "completed/status value is not recognized"})
+			continue
+		}
+		p.CompletedAt = parseFlexDate(cell(rec, iCompletedAt))
+		if p.Completed {
+			p.WatchPercent = 100
+		}
+		p.SourceID = cell(rec, iID)
+		if p.SourceID == "" {
+			p.SourceID = strings.Join([]string{p.Email, p.CourseRef, p.ModuleRef, p.LessonRef}, "|")
+		}
+		out = append(out, p)
+	}
+	return out, errs
 }
 
 // ParseAssets parses assets.csv (downloadable asset references).
