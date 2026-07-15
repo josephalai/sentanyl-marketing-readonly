@@ -67,7 +67,7 @@ func TestSentanylSDKDocumentsCallbackEvents(t *testing.T) {
 			t.Errorf("SDK contract missing event %q", event)
 		}
 	}
-	for _, marker := range []string{"/api/v1/public/context", "X-Sentanyl-Channel-Context", "/api/v1/public/forms/", "/api/v1/public/checkout/"} {
+	for _, marker := range []string{"/api/v1/public/context", "X-Sentanyl-Channel-Context", "/api/v1/public/forms/", "/api/v1/public/checkout/", "/api/v1/public/coaching/", "/api/v1/public/video/events"} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("SDK v2 context contract missing %q", marker)
 		}

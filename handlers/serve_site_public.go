@@ -26,8 +26,9 @@ import (
 // routes on the marketing API group. These are unauthenticated — they resolve
 // the site/tenant from the submitted domain context.
 func RegisterPublicFormRoutes(publicAPI *gin.RouterGroup) {
-	publicAPI.POST("/site/form/submit", handlePublicFormSubmit)
-	publicAPI.POST("/site/checkout/start", handlePublicCheckoutStart)
+	legacySunset := httputil.LegacyAliasSunset(time.Date(2027, 7, 15, 0, 0, 0, 0, time.UTC))
+	publicAPI.POST("/site/form/submit", legacySunset, handlePublicFormSubmit)
+	publicAPI.POST("/site/checkout/start", legacySunset, handlePublicCheckoutStart)
 	publicAPI.GET("/forms/confirm", handleFormOptInConfirm)
 	publicAPI.POST("/forms/resend-confirmation",
 		httputil.RateLimitByKey(func(c *gin.Context) string {

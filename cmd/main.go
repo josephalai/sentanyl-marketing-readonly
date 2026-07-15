@@ -310,6 +310,7 @@ func main() {
 	// the builder routes above. Rate-limited per IP (public/unauth surface:
 	// checkout-session spam, form/newsletter abuse).
 	publicGroup := r.Group("/api/public")
+	publicGroup.Use(httputil.LegacyAliasSunset(time.Date(2027, 7, 15, 0, 0, 0, 0, time.UTC)))
 	publicGroup.Use(httputil.RateLimit(60, 30))
 	publicGroup.Use(httputil.Idempotency()) // API-003
 	handlers.RegisterPublicChannelRoutes(publicGroup)

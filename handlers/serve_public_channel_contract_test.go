@@ -44,9 +44,14 @@ func TestPublicV1OpenAPIRoutesMatchRuntime(t *testing.T) {
 	expected := []string{}
 	httpMethods := map[string]bool{"get": true, "post": true, "put": true, "patch": true, "delete": true, "head": true, "options": true, "trace": true}
 	for path, methods := range contract.Paths {
-		for method := range methods {
+		for method, rawOperation := range methods {
 			if !httpMethods[strings.ToLower(method)] {
 				continue
+			}
+			if operation, ok := rawOperation.(map[string]interface{}); ok {
+				if service, _ := operation["x-service"].(string); service != "" && service != "marketing" {
+					continue
+				}
 			}
 			expected = append(expected, strings.ToUpper(method)+" "+path)
 		}

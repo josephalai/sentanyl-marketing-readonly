@@ -248,10 +248,10 @@
 
     coaching: {
       slots: function (programId) {
-        return get('/api/public/coaching/' + encodeURIComponent(programId) + '/slots');
+        return get('/api/v1/public/coaching/' + encodeURIComponent(programId) + '/slots');
       },
       book: function (programId, payload) {
-        return post('/api/public/coaching/' + encodeURIComponent(programId) + '/book', payload);
+        return post('/api/v1/public/coaching/' + encodeURIComponent(programId) + '/book', payload);
       },
     },
 
@@ -282,7 +282,7 @@
       track: function (mediaId, eventName, extra) {
         extra = extra || {};
         return channel().then(function (ch) {
-          return post('/api/video/events', {
+          return post('/api/v1/public/video/events', {
             event_id: extra.event_id || eventId(),
             tenant_id: ch.tenant_id,
             media_id: mediaId,
