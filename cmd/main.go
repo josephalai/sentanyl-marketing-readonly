@@ -84,6 +84,7 @@ func main() {
 	// Revenue facts projection (ANA-005): unique (tenant, log, kind).
 	analytics.EnsureIndexes()
 	webhooks.RegisterHandlers()
+	handlers.RegisterCommerceWebhookJobs()
 	routes.RegisterStoryStartJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
 

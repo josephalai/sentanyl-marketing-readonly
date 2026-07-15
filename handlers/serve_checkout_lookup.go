@@ -63,11 +63,11 @@ func handleCheckoutLookup(c *gin.Context) {
 		}
 	}
 
-	var sub pkgmodels.Subscription
-	err := db.GetCollection(pkgmodels.SubscriptionCollection).Find(bson.M{
+	var purchase pkgmodels.Purchase
+	err := db.GetCollection(pkgmodels.PurchaseCollection).Find(bson.M{
 		"tenant_id":         tenantID,
 		"stripe_session_id": sessionID,
-	}).One(&sub)
+	}).One(&purchase)
 	if err != nil {
 		// Webhook hasn't landed yet (or this session_id doesn't belong to us).
 		c.JSON(http.StatusOK, checkoutLookupResponse{Status: "processing"})
@@ -75,7 +75,7 @@ func handleCheckoutLookup(c *gin.Context) {
 	}
 
 	var contact pkgmodels.User
-	if err := db.GetCollection(pkgmodels.UserCollection).FindId(sub.ContactID).One(&contact); err != nil {
+	if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{"_id": purchase.ContactID, "tenant_id": tenantID}).One(&contact); err != nil {
 		c.JSON(http.StatusOK, checkoutLookupResponse{Status: "processing"})
 		return
 	}

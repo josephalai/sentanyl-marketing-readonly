@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -63,6 +64,9 @@ func EnsureEcommerceIndexes() {
 			Key:        []string{"purchase_id", "product_id"},
 			Unique:     true,
 			Background: true,
+		},
+		pkgmodels.RecurringAgreementCollection: {
+			Key: []string{"tenant_id", "stripe_subscription_id"}, Unique: true, Background: true,
 		},
 	}
 	for coll, index := range ledgerIndexes {
@@ -128,11 +132,11 @@ func handleTenantCreateProduct(c *gin.Context) {
 	}
 
 	var req struct {
-		Name         string           `json:"name" binding:"required"`
-		Description  string           `json:"description"`
-		ProductType  string           `json:"product_type"`
-		ThumbnailURL string           `json:"thumbnail_url"`
-		Status       string           `json:"status"`
+		Name         string              `json:"name" binding:"required"`
+		Description  string              `json:"description"`
+		ProductType  string              `json:"product_type"`
+		ThumbnailURL string              `json:"thumbnail_url"`
+		Status       string              `json:"status"`
 		Modules      []*pkgmodels.Module `json:"modules"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -201,13 +205,13 @@ func handleTenantUpdateProduct(c *gin.Context) {
 	}
 
 	var req struct {
-		Name         string                          `json:"name"`
-		Description  string                          `json:"description"`
-		ProductType  string                          `json:"product_type"`
-		ThumbnailURL string                          `json:"thumbnail_url"`
-		Status       string                          `json:"status"`
-		Modules      []*pkgmodels.Module             `json:"modules"`
-		Service      *pkgmodels.ServiceConfig        `json:"service"`
+		Name         string                           `json:"name"`
+		Description  string                           `json:"description"`
+		ProductType  string                           `json:"product_type"`
+		ThumbnailURL string                           `json:"thumbnail_url"`
+		Status       string                           `json:"status"`
+		Modules      []*pkgmodels.Module              `json:"modules"`
+		Service      *pkgmodels.ServiceConfig         `json:"service"`
 		Downloads    *pkgmodels.DigitalDownloadConfig `json:"downloads"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -350,6 +354,86 @@ func resolveTenantProducts(tenantID bson.ObjectId, ids []string) ([]bson.ObjectI
 	return resolved, unresolved
 }
 
+type offerItemRequest struct {
+	ProductID         string                      `json:"product_id"`
+	AccessPolicy      pkgmodels.OfferAccessPolicy `json:"access_policy"`
+	FulfillmentPolicy pkgmodels.FulfillmentPolicy `json:"fulfillment_policy"`
+}
+
+func offerProductIDs(items []pkgmodels.OfferItem) []bson.ObjectId {
+	out := make([]bson.ObjectId, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.ProductID)
+	}
+	return out
+}
+
+func legacyOfferItemRequests(ids []string) []offerItemRequest {
+	out := make([]offerItemRequest, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, offerItemRequest{ProductID: id})
+	}
+	return out
+}
+
+// resolveOfferItems makes the per-line policy canonical and tenant-safe. The
+// server owns policy versions: unchanged policies retain their version, while
+// a changed policy increments it regardless of any client-supplied value.
+func resolveOfferItems(tenantID bson.ObjectId, reqs []offerItemRequest, current []pkgmodels.OfferItem) ([]pkgmodels.OfferItem, []string, error) {
+	items := make([]pkgmodels.OfferItem, 0, len(reqs))
+	unresolved := []string{}
+	seen := map[bson.ObjectId]bool{}
+	currentByProduct := map[bson.ObjectId]pkgmodels.OfferItem{}
+	for _, item := range current {
+		currentByProduct[item.ProductID] = item
+	}
+	for _, req := range reqs {
+		resolved, missing := resolveTenantProducts(tenantID, []string{req.ProductID})
+		if len(missing) > 0 || len(resolved) != 1 {
+			unresolved = append(unresolved, req.ProductID)
+			continue
+		}
+		productID := resolved[0]
+		if seen[productID] {
+			return nil, unresolved, fmt.Errorf("product %s appears more than once", req.ProductID)
+		}
+		seen[productID] = true
+		access := req.AccessPolicy
+		if access.Mode == "" {
+			access.Mode = pkgmodels.OfferAccessLifetime
+		}
+		switch access.Mode {
+		case pkgmodels.OfferAccessLifetime:
+			access.DurationDays = 0
+		case pkgmodels.OfferAccessFixedDays:
+			if access.DurationDays < 1 || access.DurationDays > 36500 {
+				return nil, unresolved, fmt.Errorf("fixed_days access requires duration_days between 1 and 36500")
+			}
+		default:
+			return nil, unresolved, fmt.Errorf("access mode must be lifetime or fixed_days")
+		}
+		fulfillment := req.FulfillmentPolicy
+		if fulfillment.Mode == "" {
+			fulfillment.Mode = pkgmodels.OfferFulfillmentAutomatic
+		}
+		if fulfillment.Mode != pkgmodels.OfferFulfillmentAutomatic && fulfillment.Mode != pkgmodels.OfferFulfillmentManual {
+			return nil, unresolved, fmt.Errorf("fulfillment mode must be automatic or manual")
+		}
+		item := pkgmodels.OfferItem{ProductID: productID, Version: 1, AccessPolicy: access, FulfillmentPolicy: fulfillment}
+		if prior, ok := currentByProduct[productID]; ok {
+			if prior.Version < 1 {
+				prior.Version = 1
+			}
+			item.Version = prior.Version
+			if prior.AccessPolicy != access || prior.FulfillmentPolicy != fulfillment {
+				item.Version++
+			}
+		}
+		items = append(items, item)
+	}
+	return items, unresolved, nil
+}
+
 func handleCreateOffer(c *gin.Context) {
 	tenantID := auth.GetTenantObjectID(c)
 	if tenantID == "" {
@@ -358,14 +442,15 @@ func handleCreateOffer(c *gin.Context) {
 	}
 
 	var req struct {
-		Title            string   `json:"title" binding:"required"`
-		PricingModel     string   `json:"pricing_model" binding:"required"`
-		Amount           int64    `json:"amount"`
-		Currency         string   `json:"currency"`
-		Status           string                    `json:"status"`
-		GrantedBadges    []string                  `json:"granted_badges"`
-		IncludedProducts []string                  `json:"included_products"`
-		Coaching         *pkgmodels.OfferCoaching  `json:"coaching"`
+		Title            string                   `json:"title" binding:"required"`
+		PricingModel     string                   `json:"pricing_model" binding:"required"`
+		Amount           int64                    `json:"amount"`
+		Currency         string                   `json:"currency"`
+		Status           string                   `json:"status"`
+		GrantedBadges    []string                 `json:"granted_badges"`
+		IncludedProducts []string                 `json:"included_products"`
+		Items            []offerItemRequest       `json:"items"`
+		Coaching         *pkgmodels.OfferCoaching `json:"coaching"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title and pricing_model are required"})
@@ -395,19 +480,28 @@ func handleCreateOffer(c *gin.Context) {
 	// is not trusted unless it belongs to this tenant. Invalid identifiers are
 	// rejected with an itemized error rather than silently dropped, and an
 	// offer must include at least one product (COM-CC-002/003).
-	resolvedProducts, unresolved := resolveTenantProducts(tenantID, req.IncludedProducts)
+	itemReqs := req.Items
+	if itemReqs == nil {
+		itemReqs = legacyOfferItemRequests(req.IncludedProducts)
+	}
+	items, unresolved, policyErr := resolveOfferItems(tenantID, itemReqs, nil)
+	if policyErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": policyErr.Error()})
+		return
+	}
 	if len(unresolved) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":              "one or more included products are not valid for this tenant",
+			"error":               "one or more included products are not valid for this tenant",
 			"unresolved_products": unresolved,
 		})
 		return
 	}
-	if len(resolvedProducts) == 0 {
+	if len(items) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "an offer must include at least one product"})
 		return
 	}
-	offer.IncludedProducts = resolvedProducts
+	offer.Items = items
+	offer.IncludedProducts = offerProductIDs(items)
 
 	if err := db.GetCollection(pkgmodels.OfferCollection).Insert(offer); err != nil {
 		log.Println("Error creating offer:", err)
@@ -453,13 +547,14 @@ func handleUpdateOffer(c *gin.Context) {
 	}
 
 	var req struct {
-		Title            string   `json:"title"`
-		PricingModel     string   `json:"pricing_model"`
-		Amount           *int64   `json:"amount"`
-		Currency         string   `json:"currency"`
+		Title            string                   `json:"title"`
+		PricingModel     string                   `json:"pricing_model"`
+		Amount           *int64                   `json:"amount"`
+		Currency         string                   `json:"currency"`
 		Status           string                   `json:"status"`
 		GrantedBadges    []string                 `json:"granted_badges"`
 		IncludedProducts []string                 `json:"included_products"`
+		Items            []offerItemRequest       `json:"items"`
 		Coaching         *pkgmodels.OfferCoaching `json:"coaching"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -484,9 +579,13 @@ func handleUpdateOffer(c *gin.Context) {
 		// a live offer that grants nothing is invalid.
 		if req.Status == pkgmodels.OfferStatusPublished {
 			effective := current.IncludedProducts
-			if req.IncludedProducts != nil {
-				resolved, _ := resolveTenantProducts(tenantID, req.IncludedProducts)
-				effective = resolved
+			if req.Items != nil || req.IncludedProducts != nil {
+				itemReqs := req.Items
+				if itemReqs == nil {
+					itemReqs = legacyOfferItemRequests(req.IncludedProducts)
+				}
+				resolved, _, _ := resolveOfferItems(tenantID, itemReqs, current.Items)
+				effective = offerProductIDs(resolved)
 			}
 			if len(effective) == 0 {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot publish an offer with no included products"})
@@ -517,21 +616,30 @@ func handleUpdateOffer(c *gin.Context) {
 			update["coaching"] = nil
 		}
 	}
-	if req.IncludedProducts != nil {
+	if req.Items != nil || req.IncludedProducts != nil {
 		// Tenant-scoped resolution with itemized rejection (COM-CC-002/003).
-		included, unresolved := resolveTenantProducts(tenantID, req.IncludedProducts)
+		itemReqs := req.Items
+		if itemReqs == nil {
+			itemReqs = legacyOfferItemRequests(req.IncludedProducts)
+		}
+		items, unresolved, policyErr := resolveOfferItems(tenantID, itemReqs, current.Items)
+		if policyErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": policyErr.Error()})
+			return
+		}
 		if len(unresolved) > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error":              "one or more included products are not valid for this tenant",
+				"error":               "one or more included products are not valid for this tenant",
 				"unresolved_products": unresolved,
 			})
 			return
 		}
-		if len(included) == 0 {
+		if len(items) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "an offer must include at least one product"})
 			return
 		}
-		update["included_products"] = included
+		update["items"] = items
+		update["included_products"] = offerProductIDs(items)
 	}
 
 	if len(update) == 0 {
@@ -570,10 +678,13 @@ func handleDeleteOffer(c *gin.Context) {
 	// at it, and otherwise archive (soft-delete) so historical purchase and
 	// access snapshots keep a resolvable definition.
 	oid := bson.ObjectIdHex(offerID)
-	refs, _ := db.GetCollection(pkgmodels.SubscriptionCollection).Find(bson.M{
+	refs, _ := db.GetCollection(pkgmodels.RecurringAgreementCollection).Find(bson.M{
 		"tenant_id": tenantID, "offer_id": oid,
 	}).Count()
-	if refs > 0 {
+	purchaseRefs, _ := db.GetCollection(pkgmodels.PurchaseCollection).Find(bson.M{
+		"tenant_id": tenantID, "offer_snapshot.offer_id": oid,
+	}).Count()
+	if refs > 0 || purchaseRefs > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "offer is referenced by purchases and cannot be deleted; archive it instead"})
 		return
 	}

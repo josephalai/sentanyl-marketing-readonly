@@ -174,7 +174,7 @@ func provisionCoachingEnrollment(tenantID, contactID bson.ObjectId, product *pkg
 // revokeProductEntitlements is the refund-side counterpart. Mirrors the
 // dispatch in provisionProductPurchase so a refund undoes whatever a
 // purchase created. callable from the charge.refunded handler.
-func revokeProductEntitlements(tenantID, contactID, productID bson.ObjectId, offerID bson.ObjectId) {
+func revokeProductEntitlements(tenantID, contactID, productID bson.ObjectId, offerID, purchaseItemID bson.ObjectId) {
 	var product pkgmodels.Product
 	if err := db.GetCollection(pkgmodels.ProductCollection).FindId(productID).One(&product); err != nil {
 		log.Printf("[stripe webhook] revoke: product %s lookup: %v", productID.Hex(), err)
@@ -183,13 +183,9 @@ func revokeProductEntitlements(tenantID, contactID, productID bson.ObjectId, off
 	now := time.Now()
 	switch product.ProductType {
 	case pkgmodels.ProductTypeService:
+		q := bson.M{"tenant_id": tenantID, "purchase_item_id": purchaseItemID}
 		_, _ = db.GetCollection(pkgmodels.ServiceEnrollmentCollection).UpdateAll(
-			bson.M{
-				"tenant_id":  tenantID,
-				"contact_id": contactID,
-				"product_id": productID,
-				"offer_id":   offerID,
-			},
+			q,
 			bson.M{"$set": bson.M{"status": "revoked", "revoked_at": now}},
 		)
 	case pkgmodels.ProductTypeCoaching:
@@ -198,10 +194,11 @@ func revokeProductEntitlements(tenantID, contactID, productID bson.ObjectId, off
 			url = "http://coaching-service:8086"
 		}
 		body, _ := json.Marshal(map[string]string{
-			"tenant_id":  tenantID.Hex(),
-			"contact_id": contactID.Hex(),
-			"product_id": productID.Hex(),
-			"offer_id":   offerID.Hex(),
+			"tenant_id":        tenantID.Hex(),
+			"contact_id":       contactID.Hex(),
+			"product_id":       productID.Hex(),
+			"offer_id":         offerID.Hex(),
+			"purchase_item_id": purchaseItemID.Hex(),
 		})
 		req, err := http.NewRequest(http.MethodPost, url+"/internal/revoke-coaching", bytes.NewReader(body))
 		if err != nil {

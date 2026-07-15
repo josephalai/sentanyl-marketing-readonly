@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,9 +24,24 @@ import (
 	badgecmd "github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
+
+const commerceWebhookJobType = "commerce.webhook.process"
+
+func RegisterCommerceWebhookJobs() {
+	jobs.Register(commerceWebhookJobType, func(_ context.Context, job *jobs.Job) error {
+		var tenant pkgmodels.Tenant
+		if err := db.GetCollection(pkgmodels.TenantCollection).FindId(job.TenantID).One(&tenant); err != nil {
+			return fmt.Errorf("load tenant: %w", err)
+		}
+		eventType, _ := job.Payload["event_type"].(string)
+		object, _ := job.Payload["object"].(string)
+		return processStripeEvent(job.TenantID, &tenant, eventType, json.RawMessage(object))
+	})
+}
 
 // RegisterStripeWebhookRoute registers the public Stripe webhook receiver.
 // Stripe calls this URL for every tenant using a platform-wide endpoint with
@@ -35,8 +52,8 @@ func RegisterStripeWebhookRoute(publicAPI *gin.RouterGroup) {
 
 // stripeEvent is the minimal shape we care about.
 type stripeEvent struct {
-	ID   string          `json:"id"`
-	Type string          `json:"type"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
 	Data struct {
 		Object json.RawMessage `json:"object"`
 	} `json:"data"`
@@ -44,12 +61,12 @@ type stripeEvent struct {
 
 // stripeCheckoutSession is the subset of Session fields we use.
 type stripeCheckoutSession struct {
-	ID              string            `json:"id"`
-	Mode            string            `json:"mode"`
-	AmountTotal     int64             `json:"amount_total"`
-	Currency        string            `json:"currency"`
-	PaymentIntent   string            `json:"payment_intent"`
-	CustomerEmail   string            `json:"customer_email"`
+	ID              string `json:"id"`
+	Mode            string `json:"mode"`
+	AmountTotal     int64  `json:"amount_total"`
+	Currency        string `json:"currency"`
+	PaymentIntent   string `json:"payment_intent"`
+	CustomerEmail   string `json:"customer_email"`
 	CustomerDetails struct {
 		Email string `json:"email"`
 		Name  string `json:"name"`
@@ -61,9 +78,9 @@ type stripeCheckoutSession struct {
 
 // stripeSubscription is the subset of Subscription fields we use.
 type stripeSubscription struct {
-	ID               string            `json:"id"`
-	Status           string            `json:"status"`
-	Metadata         map[string]string `json:"metadata"`
+	ID       string            `json:"id"`
+	Status   string            `json:"status"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 // stripeInvoice is the subset of Invoice fields we use.
@@ -107,34 +124,82 @@ func handleStripeWebhook(c *gin.Context) {
 		return
 	}
 
-	switch evt.Type {
-	case "checkout.session.completed":
-		if err := processCheckoutSessionCompleted(tenantID, &tenant, evt.Data.Object); err != nil {
-			log.Printf("[stripe webhook] checkout.session.completed: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	case "invoice.paid":
-		if err := processInvoicePaid(tenantID, evt.Data.Object); err != nil {
-			log.Printf("[stripe webhook] invoice.paid: %v", err)
-		}
-	case "customer.subscription.deleted", "customer.subscription.updated":
-		if err := processSubscriptionStateChange(tenantID, evt.Data.Object); err != nil {
-			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
-		}
-	case "charge.refunded", "charge.refund.updated":
-		if err := processChargeRefunded(tenantID, evt.Data.Object); err != nil {
-			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
-		}
-	case "charge.dispute.created", "charge.dispute.updated":
-		if err := processChargeDisputed(tenantID, evt.Data.Object); err != nil {
-			log.Printf("[stripe webhook] %s: %v", evt.Type, err)
-		}
-	default:
-		// Acknowledge unhandled events so Stripe stops retrying.
+	if evt.ID == "" {
+		sum := sha256.Sum256(rawBody)
+		evt.ID = fmt.Sprintf("body-%x", sum[:])
 	}
-
+	key := tenantID.Hex() + ":" + evt.ID
+	job := jobs.NewJob(commerceWebhookJobType, key, jobs.Envelope{
+		TenantID: tenantID, Actor: "stripe", Subject: evt.Type, Version: 1,
+		CorrelationID: evt.ID, CausationID: evt.ID,
+	}, bson.M{"event_type": evt.Type, "object": string(evt.Data.Object)})
+	if err := jobs.Enqueue(job); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not persist webhook"})
+		return
+	}
+	var durable jobs.Job
+	if err := db.GetCollection(jobs.JobCollection).Find(bson.M{"type": commerceWebhookJobType, "idempotency_key": key}).One(&durable); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not reload webhook"})
+		return
+	}
+	if durable.Status == jobs.StatusSucceeded {
+		c.JSON(http.StatusOK, gin.H{"received": true, "duplicate": true})
+		return
+	}
+	if os.Getenv("SENTANYL_E2E_MODE") == "1" && c.GetHeader("X-E2E-Fail-Point") == "after-commerce-enqueue" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "injected failure after durable enqueue"})
+		return
+	}
+	// Claim an HTTP-side lease before doing synchronous work. Without this CAS,
+	// the background worker can claim the freshly inserted pending row while the
+	// request is still processing and duplicate non-ledger side effects (email,
+	// outbound events). A crashed request is reclaimed after the lease expires;
+	// explicit processing failure releases it immediately.
+	now := time.Now()
+	err = db.GetCollection(jobs.JobCollection).Update(bson.M{
+		"_id": durable.Id,
+		"$or": []bson.M{
+			{"status": bson.M{"$in": []string{jobs.StatusPending, jobs.StatusFailed}}},
+			{"status": jobs.StatusRunning, "lease_expires_at": bson.M{"$lte": now}},
+		},
+	}, bson.M{"$set": bson.M{
+		"status": jobs.StatusRunning, "lease_owner": "stripe-http",
+		"lease_expires_at": now.Add(2 * time.Minute), "updated_at": now,
+	}})
+	if err != nil {
+		// Another delivery or worker owns the live lease. It will complete the
+		// durable event; acknowledge without executing it a second time.
+		c.JSON(http.StatusAccepted, gin.H{"received": true, "processing": true})
+		return
+	}
+	if err := processStripeEvent(tenantID, &tenant, evt.Type, evt.Data.Object); err != nil {
+		_ = db.GetCollection(jobs.JobCollection).UpdateId(durable.Id, bson.M{"$set": bson.M{
+			"status": jobs.StatusPending, "run_at": time.Now(), "lease_owner": "",
+			"lease_expires_at": time.Time{}, "last_error": err.Error(), "updated_at": time.Now(),
+		}})
+		log.Printf("[stripe webhook] %s: %v", evt.Type, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	_ = jobs.Complete(durable.Id)
 	c.JSON(http.StatusOK, gin.H{"received": true})
+}
+
+func processStripeEvent(tenantID bson.ObjectId, tenant *pkgmodels.Tenant, eventType string, object json.RawMessage) error {
+	switch eventType {
+	case "checkout.session.completed":
+		return processCheckoutSessionCompleted(tenantID, tenant, object)
+	case "invoice.paid":
+		return processInvoicePaid(tenantID, object)
+	case "customer.subscription.deleted", "customer.subscription.updated":
+		return processSubscriptionStateChange(tenantID, object)
+	case "charge.refunded", "charge.refund.updated":
+		return processChargeRefunded(tenantID, object)
+	case "charge.dispute.created", "charge.dispute.updated":
+		return processChargeDisputed(tenantID, object)
+	default:
+		return nil
+	}
 }
 
 // verifyStripeSignature checks a Stripe-Signature header against the request body.
@@ -190,10 +255,6 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 		return fmt.Errorf("grant badges: %w", err)
 	}
 
-	if err := recordSubscription(tenantID, contact.Id, offer.Id, session.ID, session.Subscription); err != nil {
-		return fmt.Errorf("record subscription: %w", err)
-	}
-
 	// Revenue trail: write one PurchaseLog row for the purchase. We use the
 	// session's amount_total (post-discount) so revenue queries reflect what
 	// the buyer actually paid. PaymentIntent (or the session id as fallback)
@@ -219,6 +280,9 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 	if err != nil {
 		return fmt.Errorf("record purchase ledger: %w", err)
 	}
+	if err := recordRecurringAgreement(tenantID, contact.Id, offer.Id, purchase.Id, session.Subscription); err != nil {
+		return fmt.Errorf("record recurring agreement: %w", err)
+	}
 
 	// Emit a durable, signed outbound webhook for the purchase (WH-003/004).
 	// Best-effort enqueue: delivery + retry are handled by the job worker.
@@ -239,14 +303,18 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 	// enrollment, services → ServiceEnrollment, coaching → coaching-service,
 	// downloads/newsletters → badge/tier above).
 	var enrollFailures []string
-	for _, productID := range offer.IncludedProducts {
-		item, err := ensurePurchaseItem(tenantID, contact.Id, purchase, &offer, productID)
+	for _, snap := range purchase.OfferSnapshot.Items {
+		productID := snap.ProductID
+		item, err := ensurePurchaseItem(tenantID, contact.Id, purchase, snap)
 		if err != nil {
 			enrollFailures = append(enrollFailures, fmt.Sprintf("%s: item: %v", productID.Hex(), err))
 			continue
 		}
 		if item.Status == pkgmodels.ItemStatusProvisioned {
 			continue // already provisioned on an earlier delivery of this event
+		}
+		if item.FulfillmentPolicy.Mode == pkgmodels.OfferFulfillmentManual {
+			continue // an operator must fulfill this line; pending is intentional
 		}
 		if err := provisionProductPurchase(tenantID, contact.Id, productID, offer.Id, item.Id); err != nil {
 			log.Printf("[stripe webhook] PROVISION FAILED tenant=%s offer=%s product=%s contact=%s email=%s: %v",
@@ -275,7 +343,7 @@ func processCheckoutSessionCompleted(tenantID bson.ObjectId, tenant *pkgmodels.T
 
 	if len(enrollFailures) > 0 {
 		return fmt.Errorf("enrollment failed for %d of %d products in offer %s: %s",
-			len(enrollFailures), len(offer.IncludedProducts), offer.Id.Hex(), strings.Join(enrollFailures, "; "))
+			len(enrollFailures), len(purchase.OfferSnapshot.Items), offer.Id.Hex(), strings.Join(enrollFailures, "; "))
 	}
 	return nil
 }
@@ -453,6 +521,26 @@ func recordPurchaseLedger(tenantID, contactID bson.ObjectId, offer *pkgmodels.Of
 	if err := col.Find(bson.M{"tenant_id": tenantID, "stripe_session_id": session.ID}).One(&existing); err == nil {
 		return &existing, nil
 	}
+	items := offer.Items
+	if len(items) == 0 {
+		items = make([]pkgmodels.OfferItem, 0, len(offer.IncludedProducts))
+		for _, productID := range offer.IncludedProducts {
+			items = append(items, pkgmodels.DefaultOfferItem(productID))
+		}
+	}
+	itemSnaps := make([]pkgmodels.OfferItemSnapshot, 0, len(items))
+	productIDs := make([]bson.ObjectId, 0, len(items))
+	for _, item := range items {
+		var product pkgmodels.Product
+		if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{"_id": item.ProductID, "tenant_id": tenantID}).One(&product); err != nil {
+			return nil, fmt.Errorf("snapshot product %s: %w", item.ProductID.Hex(), err)
+		}
+		itemSnaps = append(itemSnaps, pkgmodels.OfferItemSnapshot{
+			ProductID: item.ProductID, ProductType: product.ProductType, ProductTitle: product.Name,
+			PolicyVersion: item.Version, AccessPolicy: item.AccessPolicy, FulfillmentPolicy: item.FulfillmentPolicy,
+		})
+		productIDs = append(productIDs, item.ProductID)
+	}
 	snap := pkgmodels.OfferSnapshot{
 		OfferID:       offer.Id,
 		Title:         offer.Title,
@@ -460,7 +548,8 @@ func recordPurchaseLedger(tenantID, contactID bson.ObjectId, offer *pkgmodels.Of
 		Amount:        offer.Amount,
 		Currency:      offer.Currency,
 		GrantedBadges: offer.GrantedBadges,
-		ProductIDs:    offer.IncludedProducts,
+		ProductIDs:    productIDs,
+		Items:         itemSnaps,
 	}
 	currency := session.Currency
 	if currency == "" {
@@ -482,17 +571,15 @@ func recordPurchaseLedger(tenantID, contactID bson.ObjectId, offer *pkgmodels.Of
 // ensurePurchaseItem idempotently creates the PurchaseItem for one product of a
 // Purchase (COM-CC-006), keyed by (purchase_id, product_id). Returns the item
 // (existing or newly created) so the caller can decide whether to provision.
-func ensurePurchaseItem(tenantID, contactID bson.ObjectId, purchase *pkgmodels.Purchase, offer *pkgmodels.Offer, productID bson.ObjectId) (*pkgmodels.PurchaseItem, error) {
+func ensurePurchaseItem(tenantID, contactID bson.ObjectId, purchase *pkgmodels.Purchase, snap pkgmodels.OfferItemSnapshot) (*pkgmodels.PurchaseItem, error) {
 	col := db.GetCollection(pkgmodels.PurchaseItemCollection)
 	var existing pkgmodels.PurchaseItem
-	if err := col.Find(bson.M{"purchase_id": purchase.Id, "product_id": productID}).One(&existing); err == nil {
+	if err := col.Find(bson.M{"purchase_id": purchase.Id, "product_id": snap.ProductID}).One(&existing); err == nil {
 		return &existing, nil
 	}
-	var product pkgmodels.Product
-	_ = db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{"_id": productID, "tenant_id": tenantID}).One(&product)
-	item := pkgmodels.NewPurchaseItem(tenantID, contactID, purchase.Id, offer.Id, productID, product.ProductType, product.Name)
+	item := pkgmodels.NewPurchaseItemFromSnapshot(tenantID, contactID, purchase.Id, purchase.OfferSnapshot.OfferID, snap)
 	if err := col.Insert(item); err != nil {
-		if err2 := col.Find(bson.M{"purchase_id": purchase.Id, "product_id": productID}).One(&existing); err2 == nil {
+		if err2 := col.Find(bson.M{"purchase_id": purchase.Id, "product_id": snap.ProductID}).One(&existing); err2 == nil {
 			return &existing, nil
 		}
 		return nil, err
@@ -518,39 +605,27 @@ func ensureAccessGrant(item *pkgmodels.PurchaseItem, offerID bson.ObjectId) {
 		return
 	}
 	grant := pkgmodels.NewAccessGrant(item.TenantID, item.ContactID, item.ProductID, item.Id, offerID, "purchase")
+	if item.AccessPolicy.Mode == pkgmodels.OfferAccessFixedDays && item.AccessPolicy.DurationDays > 0 {
+		expires := time.Now().Add(time.Duration(item.AccessPolicy.DurationDays) * 24 * time.Hour)
+		grant.ExpiresAt = &expires
+	}
 	if err := col.Insert(grant); err != nil {
 		log.Printf("[stripe webhook] access grant insert failed for item %s: %v", item.Id.Hex(), err)
 	}
 }
 
-// recordSubscription upserts a Subscription row. For recurring payments the
-// StripeSubscriptionID is the idempotency key. For one-time payments (no
-// subscription id), the (tenant, contact, offer) triple is the idempotency
-// key. StripeSessionID is always saved when present so the post-checkout
-// landing page can look up provisioning state by session id.
-func recordSubscription(tenantID, contactID, offerID bson.ObjectId, stripeSessionID, stripeSubscriptionID string) error {
-	col := db.GetCollection(pkgmodels.SubscriptionCollection)
-	var existing pkgmodels.Subscription
-	filter := bson.M{"tenant_id": tenantID, "contact_id": contactID, "offer_id": offerID}
-	if stripeSubscriptionID != "" {
-		filter = bson.M{"stripe_subscription_id": stripeSubscriptionID}
+// recordRecurringAgreement records billing state only when Stripe created a
+// real subscription. One-time orders remain represented solely by Purchase.
+func recordRecurringAgreement(tenantID, contactID, offerID, purchaseID bson.ObjectId, stripeSubscriptionID string) error {
+	if stripeSubscriptionID == "" {
+		return nil
 	}
-	if err := col.Find(filter).One(&existing); err == nil {
-		update := bson.M{"status": "active", "timestamps.updated_at": time.Now()}
-		if stripeSubscriptionID != "" {
-			update["stripe_subscription_id"] = stripeSubscriptionID
-		}
-		if stripeSessionID != "" {
-			update["stripe_session_id"] = stripeSessionID
-		}
-		return col.Update(bson.M{"_id": existing.Id}, bson.M{"$set": update})
+	col := db.GetCollection(pkgmodels.RecurringAgreementCollection)
+	var existing pkgmodels.RecurringAgreement
+	if err := col.Find(bson.M{"tenant_id": tenantID, "stripe_subscription_id": stripeSubscriptionID}).One(&existing); err == nil {
+		return col.UpdateId(existing.Id, bson.M{"$set": bson.M{"status": "active", "timestamps.updated_at": time.Now()}})
 	}
-	sub := pkgmodels.NewSubscription(tenantID, contactID, offerID)
-	sub.StripeSessionID = stripeSessionID
-	sub.StripeSubscriptionID = stripeSubscriptionID
-	now := time.Now()
-	sub.SoftDeletes.CreatedAt = &now
-	return col.Insert(sub)
+	return col.Insert(pkgmodels.NewRecurringAgreement(tenantID, contactID, offerID, purchaseID, stripeSubscriptionID))
 }
 
 // callInternalEnroll posts to lms-service /internal/enroll. The purchase
@@ -657,7 +732,7 @@ func processInvoicePaid(tenantID bson.ObjectId, raw json.RawMessage) error {
 	if inv.Subscription == "" {
 		return nil
 	}
-	return db.GetCollection(pkgmodels.SubscriptionCollection).Update(
+	return db.GetCollection(pkgmodels.RecurringAgreementCollection).Update(
 		bson.M{"tenant_id": tenantID, "stripe_subscription_id": inv.Subscription},
 		bson.M{"$set": bson.M{"status": "active", "timestamps.updated_at": time.Now()}},
 	)
@@ -665,10 +740,11 @@ func processInvoicePaid(tenantID bson.ObjectId, raw json.RawMessage) error {
 
 // subscriptionAccessState maps a Stripe subscription status onto its access
 // consequence (BILL-007): a lossless enum instead of copying the raw string.
-//   active     — access on (restore a prior suspension)
-//   suspend    — access paused (past_due/unpaid/paused/incomplete)
-//   revoke     — access ends (canceled/incomplete_expired)
-//   noop       — no access change (unknown/blank → leave grants as-is)
+//
+//	active     — access on (restore a prior suspension)
+//	suspend    — access paused (past_due/unpaid/paused/incomplete)
+//	revoke     — access ends (canceled/incomplete_expired)
+//	noop       — no access change (unknown/blank → leave grants as-is)
 func subscriptionAccessState(status string) string {
 	switch status {
 	case "active", "trialing":
@@ -694,7 +770,7 @@ func processSubscriptionStateChange(tenantID bson.ObjectId, raw json.RawMessage)
 	if newStatus == "" {
 		newStatus = "canceled"
 	}
-	if err := db.GetCollection(pkgmodels.SubscriptionCollection).Update(
+	if err := db.GetCollection(pkgmodels.RecurringAgreementCollection).Update(
 		bson.M{"tenant_id": tenantID, "stripe_subscription_id": sub.ID},
 		bson.M{"$set": bson.M{"status": newStatus, "timestamps.updated_at": time.Now()}},
 	); err != nil {
@@ -703,8 +779,8 @@ func processSubscriptionStateChange(tenantID bson.ObjectId, raw json.RawMessage)
 
 	// COM-CC-014/BILL-007: propagate the billing state onto the AccessGrant
 	// authority so a lapsed/canceled subscription actually gates delivery.
-	var subs []pkgmodels.Subscription
-	_ = db.GetCollection(pkgmodels.SubscriptionCollection).Find(
+	var subs []pkgmodels.RecurringAgreement
+	_ = db.GetCollection(pkgmodels.RecurringAgreementCollection).Find(
 		bson.M{"tenant_id": tenantID, "stripe_subscription_id": sub.ID}).All(&subs)
 	action := subscriptionAccessState(newStatus)
 	now := time.Now()
@@ -780,13 +856,13 @@ func processChargeDisputed(tenantID bson.ObjectId, raw json.RawMessage) error {
 
 // stripeCharge is the subset of Charge fields we use for refund handling.
 type stripeCharge struct {
-	ID                  string            `json:"id"`
-	Amount              int64             `json:"amount"`
-	AmountRefunded      int64             `json:"amount_refunded"`
-	Refunded            bool              `json:"refunded"`
-	PaymentIntent       string            `json:"payment_intent"`
-	Metadata            map[string]string `json:"metadata"`
-	PaymentIntentMeta   map[string]string `json:"payment_intent_metadata,omitempty"`
+	ID                string            `json:"id"`
+	Amount            int64             `json:"amount"`
+	AmountRefunded    int64             `json:"amount_refunded"`
+	Refunded          bool              `json:"refunded"`
+	PaymentIntent     string            `json:"payment_intent"`
+	Metadata          map[string]string `json:"metadata"`
+	PaymentIntentMeta map[string]string `json:"payment_intent_metadata,omitempty"`
 }
 
 // processChargeRefunded handles the Stripe charge.refunded event by revoking
@@ -816,45 +892,56 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 	offerID := bson.ObjectIdHex(offerHex)
 
 	var offer pkgmodels.Offer
-	if err := db.GetCollection(pkgmodels.OfferCollection).FindId(offerID).One(&offer); err != nil {
+	if err := db.GetCollection(pkgmodels.OfferCollection).Find(bson.M{"_id": offerID, "tenant_id": tenantID}).One(&offer); err != nil {
 		return fmt.Errorf("offer %s lookup failed: %w", offerHex, err)
 	}
 
-	// Find the contact: prefer email metadata; fall back to the most recent
-	// Subscription on this offer if nothing else identifies the buyer.
+	// Resolve one exact commercial acquisition. Stripe's payment intent is the
+	// primary key. The contact+offer fallback exists only for local simulations
+	// that cannot provide one, and is bounded to the latest unrefunded Purchase.
 	var contact pkgmodels.User
-	contactErr := error(nil)
 	if contactEmail != "" {
-		contactErr = db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
+		_ = db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
 			"tenant_id": tenantID,
 			"email":     pkgmodels.EmailAddress(contactEmail),
 		}).One(&contact)
 	}
-	if contactErr != nil || contactEmail == "" {
-		var sub pkgmodels.Subscription
-		err := db.GetCollection(pkgmodels.SubscriptionCollection).Find(bson.M{
-			"tenant_id":         tenantID,
-			"offer_id":          offerID,
-			"stripe_session_id": bson.M{"$ne": ""},
-		}).Sort("-timestamps.created_at").One(&sub)
-		if err != nil {
-			return fmt.Errorf("could not resolve refund contact for offer %s", offerHex)
-		}
-		if err := db.GetCollection(pkgmodels.UserCollection).FindId(sub.ContactID).One(&contact); err != nil {
-			return fmt.Errorf("contact %s missing", sub.ContactID.Hex())
+	purchaseQuery := bson.M{"tenant_id": tenantID, "offer_snapshot.offer_id": offerID, "status": bson.M{"$ne": pkgmodels.PurchaseStatusRefunded}}
+	if charge.PaymentIntent != "" {
+		purchaseQuery["stripe_payment_intent_id"] = charge.PaymentIntent
+	} else if contact.Id.Valid() {
+		purchaseQuery["contact_id"] = contact.Id
+	} else {
+		return fmt.Errorf("could not resolve refund purchase for offer %s", offerHex)
+	}
+	var purchase pkgmodels.Purchase
+	if err := db.GetCollection(pkgmodels.PurchaseCollection).Find(purchaseQuery).Sort("-timestamps.created_at").One(&purchase); err != nil {
+		return fmt.Errorf("could not resolve refund purchase for offer %s: %w", offerHex, err)
+	}
+	if !contact.Id.Valid() {
+		if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{"_id": purchase.ContactID, "tenant_id": tenantID}).One(&contact); err != nil {
+			return fmt.Errorf("contact %s missing", purchase.ContactID.Hex())
 		}
 	}
 
 	now := time.Now()
+	var items []pkgmodels.PurchaseItem
+	if err := db.GetCollection(pkgmodels.PurchaseItemCollection).Find(bson.M{
+		"tenant_id": tenantID, "purchase_id": purchase.Id,
+	}).All(&items); err != nil {
+		return fmt.Errorf("load refund purchase items: %w", err)
+	}
+	itemIDs := make([]bson.ObjectId, 0, len(items))
+	for _, item := range items {
+		itemIDs = append(itemIDs, item.Id)
+	}
 
-	// Revoke every enrollment for this contact + offer-included products.
-	if len(offer.IncludedProducts) > 0 {
+	// Revoke only fulfillment produced by this purchase's line items. A later
+	// repurchase of the same product has distinct item ids and remains active.
+	if len(itemIDs) > 0 {
 		if _, err := db.GetCollection(pkgmodels.CourseEnrollmentCollection).UpdateAll(
 			bson.M{
-				"tenant_id":  tenantID,
-				"contact_id": contact.Id,
-				"product_id": bson.M{"$in": offer.IncludedProducts},
-				"revoked_at": nil,
+				"tenant_id": tenantID, "purchase_item_id": bson.M{"$in": itemIDs}, "revoked_at": nil,
 			},
 			bson.M{"$set": bson.M{
 				"status":                "refunded",
@@ -866,19 +953,24 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 		}
 		// Mirror the revoke into non-course product types (services, coaching).
 		// downloads/newsletter unwind via badge removal below.
-		for _, productID := range offer.IncludedProducts {
-			revokeProductEntitlements(tenantID, contact.Id, productID, offerID)
+		for _, item := range items {
+			revokeProductEntitlements(tenantID, contact.Id, item.ProductID, offerID, item.Id)
 		}
 	}
 
 	// Strip granted badges from the contact so the library Re-renders with
 	// no access to the refunded course's content.
-	if len(offer.GrantedBadges) > 0 {
+	otherCompleted, _ := db.GetCollection(pkgmodels.PurchaseCollection).Find(bson.M{
+		"_id": bson.M{"$ne": purchase.Id}, "tenant_id": tenantID,
+		"contact_id": purchase.ContactID, "offer_snapshot.offer_id": offerID,
+		"status": pkgmodels.PurchaseStatusCompleted,
+	}).Count()
+	if otherCompleted == 0 && len(purchase.OfferSnapshot.GrantedBadges) > 0 {
 		var badgeIDs []bson.ObjectId
 		var badges []pkgmodels.Badge
 		_ = db.GetCollection(pkgmodels.BadgeCollection).Find(bson.M{
 			"tenant_id": tenantID,
-			"name":      bson.M{"$in": offer.GrantedBadges},
+			"name":      bson.M{"$in": purchase.OfferSnapshot.GrantedBadges},
 		}).All(&badges)
 		for _, b := range badges {
 			badgeIDs = append(badgeIDs, b.Id)
@@ -892,14 +984,11 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 	// (COM-CC-014). Under ACCESS_GRANTS_ONLY this is what actually removes
 	// Library access; otherwise it keeps the grant ledger consistent with the
 	// badge revocation above. Idempotent — already-revoked grants stay revoked.
-	if len(offer.IncludedProducts) > 0 {
+	if len(itemIDs) > 0 {
 		_, _ = db.GetCollection(pkgmodels.AccessGrantCollection).UpdateAll(
 			bson.M{
-				"tenant_id":  tenantID,
-				"contact_id": contact.Id,
-				"product_id": bson.M{"$in": offer.IncludedProducts},
-				"offer_id":   offerID,
-				"status":     bson.M{"$ne": pkgmodels.GrantStatusRevoked},
+				"tenant_id": tenantID, "purchase_item_id": bson.M{"$in": itemIDs},
+				"status": bson.M{"$ne": pkgmodels.GrantStatusRevoked},
 			},
 			bson.M{"$set": bson.M{"status": pkgmodels.GrantStatusRevoked, "timestamps.updated_at": now}},
 		)
@@ -907,35 +996,31 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 
 	// Mark the immutable Purchase + PurchaseItems refunded (status history, not
 	// deletion — the records stay for revenue/audit).
-	_, _ = db.GetCollection(pkgmodels.PurchaseCollection).UpdateAll(
-		bson.M{"tenant_id": tenantID, "contact_id": contact.Id, "offer_snapshot.offer_id": offerID, "status": bson.M{"$ne": pkgmodels.PurchaseStatusRefunded}},
+	_ = db.GetCollection(pkgmodels.PurchaseCollection).UpdateId(
+		purchase.Id,
 		bson.M{"$set": bson.M{"status": pkgmodels.PurchaseStatusRefunded, "timestamps.updated_at": now}},
 	)
 	_, _ = db.GetCollection(pkgmodels.PurchaseItemCollection).UpdateAll(
-		bson.M{"tenant_id": tenantID, "contact_id": contact.Id, "offer_id": offerID, "status": bson.M{"$ne": pkgmodels.ItemStatusRefunded}},
+		bson.M{"tenant_id": tenantID, "purchase_id": purchase.Id, "status": bson.M{"$ne": pkgmodels.ItemStatusRefunded}},
 		bson.M{"$set": bson.M{"status": pkgmodels.ItemStatusRefunded, "timestamps.updated_at": now}},
 	)
 
-	// Mark the matching subscription record as refunded.
-	_, _ = db.GetCollection(pkgmodels.SubscriptionCollection).UpdateAll(
-		bson.M{
-			"tenant_id":  tenantID,
-			"contact_id": contact.Id,
-			"offer_id":   offerID,
-			"status":     bson.M{"$ne": "refunded"},
-		},
-		bson.M{"$set": bson.M{"status": "refunded", "timestamps.updated_at": now}},
-	)
+	if purchase.StripeSubscriptionID != "" {
+		_ = db.GetCollection(pkgmodels.RecurringAgreementCollection).Update(
+			bson.M{"tenant_id": tenantID, "stripe_subscription_id": purchase.StripeSubscriptionID},
+			bson.M{"$set": bson.M{"status": "refunded", "timestamps.updated_at": now}},
+		)
+	}
 
 	// Mark the matching PurchaseLog row(s) as refunded so revenue queries
 	// exclude them. Matched primarily by charge id (Stripe-supplied) and
 	// secondarily by (tenant, contact, offer) for charges whose original
 	// PurchaseLog stored only the session id.
 	purchaseFilter := bson.M{
-		"tenant_id":  tenantID,
-		"user_id":    contact.Id,
-		"offer_id":   offerID,
-		"status":     bson.M{"$ne": "refunded"},
+		"tenant_id": tenantID,
+		"user_id":   contact.Id,
+		"offer_id":  offerID,
+		"status":    bson.M{"$ne": "refunded"},
 	}
 	if charge.PaymentIntent != "" {
 		purchaseFilter = bson.M{
@@ -943,6 +1028,8 @@ func processChargeRefunded(tenantID bson.ObjectId, raw json.RawMessage) error {
 			"stripe_charge_id": charge.PaymentIntent,
 			"status":           bson.M{"$ne": "refunded"},
 		}
+	} else if purchase.StripeSessionID != "" {
+		purchaseFilter = bson.M{"tenant_id": tenantID, "stripe_charge_id": purchase.StripeSessionID, "status": bson.M{"$ne": "refunded"}}
 	}
 	_, _ = db.GetCollection(pkgmodels.PurchaseLogCollection).UpdateAll(
 		purchaseFilter,
@@ -978,8 +1065,8 @@ func upgradeNewsletterSubscriptionForOffer(tenantID, contactID bson.ObjectId, em
 	// upgrade them all.
 	var products []pkgmodels.Product
 	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
-		"tenant_id":         tenantID,
-		"product_type":      pkgmodels.ProductTypeNewsletter,
+		"tenant_id":                 tenantID,
+		"product_type":              pkgmodels.ProductTypeNewsletter,
 		"newsletter.tiers.offer_id": offerID,
 	}).All(&products); err != nil {
 		return err
