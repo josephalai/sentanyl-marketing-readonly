@@ -272,11 +272,15 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 
 		dataAttrs := ""
 		if mediaPublicID != "" && tenantID.Valid() {
+			blockID, _ := comp["id"].(string)
+			if blockID == "" {
+				blockID, _ = props["blockId"].(string)
+			}
 			configURL := fmt.Sprintf("/api/video/public/media/%s/config?tenant_id=%s",
 				esc(mediaPublicID), tenantID.Hex())
 			dataAttrs = fmt.Sprintf(
-				` data-sentanyl data-media-public-id="%s" data-config-url="%s" data-tenant-id="%s"`,
-				esc(mediaPublicID), esc(configURL), tenantID.Hex())
+				` data-sentanyl data-media-public-id="%s" data-config-url="%s" data-tenant-id="%s" data-block-id="%s"`,
+				esc(mediaPublicID), esc(configURL), tenantID.Hex(), esc(blockID))
 		}
 		posterAttr := ""
 		if posterURL != "" {

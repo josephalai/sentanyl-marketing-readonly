@@ -119,8 +119,14 @@ func Materialize(tenantID bson.ObjectId, req MaterializeRequest) (*MaterializeRe
 	funnel.Name = page.Name
 	funnel.Domain = hostname
 	funnel.Routes = []*pkgmodels.FunnelRoute{route}
+	funnel.Status = "published"
+	funnel.PublishedVersion = funnel.DraftVersion
+	funnel.PublishedName = funnel.Name
+	funnel.PublishedDomain = funnel.Domain
+	funnel.PublishedRoutes = funnel.Routes
 
 	now := time.Now()
+	funnel.PublishedAt = &now
 	funnel.SoftDeletes.CreatedAt = &now
 	route.SoftDeletes.CreatedAt = &now
 	stage.SoftDeletes.CreatedAt = &now

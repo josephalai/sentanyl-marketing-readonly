@@ -152,10 +152,10 @@ type HydrateGraphRequest struct {
 	Offers   []*pkgmodels.Offer   `json:"offers"`
 	Assets   []*pkgmodels.Asset   `json:"assets"`
 
-	MediaEntities []*pkgmodels.Media         `json:"media_entities"`
-	PlayerPresets []*pkgmodels.PlayerPreset  `json:"player_presets"`
-	Channels      []*pkgmodels.MediaChannel  `json:"channels"`
-	MediaWebhooks []*pkgmodels.MediaWebhook  `json:"media_webhooks"`
+	MediaEntities []*pkgmodels.Media        `json:"media_entities"`
+	PlayerPresets []*pkgmodels.PlayerPreset `json:"player_presets"`
+	Channels      []*pkgmodels.MediaChannel `json:"channels"`
+	MediaWebhooks []*pkgmodels.MediaWebhook `json:"media_webhooks"`
 
 	Quizzes              []*pkgmodels.LMSQuiz             `json:"quizzes"`
 	CertificateTemplates []*pkgmodels.CertificateTemplate `json:"certificate_templates"`
@@ -177,6 +177,7 @@ func HandleInternalHydrateFunnel(c *gin.Context) {
 	}
 
 	if req.Funnel != nil {
+		prepareCompiledFunnel(req.Funnel)
 		entities := req.Funnel.ReadyMongoStore()
 		if err := insertEntities(entities); err != nil {
 			log.Printf("hydrate-funnel: error inserting funnel entities: %v", err)
@@ -205,6 +206,7 @@ func HandleInternalHydrateFunnel(c *gin.Context) {
 //  2. The same Badge referenced by multiple BadgeTransactions in one
 //     decomposed funnel/story tree only writes once (the chain emits the
 //     Badge struct per reference; mgo's UpsertId is idempotent).
+//
 // For entities lacking a usable _id, fall back to Insert.
 func insertEntities(entities []interface{}) error {
 	for _, entity := range entities {
@@ -247,6 +249,7 @@ func HandleInternalHydrateGraph(c *gin.Context) {
 		if f == nil {
 			continue
 		}
+		prepareCompiledFunnel(f)
 		entities := f.ReadyMongoStore()
 		if err := insertEntities(entities); err != nil {
 			log.Printf("hydrate-graph: funnel insert failed: %v", err)

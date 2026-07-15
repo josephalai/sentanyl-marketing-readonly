@@ -167,6 +167,8 @@
       };
       if (funnelId) body.data.funnel_public_id = funnelId;
       if (stageId) body.data.stage_public_id = stageId;
+      var blockId = video.getAttribute('data-block-id') || video.id || '';
+      if (blockId) body.data.block_id = blockId;
       // Wait for the config fetch so the signed player_token rides along;
       // use fetch with keepalive so unload events still fire.
       return configSettled.then(function () {

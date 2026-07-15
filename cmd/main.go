@@ -65,6 +65,7 @@ func main() {
 
 	// Ensure FUL-001/002 service-fulfillment invariants.
 	routes.EnsureServiceFulfillmentIndexes()
+	routes.EnsureFunnelPublicationState()
 
 	// Durable job kernel: indexes, handlers, and a background worker for
 	// outbound webhook delivery (WH-003) and future durable workloads.
@@ -86,6 +87,7 @@ func main() {
 	webhooks.RegisterHandlers()
 	handlers.RegisterCommerceWebhookJobs()
 	routes.RegisterStoryStartJob()
+	routes.RegisterFunnelDeliveryEventJob()
 	go jobs.RunWorker(context.Background(), jobs.WorkerConfig{Name: "marketing-" + auth.ServiceName("worker")})
 
 	// Ensure MongoDB indexes for frontend channels (coded websites, etc).

@@ -110,6 +110,7 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	}
 	res.ContactID = contact.Id.Hex()
 	res.ContactPublicID = contact.PublicId
+	bindVerifiedVideoViewer(form.TenantID, contact, sub.VideoSessionPublicId)
 	submission := recordSubmission(form, sub, contact)
 	// ANA-006: a form submit is an acquisition touch for revenue attribution.
 	analytics.RecordTouch(form.TenantID, contact.Id, "form", form.Id, form.Name)
@@ -148,6 +149,27 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	}
 
 	return runOnSubmitChain(form, sub, contact, res)
+}
+
+// bindVerifiedVideoViewer upgrades only the opaque viewer attached to a
+// tenant-scoped session after a trusted form submission resolved a contact.
+// Public player payloads can never assert this relationship themselves.
+func bindVerifiedVideoViewer(tenantID bson.ObjectId, contact *pkgmodels.User, sessionPublicID string) {
+	if contact == nil || sessionPublicID == "" {
+		return
+	}
+	var session pkgmodels.ViewingSession
+	if err := db.GetCollection(pkgmodels.ViewingSessionCollection).Find(bson.M{
+		"tenant_id": tenantID.Hex(), "public_id": sessionPublicID,
+	}).One(&session); err != nil || session.ViewerPublicId == "" {
+		return
+	}
+	_ = db.GetCollection(pkgmodels.ViewerIdentityCollection).Update(bson.M{
+		"tenant_id": tenantID.Hex(), "public_id": session.ViewerPublicId,
+	}, bson.M{"$set": bson.M{
+		"contact_id": contact.PublicId, "email": contact.Email,
+		"identification_source": "verified_form", "last_seen_at": time.Now().UTC(),
+	}})
 }
 
 // runOnSubmitChain executes only the configured downstream actions. Keeping

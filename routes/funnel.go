@@ -79,6 +79,13 @@ func RegisterStoryStartJob() {
 // idempotency key (StartStoryForUser also supersedes duplicate sessions).
 func EnqueueStoryStart(subscriberID, storyName, userPublicID string) error {
 	key := fmt.Sprintf("%s:%s:%s:%d", subscriberID, storyName, userPublicID, time.Now().Unix()/60)
+	return EnqueueStoryStartWithKey(subscriberID, storyName, userPublicID, key)
+}
+
+// EnqueueStoryStartWithKey lets an upstream canonical event supply the exact
+// command identity. It is used by delivery automation so replaying one media
+// event can never create a second Story session.
+func EnqueueStoryStartWithKey(subscriberID, storyName, userPublicID, key string) error {
 	env := jobs.Envelope{Actor: "funnel", Subject: "story:" + storyName, Version: 1}
 	if bson.IsObjectIdHex(subscriberID) {
 		env.TenantID = bson.ObjectIdHex(subscriberID)
@@ -102,6 +109,7 @@ func RegisterLegacyTenantFunnelRoutes(rg *gin.RouterGroup) {
 	rg.GET("/funnels/:funnelId", handleGetFunnel)
 	rg.POST("/funnels", handleCreateFunnel)
 	rg.PUT("/funnels/:funnelId", handleUpdateFunnel)
+	rg.POST("/funnels/:funnelId/publish", handlePublishFunnel)
 	rg.DELETE("/funnels/:funnelId", handleDeleteFunnel)
 }
 
@@ -243,6 +251,20 @@ func normalizeFunnelTree(funnel *pkgmodels.Funnel) {
 			stage.TenantID = funnel.TenantID
 			stage.SubscriberId = funnel.SubscriberId
 			stage.Order = si + 1
+			for _, page := range stage.Pages {
+				if page == nil {
+					continue
+				}
+				if page.Id == "" {
+					page.Id = bson.NewObjectId()
+				}
+				if page.PublicId == "" {
+					page.PublicId = utils.GeneratePublicId()
+				}
+				page.StageId = stage.Id
+				page.TenantID = funnel.TenantID
+				page.SubscriberId = funnel.SubscriberId
+			}
 		}
 	}
 }
@@ -256,6 +278,11 @@ func handleCreateFunnel(c *gin.Context) {
 	now := time.Now()
 	funnel.Id = bson.NewObjectId()
 	funnel.PublicId = utils.GeneratePublicId()
+	funnel.Status = "draft"
+	funnel.DraftVersion = 1
+	funnel.PublishedVersion = 0
+	funnel.PublishedRoutes = nil
+	funnel.PublishedAt = nil
 	// Ownership always comes from the JWT, never the request body.
 	funnel.TenantID = pkgauth.GetTenantObjectID(c)
 	funnel.SubscriberId = pkgauth.GetTenantID(c)
@@ -280,6 +307,7 @@ func handleCreateFunnel(c *gin.Context) {
 func handleUpdateFunnel(c *gin.Context) {
 	var req struct {
 		Name   string                   `json:"name"`
+		Domain *string                  `json:"domain"`
 		Routes []*pkgmodels.FunnelRoute `json:"routes"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -305,12 +333,21 @@ func handleUpdateFunnel(c *gin.Context) {
 	if req.Name != "" {
 		set["name"] = req.Name
 	}
+	if req.Domain != nil {
+		set["domain"] = *req.Domain
+	}
 	if req.Routes != nil {
 		tree := funnel
 		tree.Routes = req.Routes
 		normalizeFunnelTree(&tree)
 		set["routes"] = tree.Routes
 	}
+	status := funnel.Status
+	if status != "published" {
+		status = "draft"
+	}
+	set["status"] = status
+	set["draft_version"] = funnel.DraftVersion + 1
 	if err := db.GetCollection(pkgmodels.FunnelCollection).UpdateId(funnel.Id, bson.M{"$set": set}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update funnel"})
 		return
@@ -320,6 +357,46 @@ func handleUpdateFunnel(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func handlePublishFunnel(c *gin.Context) {
+	scope := bson.M{"public_id": c.Param("funnelId"), "timestamps.deleted_at": nil, "$or": jwtTenantOr(c)}
+	if scope["$or"] == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	var funnel pkgmodels.Funnel
+	if err := db.GetCollection(pkgmodels.FunnelCollection).Find(scope).One(&funnel); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "funnel not found"})
+		return
+	}
+	if len(funnel.Routes) == 0 {
+		hydrateFunnelDraft(&funnel)
+	}
+	if len(funnel.Routes) == 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "funnel must contain at least one route before publishing"})
+		return
+	}
+	for _, route := range funnel.Routes {
+		if route == nil || len(route.Stages) == 0 {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "every published route must contain at least one stage"})
+			return
+		}
+	}
+	routes := snapshotFunnelRoutes(funnel.Routes)
+	now := time.Now().UTC()
+	version := funnel.DraftVersion
+	if version < 1 {
+		version = 1
+	}
+	if err := db.GetCollection(pkgmodels.FunnelCollection).UpdateId(funnel.Id, bson.M{"$set": bson.M{
+		"status": "published", "published_version": version, "published_name": funnel.Name,
+		"published_domain": funnel.Domain, "published_routes": routes, "published_at": now,
+	}}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to publish funnel"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "published", "published_version": version, "published_at": now})
 }
 
 func handleDeleteFunnel(c *gin.Context) {
@@ -348,7 +425,8 @@ func handleGetPageByDomainPath(c *gin.Context) {
 
 	var funnel pkgmodels.Funnel
 	err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
-		"domain":                domain,
+		"status":                "published",
+		"published_domain":      domain,
 		"timestamps.deleted_at": nil,
 	}).One(&funnel)
 	if err != nil {
@@ -356,7 +434,7 @@ func handleGetPageByDomainPath(c *gin.Context) {
 		return
 	}
 
-	for _, route := range funnel.Routes {
+	for _, route := range funnel.PublishedRoutes {
 		for _, stage := range route.Stages {
 			if stage.Path == path {
 				if len(stage.Pages) > 0 {
@@ -387,8 +465,8 @@ func handleGetPageByDomainPath(c *gin.Context) {
 							"triggers":  triggerInfos,
 						},
 						"funnel": gin.H{
-							"name":      funnel.Name,
-							"domain":    funnel.Domain,
+							"name":      funnel.PublishedName,
+							"domain":    funnel.PublishedDomain,
 							"public_id": funnel.PublicId,
 						},
 					})
@@ -430,6 +508,7 @@ func handleFunnelEvent(c *gin.Context) {
 	var funnel pkgmodels.Funnel
 	if err := db.GetCollection(pkgmodels.FunnelCollection).Find(bson.M{
 		"public_id":             req.FunnelId,
+		"status":                "published",
 		"timestamps.deleted_at": nil,
 	}).One(&funnel); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "funnel not found"})
@@ -440,9 +519,9 @@ func handleFunnelEvent(c *gin.Context) {
 		tenantHex = funnel.TenantID.Hex()
 	}
 	var stage *pkgmodels.FunnelStage
-	for ri := range funnel.Routes {
-		for si := range funnel.Routes[ri].Stages {
-			s := funnel.Routes[ri].Stages[si]
+	for ri := range funnel.PublishedRoutes {
+		for si := range funnel.PublishedRoutes[ri].Stages {
+			s := funnel.PublishedRoutes[ri].Stages[si]
 			if s != nil && (req.StageId == "" || s.PublicId == req.StageId || s.Path == req.StageId) {
 				stage = s
 				break
@@ -525,6 +604,10 @@ func handleFunnelEvent(c *gin.Context) {
 }
 
 func executeFunnelAction(tenantHex string, action *pkgmodels.Action, userId string, funnelId string) []gin.H {
+	return executeFunnelActionWithKey(tenantHex, action, userId, funnelId, "")
+}
+
+func executeFunnelActionWithKey(tenantHex string, action *pkgmodels.Action, userId string, funnelId string, commandKey string) []gin.H {
 	var commands []gin.H
 	if action == nil || tenantHex == "" {
 		return commands
@@ -622,7 +705,13 @@ func executeFunnelAction(tenantHex string, action *pkgmodels.Action, userId stri
 			// ACQ-003: persist a durable story-start command (retried,
 			// dead-lettered) instead of an untracked goroutine.
 			if val != "" && userId != "" {
-				if err := EnqueueStoryStart(tenantHex, val, userId); err != nil {
+				var err error
+				if commandKey != "" {
+					err = EnqueueStoryStartWithKey(tenantHex, val, userId, commandKey+":"+val)
+				} else {
+					err = EnqueueStoryStart(tenantHex, val, userId)
+				}
+				if err != nil {
 					log.Printf("executeFunnelAction: enqueue story start failed: %v", err)
 				}
 			}
