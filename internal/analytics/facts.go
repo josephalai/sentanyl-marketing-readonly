@@ -72,9 +72,7 @@ func RecordTouch(tenantID, contactID bson.ObjectId, kind string, sourceID bson.O
 	}
 	touch := models.LastTouch{Kind: kind, SourceID: sourceID, SourceName: sourceName, TouchedAt: time.Now()}
 	if err := db.GetCollection(models.UserCollection).Update(
-		bson.M{"_id": contactID, "$or": []bson.M{
-			{"tenant_id": tenantID}, {"subscriber_id": tenantID.Hex()},
-		}},
+		bson.M{"_id": contactID, "tenant_id": tenantID},
 		bson.M{"$set": bson.M{"last_touch": touch}},
 	); err != nil && err != mgo.ErrNotFound {
 		log.Printf("analytics: record touch: %v", err)

@@ -193,11 +193,10 @@ func upsertQuizContact(tenantID bson.ObjectId, email, name string) *pkgmodels.Us
 	}
 	now := time.Now()
 	contact := pkgmodels.User{
-		Id:           bson.NewObjectId(),
-		PublicId:     utils.GeneratePublicId(),
-		TenantID:     tenantID,
-		SubscriberId: tenantID.Hex(),
-		Email:        pkgmodels.EmailAddress(email),
+		Id:       bson.NewObjectId(),
+		PublicId: utils.GeneratePublicId(),
+		TenantID: tenantID,
+		Email:    pkgmodels.EmailAddress(email),
 	}
 	if parts := strings.Fields(name); len(parts) > 0 {
 		contact.Name.First = parts[0]

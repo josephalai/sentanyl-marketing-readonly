@@ -461,10 +461,7 @@ func handleFunnelEvent(c *gin.Context) {
 	if req.UserId != "" {
 		n, _ := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
 			"public_id": req.UserId,
-			"$or": []bson.M{
-				{"subscriber_id": tenantHex},
-				{"tenant_id": bson.ObjectIdHex(tenantHex)},
-			},
+			"tenant_id": bson.ObjectIdHex(tenantHex),
 		}).Count()
 		if n == 0 {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
@@ -493,10 +490,7 @@ func handleFunnelEvent(c *gin.Context) {
 		var actor pkgmodels.User
 		if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
 			"public_id": req.UserId,
-			"$or": []bson.M{
-				{"subscriber_id": tenantHex},
-				{"tenant_id": bson.ObjectIdHex(tenantHex)},
-			},
+			"tenant_id": bson.ObjectIdHex(tenantHex),
 		}).One(&actor); err == nil {
 			analytics.RecordTouch(bson.ObjectIdHex(tenantHex), actor.Id, "funnel", funnel.Id, funnel.Name)
 		}

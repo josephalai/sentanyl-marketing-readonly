@@ -258,18 +258,6 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission, pending *pendingOpt
 		"tenant_id": form.TenantID,
 	}).One(&existing)
 	if err == nil {
-		// Backfill SubscriberId on legacy rows (the modern stack stopped
-		// writing it; the story engine still requires it). One-shot
-		// $set, no-op when already set, so this is safe to run on every
-		// match.
-		if existing.SubscriberId == "" {
-			tenantHex := form.TenantID.Hex()
-			_ = col.Update(
-				bson.M{"_id": existing.Id},
-				bson.M{"$set": bson.M{"subscriber_id": tenantHex}},
-			)
-			existing.SubscriberId = tenantHex
-		}
 		return &existing, false, nil
 	}
 	if err != mgo.ErrNotFound {
@@ -281,13 +269,7 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission, pending *pendingOpt
 		Id:       bson.NewObjectId(),
 		PublicId: utils.GeneratePublicId(),
 		TenantID: form.TenantID,
-		// SubscriberId is the legacy tenant-scope key the story engine
-		// (core-service/routes/story_engine.go StartStoryForUser) and
-		// triggerStoryStart still read. Without this set, storyline
-		// dispatch silently no-ops because TriggerStoryStart can't
-		// resolve a non-empty subscriber_id from the new contact.
-		SubscriberId: form.TenantID.Hex(),
-		Email:        pkgmodels.EmailAddress(email),
+		Email:    pkgmodels.EmailAddress(email),
 	}
 	contact.Subscribed = pending == nil
 	// ACQ-007: capture consent provenance. A plain form grants consent now; a
@@ -624,7 +606,7 @@ func grantProductAccess(tenantID bson.ObjectId, contact *pkgmodels.User, product
 		Id:                   bson.NewObjectId(),
 		PublicId:             utils.GeneratePublicId(),
 		TenantID:             tenantID,
-		SubscriberId:         contact.SubscriberId,
+		SubscriberId:         tenantID.Hex(),
 		UserId:               contact.Id,
 		ProductId:            product.Id,
 		Status:               "granted_via_form",

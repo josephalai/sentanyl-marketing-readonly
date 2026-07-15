@@ -773,7 +773,7 @@ func (r *run) importContacts() {
 		}
 		var existing models.User
 		err := db.GetCollection(models.UserCollection).Find(bson.M{
-			"subscriber_id": r.p.TenantID.Hex(), "email": sc.Email, "timestamps.deleted_at": nil,
+			"tenant_id": r.p.TenantID, "email": sc.Email, "timestamps.deleted_at": nil,
 		}).One(&existing)
 		localExists := err == nil
 
@@ -805,7 +805,6 @@ func (r *run) importContacts() {
 		u := models.NewUser()
 		u.PublicId = utils.GeneratePublicId()
 		u.TenantID = r.p.TenantID
-		u.SubscriberId = r.p.TenantID.Hex()
 		u.Email = models.EmailAddress(sc.Email)
 		u.Name.First = sc.FirstName
 		u.Name.Last = sc.LastName
@@ -1076,7 +1075,7 @@ func (r *run) importGrants() {
 func (r *run) findLocalContact(email string) (bson.ObjectId, bool) {
 	var u models.User
 	err := db.GetCollection(models.UserCollection).Find(bson.M{
-		"subscriber_id": r.p.TenantID.Hex(), "email": email, "timestamps.deleted_at": nil,
+		"tenant_id": r.p.TenantID, "email": email, "timestamps.deleted_at": nil,
 	}).One(&u)
 	if err != nil {
 		return "", false

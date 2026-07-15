@@ -61,7 +61,7 @@ func handleMigrationSubscriptionList(c *gin.Context) {
 		var u pkgmodels.User
 		if s.ContactID != "" {
 			if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
-				"_id": s.ContactID, "subscriber_id": p.TenantID.Hex(),
+				"_id": s.ContactID, "tenant_id": p.TenantID,
 			}).One(&u); err == nil {
 				row.ContactEmail = string(u.Email)
 				row.PaymentMethodAvailable = u.StripeCustomerID != ""
@@ -148,7 +148,7 @@ func handleMigrationSubscriptionActivate(c *gin.Context) {
 	var contact pkgmodels.User
 	email := ""
 	if err := db.GetCollection(pkgmodels.UserCollection).Find(bson.M{
-		"_id": sub.ContactID, "subscriber_id": tenantID.Hex(),
+		"_id": sub.ContactID, "tenant_id": tenantID,
 	}).One(&contact); err == nil {
 		email = string(contact.Email)
 	}
