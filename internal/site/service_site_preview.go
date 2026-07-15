@@ -381,7 +381,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 		if subtitle != "" {
 			sb.WriteString(fmt.Sprintf("<p class=\"lead\">%s</p>\n", esc(subtitle)))
 		}
-		sb.WriteString("<form class=\"lead-form-block__form\" method=\"POST\" action=\"/api/marketing/site/form/submit\">\n")
+		sb.WriteString("<form class=\"lead-form-block__form\" method=\"POST\" action=\"/api/marketing/site/form/submit\" onsubmit=\"return submitSentanylForm(event,this)\">\n")
 		// If a real PageForm was selected, emit form_id + one input per
 		// FormField so the public submit handler resolves the form and runs
 		// the OnSubmit action chain (Phase 2). Falls back to the legacy
@@ -463,7 +463,25 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 			sb.WriteString(fmt.Sprintf("<input type=\"hidden\" name=\"next_url\" value=\"%s\">\n", esc(nextURL)))
 		}
 		sb.WriteString(fmt.Sprintf("<button type=\"submit\" class=\"btn btn--accent btn--lg\">%s</button>\n", esc(buttonText)))
+		sb.WriteString("<div data-role=\"form-message\" style=\"margin-top:10px\"></div>\n")
 		sb.WriteString("</form>\n</div>\n</div>\n</section>\n")
+		sb.WriteString(`<script>
+function submitSentanylForm(ev,f){
+  ev.preventDefault();
+  var p={domain:location.host,fields:{}}, fd=new FormData(f), direct={form_id:1,next_url:1,email:1,name:1,phone:1,message:1};
+  fd.forEach(function(v,k){if(direct[k]){p[k]=v}else{p.fields[k]=p.fields[k]?p.fields[k]+','+v:v}});
+  var msg=f.querySelector('[data-role=form-message]'), btn=f.querySelector('button[type=submit]');
+  if(btn){btn.disabled=true} if(msg){msg.textContent='Submitting…'}
+  fetch(f.action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)})
+    .then(function(r){return r.json()}).then(function(d){
+      if(btn){btn.disabled=false}
+      if(d.status==='pending_confirmation'||d.pending_confirmation){if(msg){msg.textContent='Almost done — check your email to confirm.'};return}
+      if(d.redirect_url){location.href=d.redirect_url;return}
+      if(msg){msg.textContent=d.error||'Thanks — you’re in!'}
+    }).catch(function(){if(btn){btn.disabled=false};if(msg){msg.textContent='Something went wrong. Please try again.'}});
+  return false;
+}
+</script>` + "\n")
 
 	case "SentanylCheckoutForm":
 		heading, _ := props["heading"].(string)
@@ -537,7 +555,7 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 			"var email=this.querySelector('input[name=email]').value;" +
 			"fetch('/api/marketing/site/form/submit',{method:'POST',headers:{'Content-Type':'application/json'}," +
 			"body:JSON.stringify({form_id:'" + esc(formID) + "',email:email,domain:location.host})})" +
-			".then(function(r){return r.json()}).then(function(d){b.textContent=d.error?(d.error):'Thanks!';" +
+			".then(function(r){return r.json()}).then(function(d){b.textContent=(d.status==='pending_confirmation'||d.pending_confirmation)?'Check your email to confirm.':(d.error?d.error:'Thanks!');" +
 			"if(d.redirect_url){window.location.href=d.redirect_url}}).catch(function(){b.textContent='Error';b.disabled=false});return false\">\n")
 		sb.WriteString("<input type=\"email\" name=\"email\" placeholder=\"you@example.com\" required " +
 			"style=\"padding:12px 16px;border-radius:6px;border:1px solid #ccc;font-size:15px;min-width:240px\">\n")

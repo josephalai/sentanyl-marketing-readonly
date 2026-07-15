@@ -298,7 +298,9 @@
         api.forms.submit(form.getAttribute('data-sentanyl-form'), payload)
           .then(function (resp) {
             emit(form, 'sentanyl:form:success', resp);
-            if (resp.redirect_url) location.href = resp.redirect_url;
+            if (resp.status === 'pending_confirmation' || resp.pending_confirmation) {
+              showInlineNote(form, 'Almost done — check your email to confirm.');
+            } else if (resp.redirect_url) location.href = resp.redirect_url;
             else showInlineNote(form, form.getAttribute('data-sentanyl-success') || 'Thanks — you’re in!');
           })
           .catch(function (err) {
