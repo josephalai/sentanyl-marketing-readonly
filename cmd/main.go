@@ -76,6 +76,8 @@ func main() {
 	// + the durable execute job.
 	migration.EnsureIndexes()
 	scan.EnsureIndexes()
+	// ANA-011: env-configurable event-store retention (financial records exempt).
+	analytics.StartRetentionSweep()
 	routes.RegisterMigrationJobs()
 	// Revenue facts projection (ANA-005): unique (tenant, log, kind).
 	analytics.EnsureIndexes()

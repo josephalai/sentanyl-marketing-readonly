@@ -186,6 +186,8 @@ func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID stri
 	result := forms.Execute(&form, forms.Submission{
 		FieldValues:          values,
 		Source:               source,
+		UserAgent:            c.Request.UserAgent(),
+		Via:                  c.GetHeader("Via"),
 		VideoSessionPublicId: req.VideoSessionID,
 	})
 

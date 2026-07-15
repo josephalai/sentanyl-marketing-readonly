@@ -10,6 +10,7 @@ import (
 	htmlpkg "html"
 	"log"
 	"net/smtp"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ type Submission struct {
 	// "builder_page" (published funnel/site pages) or "coded_embed"
 	// (BYO-website channel embeds). Stored on the FormSubmission row.
 	Source string
+	// UserAgent/Via feed the ANA-007 bot/relay classification stamped on
+	// the FormSubmission row. Populated by the public form-submit handler.
+	UserAgent string
+	Via       string
 	// VideoSessionPublicId, when set, stamps any PurchaseLog rows the
 	// executor creates (e.g. granted_via_form rows) so a video-driven
 	// landing page's bottom-of-page conversion is attributable to the
@@ -52,18 +57,18 @@ type Submission struct {
 // Warnings collect non-fatal step failures so the caller can log without
 // aborting the chain.
 type Result struct {
-	ContactID        string                  `json:"contact_id,omitempty"`
-	ContactPublicID  string                  `json:"contact_public_id,omitempty"`
-	BadgesAssigned   []string                `json:"badges_assigned,omitempty"`
-	BadgesRemoved    []string                `json:"badges_removed,omitempty"`
-	ListsAdded       []string                `json:"lists_added,omitempty"`
-	ListsRemoved     []string                `json:"lists_removed,omitempty"`
-	StoriesStarted   []string                `json:"stories_started,omitempty"`
-	Downloads        []routes.SignedDownload `json:"downloads,omitempty"`
-	ProductsGranted  []string                `json:"products_granted,omitempty"`
-	OfferAttached    string                  `json:"offer_attached,omitempty"`
-	RedirectURL      string                  `json:"redirect_url,omitempty"`
-	Warnings         []string                `json:"warnings,omitempty"`
+	ContactID       string                  `json:"contact_id,omitempty"`
+	ContactPublicID string                  `json:"contact_public_id,omitempty"`
+	BadgesAssigned  []string                `json:"badges_assigned,omitempty"`
+	BadgesRemoved   []string                `json:"badges_removed,omitempty"`
+	ListsAdded      []string                `json:"lists_added,omitempty"`
+	ListsRemoved    []string                `json:"lists_removed,omitempty"`
+	StoriesStarted  []string                `json:"stories_started,omitempty"`
+	Downloads       []routes.SignedDownload `json:"downloads,omitempty"`
+	ProductsGranted []string                `json:"products_granted,omitempty"`
+	OfferAttached   string                  `json:"offer_attached,omitempty"`
+	RedirectURL     string                  `json:"redirect_url,omitempty"`
+	Warnings        []string                `json:"warnings,omitempty"`
 }
 
 // Execute runs the full action chain for the given form + submission.
@@ -432,6 +437,11 @@ func recordSubmission(form *pkgmodels.PageForm, sub Submission, contact *pkgmode
 		row.ContactID = contact.PublicId
 		row.ContactEmail = string(contact.Email)
 	}
+	// ANA-007: stamp traffic-hygiene flags at write so analytics can filter
+	// without re-deriving from lost request context.
+	row.Synthetic = os.Getenv("SENTANYL_E2E_MODE") == "1"
+	row.Bot = analytics.LooksLikeBot(sub.UserAgent)
+	row.Relay = analytics.LooksLikeRelay(sub.UserAgent, sub.Via)
 	if err := db.GetCollection(pkgmodels.FormSubmissionCollection).Insert(row); err != nil {
 		log.Printf("forms: failed to record submission for form %s: %v", form.PublicId, err)
 	}

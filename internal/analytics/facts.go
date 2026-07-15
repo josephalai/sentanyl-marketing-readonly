@@ -147,6 +147,19 @@ func writeFact(pl *models.PurchaseLog, kind string, attribute bool) {
 	}
 }
 
+// LooksLikeRelay classifies proxy/privacy-relay traffic (ANA-007): not a
+// bot, but attribution-grade signals (IP geo, UA fingerprints) are
+// unreliable. Callers tag rather than drop.
+func LooksLikeRelay(userAgent, via string) bool {
+	ua := strings.ToLower(userAgent)
+	for _, t := range []string{"icloud private relay", "privaterelay", "cloudflare-warp", "google-proxy", "amazon silk", "opera mini"} {
+		if strings.Contains(ua, t) {
+			return true
+		}
+	}
+	return strings.TrimSpace(via) != ""
+}
+
 // RebuildFacts reprojects a tenant's facts from the purchase_logs source of
 // truth. Idempotent (unique key) and order-independent: late-arriving or
 // corrected logs simply gain their missing facts on the next rebuild;
@@ -270,9 +283,69 @@ func totalsEqual(a, b map[string]bson.M) bool {
 	return true
 }
 
+// FactWindow is an optional [From, To) occurred_at filter.
+type FactWindow struct {
+	From time.Time
+	To   time.Time
+}
+
+func (w FactWindow) match(base bson.M) bson.M {
+	rng := bson.M{}
+	if !w.From.IsZero() {
+		rng["$gte"] = w.From
+	}
+	if !w.To.IsZero() {
+		rng["$lt"] = w.To
+	}
+	if len(rng) > 0 {
+		base["occurred_at"] = rng
+	}
+	return base
+}
+
+// FactsQuery is the ANA-009 drill-through: the raw fact rows behind any
+// summary number, paged, with completeness metadata alongside.
+type FactsQuery struct {
+	TenantID bson.ObjectId
+	Kind     string // sale | refund
+	Source   string // "" any | "native" | "migration"
+	Window   FactWindow
+	Limit    int
+	Skip     int
+}
+
+// Facts returns matching fact rows (newest first) + the total match count so
+// the caller can verify the page against the aggregate it drilled from.
+func Facts(q FactsQuery) ([]models.RevenueFact, int, error) {
+	match := bson.M{"tenant_id": q.TenantID, "synthetic": bson.M{"$ne": true}}
+	if q.Kind != "" {
+		match["kind"] = q.Kind
+	}
+	switch q.Source {
+	case "native":
+		match["source"] = bson.M{"$in": []interface{}{nil, ""}}
+	case "":
+	default:
+		match["source"] = q.Source
+	}
+	q.Window.match(match)
+	limit := q.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	total, err := db.GetCollection(models.RevenueFactCollection).Find(match).Count()
+	if err != nil {
+		return nil, 0, err
+	}
+	rows := []models.RevenueFact{}
+	err = db.GetCollection(models.RevenueFactCollection).Find(match).
+		Sort("-occurred_at").Skip(q.Skip).Limit(limit).All(&rows)
+	return rows, total, err
+}
+
 // RevenueBySource groups net revenue by attribution source (ANA-006),
-// excluding synthetic traffic.
-func RevenueBySource(tenantID bson.ObjectId) []bson.M {
+// excluding synthetic traffic. The window narrows to occurred_at when set.
+func RevenueBySource(tenantID bson.ObjectId, window ...FactWindow) []bson.M {
 	var rows []struct {
 		ID struct {
 			Kind     string `bson:"kind"`
@@ -283,8 +356,12 @@ func RevenueBySource(tenantID bson.ObjectId) []bson.M {
 		Total int64 `bson:"total"`
 		Count int   `bson:"count"`
 	}
+	match := bson.M{"tenant_id": tenantID, "synthetic": bson.M{"$ne": true}}
+	if len(window) > 0 {
+		window[0].match(match)
+	}
 	_ = db.GetCollection(models.RevenueFactCollection).Pipe([]bson.M{
-		{"$match": bson.M{"tenant_id": tenantID, "synthetic": bson.M{"$ne": true}}},
+		{"$match": match},
 		{"$group": bson.M{
 			"_id": bson.M{
 				"kind":      bson.M{"$ifNull": []interface{}{"$attribution.kind", "direct"}},

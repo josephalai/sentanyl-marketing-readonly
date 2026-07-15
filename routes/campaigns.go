@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/audit"
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -232,6 +233,10 @@ func sendCampaign(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	ae := audit.FromContext(c)
+	ae.Action, ae.Outcome = "campaign.send", "success"
+	ae.TargetType, ae.TargetID = "campaign", camp.PublicId
+	audit.Record(ae)
 	c.JSON(http.StatusAccepted, gin.H{"status": "dispatching"})
 }
 
