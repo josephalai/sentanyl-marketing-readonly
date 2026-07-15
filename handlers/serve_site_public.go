@@ -16,6 +16,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/forms"
 	"github.com/josephalai/sentanyl/marketing-service/internal/site"
 	"github.com/josephalai/sentanyl/pkg/db"
+	httputil "github.com/josephalai/sentanyl/pkg/http"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/publicchannel"
 	"github.com/josephalai/sentanyl/pkg/utils"
@@ -27,6 +28,13 @@ import (
 func RegisterPublicFormRoutes(publicAPI *gin.RouterGroup) {
 	publicAPI.POST("/site/form/submit", handlePublicFormSubmit)
 	publicAPI.POST("/site/checkout/start", handlePublicCheckoutStart)
+	publicAPI.GET("/forms/confirm", handleFormOptInConfirm)
+	publicAPI.POST("/forms/resend-confirmation",
+		httputil.RateLimitByKey(func(c *gin.Context) string {
+			return c.ClientIP() + ":" + c.GetHeader("X-Forwarded-Host")
+		}, 5.0/60.0, 5),
+		handleFormOptInResend,
+	)
 }
 
 // ---------- Public Form Submission ----------
@@ -38,16 +46,16 @@ func RegisterPublicFormRoutes(publicAPI *gin.RouterGroup) {
 // phone keys remain for backwards compatibility with browser-form posts that
 // don't know about Fields.
 type publicFormRequest struct {
-	Domain  string            `json:"domain" form:"domain"`
-	Name    string            `json:"name" form:"name"`
-	Email   string            `json:"email" form:"email"`
-	Phone   string            `json:"phone" form:"phone"`
-	Message string            `json:"message" form:"message"`
-	FormID  string            `json:"form_id" form:"form_id"`
-	NextURL string            `json:"next_url" form:"next_url"`
+	Domain  string `json:"domain" form:"domain"`
+	Name    string `json:"name" form:"name"`
+	Email   string `json:"email" form:"email"`
+	Phone   string `json:"phone" form:"phone"`
+	Message string `json:"message" form:"message"`
+	FormID  string `json:"form_id" form:"form_id"`
+	NextURL string `json:"next_url" form:"next_url"`
 	// HoneypotField ("website") must stay empty — a real user never sees or
 	// fills it; a bot that auto-fills every field trips it (ACQ-009).
-	HoneypotField string           `json:"website" form:"website"`
+	HoneypotField string            `json:"website" form:"website"`
 	Fields        map[string]string `json:"fields" form:"-"`
 	// VideoSessionID is set by the sentanyl-video.js fetch shim when the
 	// form lives on a page with an active video session. It propagates
@@ -114,6 +122,7 @@ func handlePublicFormSubmit(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 			return
 		}
+		req.Domain = domain
 		runFormSubmission(c, tenantID, req.FormID, &req, strings.Contains(contentType, "application/json"), "builder_page")
 		return
 	}
@@ -185,11 +194,22 @@ func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID stri
 
 	result := forms.Execute(&form, forms.Submission{
 		FieldValues:          values,
+		Domain:               requestDomain(c, req.Domain),
 		Source:               source,
 		UserAgent:            c.Request.UserAgent(),
 		Via:                  c.GetHeader("Via"),
 		VideoSessionPublicId: req.VideoSessionID,
 	})
+	if result.PendingConfirmation {
+		c.JSON(http.StatusAccepted, gin.H{
+			"status":               "pending_confirmation",
+			"pending_confirmation": true,
+			"contact_id":           result.ContactID,
+			"contact_public_id":    result.ContactPublicID,
+			"warnings":             result.Warnings,
+		})
+		return
+	}
 
 	// Browser form posts that include a redirect get a 303 to the
 	// configured URL; the next_url body field still wins over the
@@ -218,6 +238,53 @@ func runFormSubmission(c *gin.Context, tenantID bson.ObjectId, formPublicID stri
 		"offer_attached":    result.OfferAttached,
 		"warnings":          result.Warnings,
 	})
+}
+
+func requestDomain(c *gin.Context, explicit string) string {
+	domain := strings.TrimSpace(explicit)
+	if domain == "" {
+		domain = c.GetHeader("X-Forwarded-Host")
+	}
+	if domain == "" {
+		domain = c.Request.Host
+	}
+	return domain
+}
+
+func handleFormOptInConfirm(c *gin.Context) {
+	tenantID, err := site.ResolveTenantFromDomain(requestDomain(c, ""))
+	if err != nil {
+		writeInvalidFormOptIn(c)
+		return
+	}
+	if _, err := forms.ConfirmOptIn(tenantID, c.Query("token")); err != nil {
+		writeInvalidFormOptIn(c)
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, `<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding:40px"><h1 data-testid="form-optin-confirmed">Email confirmed.</h1><p>Thanks — your submission is complete.</p></body></html>`)
+}
+
+func writeInvalidFormOptIn(c *gin.Context) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusGone, `<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding:40px"><h1>Confirmation unavailable.</h1><p>This link is invalid or has expired.</p></body></html>`)
+}
+
+func handleFormOptInResend(c *gin.Context) {
+	var req struct {
+		Email  string `json:"email" form:"email"`
+		Domain string `json:"domain" form:"domain"`
+	}
+	_ = c.ShouldBind(&req)
+	domain := requestDomain(c, req.Domain)
+	if tenantID, err := site.ResolveTenantFromDomain(domain); err == nil {
+		if err := forms.ResendOptIn(tenantID, req.Email, domain); err != nil {
+			log.Printf("form opt-in resend: %v", err)
+		}
+	}
+	// Enumeration-safe: unknown tenants, emails, and non-pending contacts all
+	// receive the same response.
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // looksLikeEmail is a cheap RFC-shaped sanity check (not full RFC 5322):

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	mgo "gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/email"
@@ -37,6 +38,9 @@ const downloadEmailTTL = 24 * time.Hour
 // FieldValues is keyed by FormField.FieldName as configured on the form.
 type Submission struct {
 	FieldValues map[string]string
+	// Domain is the tenant domain used to build a confirmation URL for a
+	// double-opt-in submission.
+	Domain string
 	// Source records which public surface the submission came from:
 	// "builder_page" (published funnel/site pages) or "coded_embed"
 	// (BYO-website channel embeds). Stored on the FormSubmission row.
@@ -57,18 +61,19 @@ type Submission struct {
 // Warnings collect non-fatal step failures so the caller can log without
 // aborting the chain.
 type Result struct {
-	ContactID       string                  `json:"contact_id,omitempty"`
-	ContactPublicID string                  `json:"contact_public_id,omitempty"`
-	BadgesAssigned  []string                `json:"badges_assigned,omitempty"`
-	BadgesRemoved   []string                `json:"badges_removed,omitempty"`
-	ListsAdded      []string                `json:"lists_added,omitempty"`
-	ListsRemoved    []string                `json:"lists_removed,omitempty"`
-	StoriesStarted  []string                `json:"stories_started,omitempty"`
-	Downloads       []routes.SignedDownload `json:"downloads,omitempty"`
-	ProductsGranted []string                `json:"products_granted,omitempty"`
-	OfferAttached   string                  `json:"offer_attached,omitempty"`
-	RedirectURL     string                  `json:"redirect_url,omitempty"`
-	Warnings        []string                `json:"warnings,omitempty"`
+	ContactID           string                  `json:"contact_id,omitempty"`
+	ContactPublicID     string                  `json:"contact_public_id,omitempty"`
+	PendingConfirmation bool                    `json:"pending_confirmation,omitempty"`
+	BadgesAssigned      []string                `json:"badges_assigned,omitempty"`
+	BadgesRemoved       []string                `json:"badges_removed,omitempty"`
+	ListsAdded          []string                `json:"lists_added,omitempty"`
+	ListsRemoved        []string                `json:"lists_removed,omitempty"`
+	StoriesStarted      []string                `json:"stories_started,omitempty"`
+	Downloads           []routes.SignedDownload `json:"downloads,omitempty"`
+	ProductsGranted     []string                `json:"products_granted,omitempty"`
+	OfferAttached       string                  `json:"offer_attached,omitempty"`
+	RedirectURL         string                  `json:"redirect_url,omitempty"`
+	Warnings            []string                `json:"warnings,omitempty"`
 }
 
 // Execute runs the full action chain for the given form + submission.
@@ -85,7 +90,14 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 
 	res.Warnings = append(res.Warnings, validateOptions(form, sub.FieldValues)...)
 
-	contact, err := upsertContact(form, sub)
+	on := form.OnSubmit
+	requireOptIn := on != nil && on.DoubleOptIn
+	var pending *pendingOptIn
+	if requireOptIn {
+		p := newPendingOptIn()
+		pending = &p
+	}
+	contact, created, err := upsertContact(form, sub, pending)
 	if err != nil || contact == nil {
 		if err != nil {
 			res.Warnings = append(res.Warnings, "upsert_contact: "+err.Error())
@@ -98,11 +110,36 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 	}
 	res.ContactID = contact.Id.Hex()
 	res.ContactPublicID = contact.PublicId
-	recordSubmission(form, sub, contact)
+	submission := recordSubmission(form, sub, contact)
 	// ANA-006: a form submit is an acquisition touch for revenue attribution.
 	analytics.RecordTouch(form.TenantID, contact.Id, "form", form.Id, form.Name)
 
-	on := form.OnSubmit
+	// ACQ-007: a new contact from a double-opt-in form, or an existing contact
+	// already awaiting confirmation, gets a fresh token. The raw token is sent
+	// once; only its digest is stored. The action chain stays deferred until
+	// confirmation atomically consumes that digest.
+	if requireOptIn && (created || isPendingOptIn(contact)) {
+		res.PendingConfirmation = true
+		if submission == nil {
+			res.Warnings = append(res.Warnings, "double_opt_in: submission was not recorded")
+			return res
+		}
+		if !created {
+			p := newPendingOptIn()
+			pending = &p
+		}
+		if err := setPendingOptIn(contact, submission.Id, *pending); err != nil {
+			res.Warnings = append(res.Warnings, "double_opt_in: "+err.Error())
+			return res
+		}
+		if contact.UnsubscribedAt == nil {
+			if err := sendOptInConfirmation(form.TenantID, contact, sub.Domain, pending.Raw); err != nil {
+				res.Warnings = append(res.Warnings, "double_opt_in_email: "+err.Error())
+			}
+		}
+		return res
+	}
+
 	if on == nil {
 		// No declared chain — but we still upserted, which is the implicit
 		// "lead capture only" behavior the original public submit endpoint
@@ -110,6 +147,18 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 		return res
 	}
 
+	return runOnSubmitChain(form, sub, contact, res)
+}
+
+// runOnSubmitChain executes only the configured downstream actions. Keeping
+// this separate from contact/submission creation lets an ACQ-007 confirmation
+// replay the exact stored submission without creating another contact or raw
+// FormSubmission row.
+func runOnSubmitChain(form *pkgmodels.PageForm, sub Submission, contact *pkgmodels.User, res Result) Result {
+	on := form.OnSubmit
+	if on == nil || contact == nil {
+		return res
+	}
 	if on.WriteAttributes {
 		writeAttributes(form, sub, contact)
 	}
@@ -197,10 +246,10 @@ func Execute(form *pkgmodels.PageForm, sub Submission) Result {
 
 // ── contact upsert ────────────────────────────────────────────────────────
 
-func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, error) {
+func upsertContact(form *pkgmodels.PageForm, sub Submission, pending *pendingOptIn) (*pkgmodels.User, bool, error) {
 	email := strings.ToLower(strings.TrimSpace(emailFromSubmission(form, sub)))
 	if email == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	col := db.GetCollection(pkgmodels.UserCollection)
 	var existing pkgmodels.User
@@ -221,7 +270,10 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, e
 			)
 			existing.SubscriberId = tenantHex
 		}
-		return &existing, nil
+		return &existing, false, nil
+	}
+	if err != mgo.ErrNotFound {
+		return nil, false, err
 	}
 
 	now := time.Now()
@@ -237,21 +289,26 @@ func upsertContact(form *pkgmodels.PageForm, sub Submission) (*pkgmodels.User, e
 		SubscriberId: form.TenantID.Hex(),
 		Email:        pkgmodels.EmailAddress(email),
 	}
-	contact.Subscribed = true
-	// ACQ-007: capture consent provenance — the contact opted in by submitting
-	// this form. Recorded before the plan-hold masks Subscribed so consent
-	// survives a limit-hold/release (BILL-010).
-	consent := true
+	contact.Subscribed = pending == nil
+	// ACQ-007: capture consent provenance. A plain form grants consent now; a
+	// double-opt-in form records the source but leaves consent false/pending
+	// until its emailed token is consumed.
+	consent := pending == nil
 	contact.ConsentSubscribed = &consent
 	contact.ConsentSource = "form:" + form.PublicId
-	contact.ConsentedAt = &now
+	if pending == nil {
+		contact.ConsentedAt = &now
+	} else {
+		contact.ConsentOptInDigest = pending.Digest
+		contact.ConsentOptInExpires = &pending.Expires
+	}
 	contact.SoftDeletes.CreatedAt = &now
 	plans.ApplyHold(&contact)
 	if err := col.Insert(contact); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	plans.Invalidate(form.TenantID)
-	return &contact, nil
+	return &contact, true, nil
 }
 
 // emailFromSubmission resolves the contact's email by inspecting the form's
@@ -413,7 +470,7 @@ func validateOptions(form *pkgmodels.PageForm, values map[string]string) []strin
 
 // recordSubmission persists the raw (option-validated, type-coerced) answers
 // as a FormSubmission row so tenants can review per-form responses.
-func recordSubmission(form *pkgmodels.PageForm, sub Submission, contact *pkgmodels.User) {
+func recordSubmission(form *pkgmodels.PageForm, sub Submission, contact *pkgmodels.User) *pkgmodels.FormSubmission {
 	data := map[string]interface{}{}
 	typed := map[string]string{}
 	for _, f := range form.Fields {
@@ -425,13 +482,14 @@ func recordSubmission(form *pkgmodels.PageForm, sub Submission, contact *pkgmode
 		data[k] = coerceFieldValue(typed[k], v)
 	}
 	row := pkgmodels.FormSubmission{
-		Id:        bson.NewObjectId(),
-		PublicId:  utils.GeneratePublicId(),
-		TenantID:  form.TenantID,
-		FormID:    form.PublicId,
-		Data:      data,
-		Source:    sub.Source,
-		CreatedAt: time.Now(),
+		Id:                   bson.NewObjectId(),
+		PublicId:             utils.GeneratePublicId(),
+		TenantID:             form.TenantID,
+		FormID:               form.PublicId,
+		Data:                 data,
+		Source:               sub.Source,
+		VideoSessionPublicId: sub.VideoSessionPublicId,
+		CreatedAt:            time.Now(),
 	}
 	if contact != nil {
 		row.ContactID = contact.PublicId
@@ -444,7 +502,9 @@ func recordSubmission(form *pkgmodels.PageForm, sub Submission, contact *pkgmode
 	row.Relay = analytics.LooksLikeRelay(sub.UserAgent, sub.Via)
 	if err := db.GetCollection(pkgmodels.FormSubmissionCollection).Insert(row); err != nil {
 		log.Printf("forms: failed to record submission for form %s: %v", form.PublicId, err)
+		return nil
 	}
+	return &row
 }
 
 // scopedFind builds a (public_id + tenant_or_subscriber) filter. Different

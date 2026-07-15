@@ -12,10 +12,10 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/jobs"
 
-	"github.com/josephalai/sentanyl/pkg/sendauth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/emailer"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/sendauth"
 )
 
 // resolveCampaignAudience translates a campaign's badge constraints (by public_id
@@ -31,9 +31,14 @@ func resolveCampaignAudience(tenantID bson.ObjectId, aud pkgmodels.CampaignAudie
 		return nil, fmt.Errorf("must_not_have lookup: %w", err)
 	}
 
-	// Contacts who used the one-click unsubscribe are suppressed from every
-	// bulk channel that resolves audiences here (campaigns + A/B).
-	q := bson.M{"tenant_id": tenantID, "unsubscribed_at": nil}
+	// Contacts who used one-click unsubscribe or are still awaiting ACQ-007
+	// double-opt-in confirmation are suppressed from every bulk channel that
+	// resolves audiences here (campaigns + A/B).
+	q := bson.M{
+		"tenant_id":             tenantID,
+		"unsubscribed_at":       nil,
+		"consent_opt_in_digest": bson.M{"$exists": false},
+	}
 	if len(mustIDs) > 0 {
 		q["badges"] = bson.M{"$all": mustIDs}
 	}

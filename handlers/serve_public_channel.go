@@ -150,6 +150,7 @@ func handlePublicChannelFormSubmit(c *gin.Context) {
 	if pubCtx == nil {
 		return
 	}
+	req.Domain = pubCtx.Domain
 	runFormSubmission(c, pubCtx.TenantID, c.Param("formId"), &req, isJSON, "coded_embed")
 }
 
