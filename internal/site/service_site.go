@@ -6,6 +6,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -50,10 +51,10 @@ func ServiceListSites(tenantID bson.ObjectId) ([]pkgmodels.Site, error) {
 
 // SiteUpdateRequest holds input for updating a site.
 type SiteUpdateRequest struct {
-	Name       string                     `json:"name,omitempty"`
-	Domain     string                     `json:"domain,omitempty"`
-	Theme      string                     `json:"theme,omitempty"`
-	SEO        *pkgmodels.SEOConfig       `json:"seo,omitempty"`
+	Name       string                      `json:"name,omitempty"`
+	Domain     string                      `json:"domain,omitempty"`
+	Theme      string                      `json:"theme,omitempty"`
+	SEO        *pkgmodels.SEOConfig        `json:"seo,omitempty"`
 	Navigation *pkgmodels.NavigationConfig `json:"navigation,omitempty"`
 }
 
@@ -86,5 +87,15 @@ func ServiceUpdateSite(siteID, tenantID bson.ObjectId, req SiteUpdateRequest) er
 
 // ServiceDeleteSite soft-deletes a site and its pages.
 func ServiceDeleteSite(siteID, tenantID bson.ObjectId) error {
-	return SoftDeleteSite(siteID, tenantID)
+	s, err := GetSiteByID(siteID, tenantID)
+	if err != nil {
+		return err
+	}
+	if err := SoftDeleteSite(siteID, tenantID); err != nil {
+		return err
+	}
+	for _, hostname := range s.AttachedDomains {
+		_ = publicchannel.ReleaseHost(hostname, tenantID, publicchannel.HostClaimSite, siteID)
+	}
+	return nil
 }

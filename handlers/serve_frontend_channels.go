@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/channel"
 	"github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 )
 
 // RegisterFrontendChannelRoutes wires tenant-scoped CRUD for frontend
@@ -47,6 +49,10 @@ func handleCreateFrontendChannel(c *gin.Context) {
 	}
 	ch, err := channel.ServiceCreateChannel(req, tenantID)
 	if err != nil {
+		if errors.Is(err, publicchannel.ErrHostClaimed) {
+			c.JSON(http.StatusConflict, gin.H{"error": "domain is already claimed", "code": "DOMAIN_ALREADY_CLAIMED"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -80,6 +86,10 @@ func handleUpdateFrontendChannel(c *gin.Context) {
 	}
 	ch, err := channel.ServiceUpdateChannel(tenantID, c.Param("channelId"), req)
 	if err != nil {
+		if errors.Is(err, publicchannel.ErrHostClaimed) {
+			c.JSON(http.StatusConflict, gin.H{"error": "domain is already claimed", "code": "DOMAIN_ALREADY_CLAIMED"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

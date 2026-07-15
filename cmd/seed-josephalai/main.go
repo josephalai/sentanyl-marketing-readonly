@@ -27,6 +27,7 @@ import (
 	"github.com/josephalai/sentanyl/pkg/auth"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 	"github.com/josephalai/sentanyl/pkg/utils"
 )
 
@@ -227,6 +228,11 @@ func resolveTenant(tenantHex, tenantName string, createTenant bool) bson.ObjectI
 }
 
 func upsertVerifiedDomain(tenantID bson.ObjectId, hostname string) {
+	canonical, err := publicchannel.CanonicalHost(hostname)
+	if err != nil {
+		log.Fatalf("seed-josephalai: invalid domain %q: %v", hostname, err)
+	}
+	hostname = canonical
 	col := db.GetCollection(pkgmodels.DomainCollection)
 	var existing pkgmodels.TenantDomain
 	if err := col.Find(bson.M{
@@ -234,6 +240,9 @@ func upsertVerifiedDomain(tenantID bson.ObjectId, hostname string) {
 		"tenant_id":             tenantID,
 		"timestamps.deleted_at": nil,
 	}).One(&existing); err == nil {
+		if err := publicchannel.ClaimHost(hostname, tenantID, publicchannel.HostClaimTenantDomain, existing.Id); err != nil {
+			log.Fatalf("seed-josephalai: claim tenant domain %s: %v", hostname, err)
+		}
 		if !existing.IsVerified {
 			_ = col.UpdateId(existing.Id, bson.M{"$set": bson.M{"is_verified": true}})
 			log.Printf("  ~ tenant domain %s marked verified", hostname)
@@ -242,7 +251,11 @@ func upsertVerifiedDomain(tenantID bson.ObjectId, hostname string) {
 	}
 	d := pkgmodels.NewTenantDomain(hostname, tenantID)
 	d.IsVerified = true
+	if err := publicchannel.ClaimHost(hostname, tenantID, publicchannel.HostClaimTenantDomain, d.Id); err != nil {
+		log.Fatalf("seed-josephalai: claim tenant domain %s: %v", hostname, err)
+	}
 	if err := col.Insert(d); err != nil {
+		_ = publicchannel.ReleaseHost(hostname, tenantID, publicchannel.HostClaimTenantDomain, d.Id)
 		log.Fatalf("seed-josephalai: insert tenant domain %s: %v", hostname, err)
 	}
 	log.Printf("  + tenant domain %s (verified)", hostname)
@@ -598,6 +611,11 @@ func upsertBadge(tenantID bson.ObjectId, name string) string {
 }
 
 func upsertChannel(tenantID bson.ObjectId, domain, portalDomain string) *pkgmodels.FrontendChannel {
+	canonical, err := publicchannel.CanonicalHost(domain)
+	if err != nil {
+		log.Fatalf("seed-josephalai: invalid channel domain %q: %v", domain, err)
+	}
+	domain = canonical
 	col := db.GetCollection(pkgmodels.FrontendChannelCollection)
 	var existing pkgmodels.FrontendChannel
 	if err := col.Find(bson.M{
@@ -605,6 +623,9 @@ func upsertChannel(tenantID bson.ObjectId, domain, portalDomain string) *pkgmode
 		"domain":                domain,
 		"timestamps.deleted_at": nil,
 	}).One(&existing); err == nil {
+		if err := publicchannel.ClaimHost(domain, tenantID, publicchannel.HostClaimChannel, existing.Id); err != nil {
+			log.Fatalf("seed-josephalai: claim channel domain %s: %v", domain, err)
+		}
 		return &existing
 	}
 	now := time.Now()
@@ -622,7 +643,11 @@ func upsertChannel(tenantID bson.ObjectId, domain, portalDomain string) *pkgmode
 	}
 	ch.PublicKey = key
 	ch.SoftDeletes.CreatedAt = &now
+	if err := publicchannel.ClaimHost(domain, tenantID, publicchannel.HostClaimChannel, ch.Id); err != nil {
+		log.Fatalf("seed-josephalai: claim channel domain %s: %v", domain, err)
+	}
 	if err := col.Insert(ch); err != nil {
+		_ = publicchannel.ReleaseHost(domain, tenantID, publicchannel.HostClaimChannel, ch.Id)
 		log.Fatalf("seed-josephalai: insert channel: %v", err)
 	}
 	log.Printf("  + channel %s domain=%s key=%s", ch.PublicId, domain, key)

@@ -49,7 +49,7 @@
 
   if (window.Sentanyl) return;
 
-  var SDK_VERSION = '2.0.0';
+  var SDK_VERSION = '1.0.0';
 
   var cfg = {
     apiBase: '',
@@ -57,7 +57,6 @@
     domain: '',
   };
   var channelPromise = null;
-  var contextCache = {};
 
   /* ─── bootstrap config from the <script> tag ────────────────────────── */
 
@@ -78,27 +77,11 @@
 
   /* ─── transport ─────────────────────────────────────────────────────── */
 
-  function headers(json, contextToken) {
+  function headers(json) {
     var h = {};
     if (json) h['Content-Type'] = 'application/json';
     if (cfg.publicKey) h['X-Sentanyl-Public-Key'] = cfg.publicKey;
-    if (contextToken) h['X-Sentanyl-Channel-Context'] = contextToken;
     return h;
-  }
-
-  function contextFor(method, path) {
-    if (path.indexOf('/api/v1/public/') !== 0 || path === '/api/v1/public/context') {
-      return Promise.resolve('');
-    }
-    var key = method + ' ' + path;
-    var cached = contextCache[key];
-    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.token);
-    var url = cfg.apiBase + '/api/v1/public/context?method=' + encodeURIComponent(method) + '&path=' + encodeURIComponent(path);
-    if (cfg.domain) url += '&domain=' + encodeURIComponent(cfg.domain);
-    return fetch(url, { headers: headers(false, '') }).then(parseResponse).then(function (body) {
-      contextCache[key] = { token: body.token, expiresAt: Date.now() + 240000 };
-      return body.token;
-    });
   }
 
   function withContext(payload) {
@@ -124,19 +107,16 @@
   }
 
   function get(path) {
-    return contextFor('GET', path).then(function (token) {
-      return fetch(cfg.apiBase + path + query(), { headers: headers(false, token) }).then(parseResponse);
-    });
+    return fetch(cfg.apiBase + path + query(), { headers: headers(false) })
+      .then(parseResponse);
   }
 
   function post(path, payload) {
-    return contextFor('POST', path).then(function (token) {
-      return fetch(cfg.apiBase + path, {
-        method: 'POST',
-        headers: headers(true, token),
-        body: JSON.stringify(withContext(payload)),
-      }).then(parseResponse);
-    });
+    return fetch(cfg.apiBase + path, {
+      method: 'POST',
+      headers: headers(true),
+      body: JSON.stringify(withContext(payload)),
+    }).then(parseResponse);
   }
 
   function parseResponse(r) {
@@ -165,7 +145,7 @@
 
   function channel() {
     if (!channelPromise) {
-      channelPromise = get('/api/v1/public/channel').catch(function (e) {
+      channelPromise = get('/api/public/channel').catch(function (e) {
         channelPromise = null;
         throw e;
       });
@@ -181,7 +161,6 @@
       if (opts.domain) cfg.domain = opts.domain;
       if (opts.apiBase != null) cfg.apiBase = String(opts.apiBase).replace(/\/$/, '');
       channelPromise = null;
-      contextCache = {};
       return api;
     },
 
@@ -190,23 +169,23 @@
     channel: channel,
 
     products: {
-      list: function () { return get('/api/v1/public/products').then(function (b) { return b.products || []; }); },
-      get: function (id) { return get('/api/v1/public/products/' + encodeURIComponent(id)).then(function (b) { return b.product; }); },
+      list: function () { return get('/api/public/products').then(function (b) { return b.products || []; }); },
+      get: function (id) { return get('/api/public/products/' + encodeURIComponent(id)).then(function (b) { return b.product; }); },
     },
 
     offers: {
-      list: function () { return get('/api/v1/public/offers').then(function (b) { return b.offers || []; }); },
-      get: function (id) { return get('/api/v1/public/offers/' + encodeURIComponent(id)).then(function (b) { return b.offer; }); },
+      list: function () { return get('/api/public/offers').then(function (b) { return b.offers || []; }); },
+      get: function (id) { return get('/api/public/offers/' + encodeURIComponent(id)).then(function (b) { return b.offer; }); },
     },
 
     forms: {
       submit: function (formId, payload) {
-        return post('/api/v1/public/forms/' + encodeURIComponent(formId), payload);
+        return post('/api/public/forms/' + encodeURIComponent(formId), payload);
       },
       // Whitelisted definition (name + fields incl. select options) for
       // rendering a form dynamically on a coded site.
       get: function (formId) {
-        return get('/api/v1/public/forms/' + encodeURIComponent(formId));
+        return get('/api/public/forms/' + encodeURIComponent(formId));
       },
     },
 
@@ -221,7 +200,7 @@
           success_url: payload.successUrl || payload.success_url,
           cancel_url: payload.cancelUrl || payload.cancel_url,
         };
-        return post('/api/v1/public/checkout/' + encodeURIComponent(offerId), body)
+        return post('/api/public/checkout/' + encodeURIComponent(offerId), body)
           .then(function (resp) {
             if (redirect && resp && resp.checkout_url) {
               emit(document, 'sentanyl:checkout:redirect', resp);
@@ -242,7 +221,7 @@
 
     newsletter: {
       subscribe: function (productId, payload) {
-        return post('/api/v1/public/newsletters/' + encodeURIComponent(productId) + '/subscribe', payload);
+        return post('/api/public/newsletters/' + encodeURIComponent(productId) + '/subscribe', payload);
       },
     },
 
@@ -257,10 +236,10 @@
 
     quizzes: {
       get: function (quizId) {
-        return get('/api/v1/public/quizzes/' + encodeURIComponent(quizId)).then(function (b) { return b.quiz; });
+        return get('/api/public/quizzes/' + encodeURIComponent(quizId)).then(function (b) { return b.quiz; });
       },
       submit: function (quizId, payload) {
-        return post('/api/v1/public/quizzes/' + encodeURIComponent(quizId) + '/submit', payload);
+        return post('/api/public/quizzes/' + encodeURIComponent(quizId) + '/submit', payload);
       },
     },
 

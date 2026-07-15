@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
@@ -36,6 +37,29 @@ func RegisterPublicChannelRoutes(public *gin.RouterGroup) {
 	public.POST("/newsletters/:productId/subscribe", handlePublicChannelNewsletterSubscribe)
 	public.GET("/quizzes/:quizId", handlePublicQuizGet)
 	public.POST("/quizzes/:quizId/submit", handlePublicQuizSubmit)
+}
+
+// RegisterPublicChannelContextRoute mounts the bootstrap endpoint separately
+// so the rest of the v1 group can require its signed result as middleware.
+func RegisterPublicChannelContextRoute(public *gin.RouterGroup) {
+	public.GET("/context", handleIssuePublicChannelContext)
+}
+
+func handleIssuePublicChannelContext(c *gin.Context) {
+	method := strings.ToUpper(strings.TrimSpace(c.Query("method")))
+	path := strings.TrimSpace(c.Query("path"))
+	pubCtx, err := publicchannel.ResolvePublicRequest(c)
+	if err != nil || publicchannel.EnforceOrigin(pubCtx) != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unable to issue channel context", "code": "CHANNEL_CONTEXT_DENIED"})
+		return
+	}
+	token, err := publicchannel.IssueContextToken(pubCtx, method, path, publicchannel.ContextSecret(), time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel context target", "code": "CHANNEL_CONTEXT_TARGET_INVALID"})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"token": token, "expires_in": 300, "version": "v1"})
 }
 
 // resolvePublicChannelRequest resolves + enforces origin, writing the error

@@ -19,8 +19,9 @@ func TestPublicSDKVersionedAssets(t *testing.T) {
 		immutable bool
 		marker    string
 	}{
-		{path: "/static/sentanyl.js", marker: "var SDK_VERSION = '1.0.0'"},
+		{path: "/static/sentanyl.js", marker: "var SDK_VERSION = '2.0.0'"},
 		{path: "/static/sentanyl-v1.js", immutable: true, marker: "var SDK_VERSION = '1.0.0'"},
+		{path: "/static/sentanyl-v2.js", immutable: true, marker: "var SDK_VERSION = '2.0.0'"},
 		{path: "/static/sentanyl-video.js", marker: "window.SentanylVideoVersion = SDK_VERSION"},
 		{path: "/static/sentanyl-video-v1.js", immutable: true, marker: "window.SentanylVideoVersion = SDK_VERSION"},
 	}
@@ -51,7 +52,7 @@ func TestSentanylSDKDocumentsCallbackEvents(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	RegisterPublicSiteAssetRoutes(r)
-	req := httptest.NewRequest(http.MethodGet, "/static/sentanyl-v1.js", nil)
+	req := httptest.NewRequest(http.MethodGet, "/static/sentanyl-v2.js", nil)
 	res := httptest.NewRecorder()
 	r.ServeHTTP(res, req)
 	body := res.Body.String()
@@ -64,6 +65,11 @@ func TestSentanylSDKDocumentsCallbackEvents(t *testing.T) {
 	} {
 		if !strings.Contains(body, event) {
 			t.Errorf("SDK contract missing event %q", event)
+		}
+	}
+	for _, marker := range []string{"/api/v1/public/context", "X-Sentanyl-Channel-Context", "/api/v1/public/forms/", "/api/v1/public/checkout/"} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("SDK v2 context contract missing %q", marker)
 		}
 	}
 }

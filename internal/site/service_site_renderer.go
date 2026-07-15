@@ -10,6 +10,7 @@ import (
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 	"github.com/josephalai/sentanyl/pkg/render"
 )
 
@@ -475,18 +476,34 @@ func ServiceAttachDomain(siteID, tenantID bson.ObjectId, domainID string) error 
 		return fmt.Errorf("domain %s is not verified — verify DNS records first", tenantDomain.Hostname)
 	}
 
-	hostname := tenantDomain.Hostname
+	hostname, err := publicchannel.CanonicalHost(tenantDomain.Hostname)
+	if err != nil {
+		return fmt.Errorf("domain is invalid")
+	}
 
 	// Check if domain already attached.
 	for _, d := range site.AttachedDomains {
-		if d == hostname {
-			return nil // Already attached
+		attached, canonicalErr := publicchannel.CanonicalHost(d)
+		if canonicalErr == nil && attached == hostname {
+			// Backfill the claim for sites attached before the claim ledger was
+			// introduced. ClaimHost is idempotent for this resource.
+			return publicchannel.ClaimHost(hostname, tenantID, publicchannel.HostClaimSite, siteID)
 		}
 	}
+	if err := publicchannel.ClaimHost(hostname, tenantID, publicchannel.HostClaimSite, siteID); err != nil {
+		if err == publicchannel.ErrHostClaimed {
+			return fmt.Errorf("domain is already claimed")
+		}
+		return fmt.Errorf("claim domain: %w", err)
+	}
 	domains := append(site.AttachedDomains, hostname)
-	return UpdateSite(siteID, tenantID, bson.M{
+	if err := UpdateSite(siteID, tenantID, bson.M{
 		"attached_domains": domains,
-	})
+	}); err != nil {
+		_ = publicchannel.ReleaseHost(hostname, tenantID, publicchannel.HostClaimSite, siteID)
+		return err
+	}
+	return nil
 }
 
 // VerifyDomainForTLS checks that the given hostname is currently attached to

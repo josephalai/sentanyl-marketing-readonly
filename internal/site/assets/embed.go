@@ -16,7 +16,14 @@ func SentanylVideoJS() []byte { return sentanylVideoJS }
 //go:embed sentanyl.js
 var sentanylJS []byte
 
+//go:embed sentanyl-v1.js
+var sentanylV1JS []byte
+
 // SentanylJS returns the bytes of the frontend-channel browser SDK, served
 // at GET /static/sentanyl.js. packages/js/browser ships the same file for
 // npm consumers (kept in sync by its check-sync script).
 func SentanylJS() []byte { return sentanylJS }
+
+// SentanylV1JS is the frozen 1.0.0 SDK. Immutable versioned URLs must never
+// start serving newer transport semantics.
+func SentanylV1JS() []byte { return sentanylV1JS }

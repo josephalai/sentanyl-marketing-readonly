@@ -21,13 +21,14 @@ import (
 	"github.com/josephalai/sentanyl/pkg/aigov"
 	"github.com/josephalai/sentanyl/pkg/audit"
 	"github.com/josephalai/sentanyl/pkg/auth"
-	"github.com/josephalai/sentanyl/pkg/jobs"
-	"github.com/josephalai/sentanyl/pkg/config"
 	"github.com/josephalai/sentanyl/pkg/badges"
+	"github.com/josephalai/sentanyl/pkg/config"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/entitlements"
 	httputil "github.com/josephalai/sentanyl/pkg/http"
+	"github.com/josephalai/sentanyl/pkg/jobs"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
+	"github.com/josephalai/sentanyl/pkg/publicchannel"
 	"github.com/josephalai/sentanyl/pkg/render"
 	"github.com/josephalai/sentanyl/pkg/scan"
 	"github.com/josephalai/sentanyl/pkg/storage"
@@ -306,6 +307,16 @@ func main() {
 	publicGroup.Use(httputil.RateLimit(60, 30))
 	publicGroup.Use(httputil.Idempotency()) // API-003
 	handlers.RegisterPublicChannelRoutes(publicGroup)
+
+	// Versioned external contract. Context bootstrap still resolves the legacy
+	// public key/verified host once; every subsequent v1 request is bound to a
+	// signed tenant+channel+origin+method+resource-path context.
+	publicV1 := r.Group("/api/v1/public")
+	publicV1.Use(httputil.RateLimit(60, 30))
+	handlers.RegisterPublicChannelContextRoute(publicV1)
+	publicV1.Use(publicchannel.RequireSignedContext())
+	publicV1.Use(httputil.Idempotency())
+	handlers.RegisterPublicChannelRoutes(publicV1)
 
 	// Public newsletter subscribe / confirm / unsubscribe routes (no auth).
 	// Throttled per IP — subscribe fires a double-opt-in email per request.

@@ -2,6 +2,7 @@ package channel
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -81,7 +82,13 @@ func ServiceCreateChannel(req ChannelUpsertRequest, tenantID bson.ObjectId) (*pk
 
 	now := time.Now()
 	ch.SoftDeletes.CreatedAt = &now
+	if ch.Domain != "" {
+		if err := publicchannel.ClaimHost(ch.Domain, tenantID, publicchannel.HostClaimChannel, ch.Id); err != nil {
+			return nil, err
+		}
+	}
 	if err := db.GetCollection(pkgmodels.FrontendChannelCollection).Insert(ch); err != nil {
+		_ = publicchannel.ReleaseHost(ch.Domain, tenantID, publicchannel.HostClaimChannel, ch.Id)
 		return nil, fmt.Errorf("failed to create channel")
 	}
 	return ch, nil
@@ -92,6 +99,7 @@ func ServiceUpdateChannel(tenantID bson.ObjectId, idParam string, req ChannelUps
 	if err != nil {
 		return nil, err
 	}
+	oldDomain := ch.Domain
 	if req.Name != "" {
 		ch.Name = strings.TrimSpace(req.Name)
 	}
@@ -106,8 +114,19 @@ func ServiceUpdateChannel(tenantID bson.ObjectId, idParam string, req ChannelUps
 	}
 	now := time.Now()
 	ch.SoftDeletes.UpdatedAt = &now
+	if ch.Domain != "" {
+		if err := publicchannel.ClaimHost(ch.Domain, tenantID, publicchannel.HostClaimChannel, ch.Id); err != nil {
+			return nil, err
+		}
+	}
 	if err := db.GetCollection(pkgmodels.FrontendChannelCollection).UpdateId(ch.Id, ch); err != nil {
+		if ch.Domain != oldDomain {
+			_ = publicchannel.ReleaseHost(ch.Domain, tenantID, publicchannel.HostClaimChannel, ch.Id)
+		}
 		return nil, fmt.Errorf("failed to update channel")
+	}
+	if oldDomain != "" && oldDomain != ch.Domain {
+		_ = publicchannel.ReleaseHost(oldDomain, tenantID, publicchannel.HostClaimChannel, ch.Id)
 	}
 	return ch, nil
 }
@@ -118,9 +137,13 @@ func ServiceDeleteChannel(tenantID bson.ObjectId, idParam string) error {
 		return err
 	}
 	now := time.Now()
-	return db.GetCollection(pkgmodels.FrontendChannelCollection).UpdateId(ch.Id, bson.M{
+	err = db.GetCollection(pkgmodels.FrontendChannelCollection).UpdateId(ch.Id, bson.M{
 		"$set": bson.M{"timestamps.deleted_at": now, "timestamps.updated_at": now},
 	})
+	if err == nil {
+		_ = publicchannel.ReleaseHost(ch.Domain, tenantID, publicchannel.HostClaimChannel, ch.Id)
+	}
+	return err
 }
 
 // ServiceRotateChannelKey mints a fresh public key for a channel.
@@ -157,28 +180,21 @@ func applyUpsert(ch *pkgmodels.FrontendChannel, req ChannelUpsertRequest, tenant
 		}
 	}
 	if req.Domain != "" {
-		domain := publicchannel.NormalizeHost(req.Domain)
+		domain, err := publicchannel.CanonicalHost(req.Domain)
+		if err != nil {
+			return fmt.Errorf("invalid domain")
+		}
 		if domain != ch.Domain {
-			// Reject a second non-deleted channel claiming the same domain
-			// for this tenant.
-			n, _ := db.GetCollection(pkgmodels.FrontendChannelCollection).Find(bson.M{
-				"tenant_id":             tenantID,
-				"domain":                domain,
-				"_id":                   bson.M{"$ne": ch.Id},
-				"timestamps.deleted_at": nil,
-			}).Count()
-			if n > 0 {
-				return fmt.Errorf("another channel already uses domain %s", domain)
+			if err := validateDomainAvailable(domain, tenantID, ch.Id); err != nil {
+				return err
 			}
 			ch.Domain = domain
 		}
 	}
 	if req.AllowedOrigins != nil {
-		origins := make([]string, 0, len(req.AllowedOrigins))
-		for _, o := range req.AllowedOrigins {
-			if o = strings.TrimSpace(o); o != "" {
-				origins = append(origins, o)
-			}
+		origins, err := publicchannel.CanonicalOrigins(req.AllowedOrigins)
+		if err != nil {
+			return err
 		}
 		ch.AllowedOrigins = origins
 	}
@@ -208,6 +224,42 @@ func applyUpsert(ch *pkgmodels.FrontendChannel, req ChannelUpsertRequest, tenant
 	}
 	if req.DefaultCancelURL != "" {
 		ch.DefaultCancelURL = strings.TrimSpace(req.DefaultCancelURL)
+	}
+	if ch.Status == pkgmodels.FrontendChannelStatusActive && ch.Domain == "" {
+		return fmt.Errorf("active channel requires a domain")
+	}
+	return nil
+}
+
+func validateDomainAvailable(domain string, tenantID, channelID bson.ObjectId) error {
+	exact := bson.RegEx{Pattern: "^" + regexp.QuoteMeta(domain) + "$", Options: "i"}
+	// A public hostname may resolve to only one channel, even inside a tenant;
+	// otherwise host-based resolution depends on Mongo result order.
+	n, err := db.GetCollection(pkgmodels.FrontendChannelCollection).Find(bson.M{
+		"domain": exact, "_id": bson.M{"$ne": channelID}, "timestamps.deleted_at": nil,
+	}).Count()
+	if err != nil {
+		return fmt.Errorf("failed to validate domain ownership")
+	}
+	if n > 0 {
+		return publicchannel.ErrHostClaimed
+	}
+	// A verified/custom domain or published Site belonging to another tenant
+	// is also an ownership claim. The error deliberately reveals no tenant.
+	for _, check := range []struct {
+		collection string
+		query      bson.M
+	}{
+		{pkgmodels.DomainCollection, bson.M{"hostname": exact, "tenant_id": bson.M{"$ne": tenantID}, "timestamps.deleted_at": nil}},
+		{pkgmodels.SiteCollection, bson.M{"attached_domains": exact, "tenant_id": bson.M{"$ne": tenantID}, "timestamps.deleted_at": nil}},
+	} {
+		n, err = db.GetCollection(check.collection).Find(check.query).Count()
+		if err != nil {
+			return fmt.Errorf("failed to validate domain ownership")
+		}
+		if n > 0 {
+			return publicchannel.ErrHostClaimed
+		}
 	}
 	return nil
 }

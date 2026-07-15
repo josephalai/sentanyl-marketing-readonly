@@ -22,6 +22,7 @@ func RegisterPublicSiteAssetRoutes(r *gin.Engine) {
 	r.GET("/static/sentanyl-video-v1.js", handleSentanylVideoV1JS)
 	r.GET("/static/sentanyl.js", handleSentanylJS)
 	r.GET("/static/sentanyl-v1.js", handleSentanylV1JS)
+	r.GET("/static/sentanyl-v2.js", handleSentanylV2JS)
 }
 
 func handleSentanylVideoJS(c *gin.Context) {
@@ -40,6 +41,10 @@ func handleSentanylJS(c *gin.Context) {
 }
 
 func handleSentanylV1JS(c *gin.Context) {
+	serveEmbeddedJS(c, assets.SentanylV1JS(), true)
+}
+
+func handleSentanylV2JS(c *gin.Context) {
 	serveEmbeddedJS(c, assets.SentanylJS(), true)
 }
 
