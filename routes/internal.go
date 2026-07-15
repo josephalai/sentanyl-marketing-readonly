@@ -283,7 +283,19 @@ func HandleInternalHydrateGraph(c *gin.Context) {
 	upsertSlice(&totals, "certificate_templates", pkgmodels.CertificateTemplateCollection, req.CertificateTemplates, sliceToAny(req.CertificateTemplates))
 	upsertSlice(&totals, "campaigns", pkgmodels.CampaignCollection, req.Campaigns, sliceToAny(req.Campaigns))
 	upsertSlice(&totals, "badges", pkgmodels.BadgeCollection, req.Badges, sliceToAny(req.Badges))
-	upsertSlice(&totals, "tags", pkgmodels.TagCollection, req.Tags, sliceToAny(req.Tags))
+	// ID-014: SentanylScript `tag` remains source-compatible, but its
+	// definitions hydrate into the canonical Badge contact_label taxonomy.
+	labels := make([]*pkgmodels.Badge, 0, len(req.Tags))
+	for _, tag := range req.Tags {
+		if tag == nil {
+			continue
+		}
+		labels = append(labels, &pkgmodels.Badge{
+			Id: tag.Id, PublicId: tag.PublicId, TenantID: tag.TenantID, SubscriberId: tag.SubscriberId,
+			Name: tag.Name, Description: tag.Description, Kind: pkgmodels.BadgeKindContactLabel, SoftDeletes: tag.SoftDeletes,
+		})
+	}
+	upsertSlice(&totals, "tags", pkgmodels.BadgeCollection, labels, sliceToAny(labels))
 
 	log.Printf("hydrate-graph: counts=%v", totals)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "counts": totals})

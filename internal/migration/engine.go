@@ -17,6 +17,7 @@ import (
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/analytics"
+	"github.com/josephalai/sentanyl/pkg/badges"
 	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/egress"
 	"github.com/josephalai/sentanyl/pkg/jobs"
@@ -264,6 +265,30 @@ func Rollback(p *models.MigrationProject) (bson.M, error) {
 		return nil, err
 	}
 	removed := map[string]int{}
+	// Contact-label assignments are dependent rows rather than source objects.
+	// Remove only grants authored by this project, then converge the Contact
+	// projection only when no other grant provenance still holds the label.
+	var labelAssignments []models.BadgeAssignment
+	_ = db.GetCollection(models.BadgeAssignmentCollection).Find(bson.M{
+		"tenant_id": p.TenantID, "source": "migration_label", "actor": "migration:" + p.Id.Hex(),
+		"kind": models.BadgeAssignmentGrant,
+	}).All(&labelAssignments)
+	for _, assignment := range labelAssignments {
+		if err := db.GetCollection(models.BadgeAssignmentCollection).RemoveId(assignment.Id); err != nil && err != mgo.ErrNotFound {
+			return nil, err
+		}
+		remaining, _ := db.GetCollection(models.BadgeAssignmentCollection).Find(bson.M{
+			"tenant_id": p.TenantID, "contact_id": assignment.ContactID,
+			"badge_id": assignment.BadgeID, "kind": models.BadgeAssignmentGrant,
+		}).Count()
+		if remaining == 0 {
+			_ = db.GetCollection(models.UserCollection).Update(
+				bson.M{"_id": assignment.ContactID, "tenant_id": p.TenantID},
+				bson.M{"$pull": bson.M{"badges": assignment.BadgeID}},
+			)
+		}
+		removed["label_assignment"]++
+	}
 	for _, m := range maps {
 		// An activated (or in-flight) migrated subscription is a live Stripe
 		// billing relationship — deleting the record would orphan it. The
@@ -831,28 +856,45 @@ func (r *run) applyTags(u *models.User, tags []string, cache map[string]bson.Obj
 		if !ok {
 			sourceID := "tag:" + key
 			if localID, found := r.lookupMap(models.SourceTypeTag, sourceID); found {
-				tagID = localID
-			} else {
-				var existing models.Tag
-				err := db.GetCollection(models.TagCollection).Find(bson.M{
-					"subscriber_id": r.p.TenantID.Hex(), "name": name, "timestamps.deleted_at": nil,
+				var existing models.Badge
+				if db.GetCollection(models.BadgeCollection).Find(bson.M{
+					"_id": localID, "tenant_id": r.p.TenantID,
+					"kind":                  bson.M{"$in": []string{models.BadgeKindContactLabel, "label"}},
+					"timestamps.deleted_at": nil,
+				}).One(&existing) == nil {
+					tagID = localID
+				} else {
+					found = false
+				}
+				if found {
+					cache[key] = tagID
+				}
+			}
+			if tagID == "" {
+				var existing models.Badge
+				err := db.GetCollection(models.BadgeCollection).Find(bson.M{
+					"tenant_id": r.p.TenantID, "name": name,
+					"kind": bson.M{"$in": []string{models.BadgeKindContactLabel, "label"}}, "timestamps.deleted_at": nil,
 				}).One(&existing)
 				if err == nil {
 					tagID = existing.Id
-					r.record(models.SourceTypeTag, sourceID, models.TagCollection, existing.Id, false)
+					r.record(models.SourceTypeTag, sourceID, models.BadgeCollection, existing.Id, false)
 				} else {
-					t := models.NewTag()
-					t.SubscriberId = r.p.TenantID.Hex()
-					t.Name = name
-					t.Description = "Imported from " + r.p.SourceSystem
+					label := &models.Badge{
+						Id: bson.NewObjectId(), PublicId: utils.GeneratePublicId(), TenantID: r.p.TenantID,
+						SubscriberId: r.p.TenantID.Hex(), Name: name,
+						Description: "Imported from " + r.p.SourceSystem, Kind: models.BadgeKindContactLabel,
+					}
+					now := time.Now().UTC()
+					label.SoftDeletes.CreatedAt = &now
 					if !r.dry {
-						if err := db.GetCollection(models.TagCollection).Insert(t); err != nil {
+						if err := db.GetCollection(models.BadgeCollection).Insert(label); err != nil {
 							r.rowError(models.SourceTypeTag, sourceID, 0, "insert: "+err.Error())
 							continue
 						}
 					}
-					tagID = t.Id
-					r.record(models.SourceTypeTag, sourceID, models.TagCollection, t.Id, true)
+					tagID = label.Id
+					r.record(models.SourceTypeTag, sourceID, models.BadgeCollection, label.Id, true)
 				}
 			}
 			cache[key] = tagID
@@ -860,11 +902,9 @@ func (r *run) applyTags(u *models.User, tags []string, cache map[string]bson.Obj
 		if r.dry {
 			continue
 		}
-		now := time.Now()
-		_ = db.GetCollection(models.UserCollection).Update(
-			bson.M{"_id": u.Id, "tags.tag": bson.M{"$ne": tagID}},
-			bson.M{"$push": bson.M{"tags": bson.M{"tag": tagID, "when": &now}}},
-		)
+		if _, err := badges.Assign(r.p.TenantID, u.Id, tagID, "migration_label", r.p.SourceSystem+":"+key, "migration:"+r.p.Id.Hex()); err != nil {
+			r.rowError(models.SourceTypeTag, "tag:"+key, 0, "assign label: "+err.Error())
+		}
 	}
 }
 
