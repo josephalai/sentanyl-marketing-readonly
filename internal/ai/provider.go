@@ -1,5 +1,7 @@
 package ai
 
+import "context"
+
 // SiteAIProvider is the interface for AI-powered website generation and editing.
 type SiteAIProvider interface {
 	// GenerateSite generates a full website structure with pages and content.
@@ -43,32 +45,34 @@ type SiteAIProvider interface {
 // GenerateTextRequest carries the inputs the handlebar resolver passes to
 // the provider on a cache miss.
 type GenerateTextRequest struct {
-	Prompt        string `json:"prompt"`
-	ReferenceText string `json:"reference_text,omitempty"` // concatenated context-pack chunks
-	BrandProfile  string `json:"brand_profile,omitempty"`
-	MaxTokens     int    `json:"max_tokens,omitempty"`
+	Ctx           context.Context `json:"-"`
+	Prompt        string          `json:"prompt"`
+	ReferenceText string          `json:"reference_text,omitempty"` // concatenated context-pack chunks
+	BrandProfile  string          `json:"brand_profile,omitempty"`
+	MaxTokens     int             `json:"max_tokens,omitempty"`
 }
 
 // SeriesOutlineRequest is the input for newsletter series outline generation.
 // All fields except Topic are advisory; the provider should respect Tone +
 // Audience + Outcome but is free to set issue order and key_points.
 type SeriesOutlineRequest struct {
-	Topic         string `json:"topic"`
-	Audience      string `json:"audience,omitempty"`
-	Outcome       string `json:"outcome,omitempty"`
-	Tone          string `json:"tone,omitempty"`
-	IssueCount    int    `json:"issue_count"`
-	ReferenceText string `json:"reference_text,omitempty"`
-	BrandProfile  string `json:"brand_profile,omitempty"`
+	Ctx           context.Context `json:"-"`
+	Topic         string          `json:"topic"`
+	Audience      string          `json:"audience,omitempty"`
+	Outcome       string          `json:"outcome,omitempty"`
+	Tone          string          `json:"tone,omitempty"`
+	IssueCount    int             `json:"issue_count"`
+	ReferenceText string          `json:"reference_text,omitempty"`
+	BrandProfile  string          `json:"brand_profile,omitempty"`
 }
 
 // SeriesOutlineResponse is the structured plan the provider returns. Each
 // IssueOutline becomes a NewsletterPost; the caller paginates them across
 // the requested cadence (or drip offsets).
 type SeriesOutlineResponse struct {
-	SeriesTitle string          `json:"series_title"`
-	Description string          `json:"description"`
-	Issues      []IssueOutline  `json:"issues"`
+	SeriesTitle string         `json:"series_title"`
+	Description string         `json:"description"`
+	Issues      []IssueOutline `json:"issues"`
 }
 
 type IssueOutline struct {
@@ -81,14 +85,15 @@ type IssueOutline struct {
 // PostFromBriefRequest is the per-issue follow-up generation. Receives one
 // IssueOutline plus the same shared grounding as the outline call.
 type PostFromBriefRequest struct {
-	SeriesTitle   string   `json:"series_title"`
-	IssueTitle    string   `json:"issue_title"`
-	IssueBrief    string   `json:"issue_brief"`
-	KeyPoints     []string `json:"key_points,omitempty"`
-	Tone          string   `json:"tone,omitempty"`
-	Audience      string   `json:"audience,omitempty"`
-	ReferenceText string   `json:"reference_text,omitempty"`
-	BrandProfile  string   `json:"brand_profile,omitempty"`
+	Ctx           context.Context `json:"-"`
+	SeriesTitle   string          `json:"series_title"`
+	IssueTitle    string          `json:"issue_title"`
+	IssueBrief    string          `json:"issue_brief"`
+	KeyPoints     []string        `json:"key_points,omitempty"`
+	Tone          string          `json:"tone,omitempty"`
+	Audience      string          `json:"audience,omitempty"`
+	ReferenceText string          `json:"reference_text,omitempty"`
+	BrandProfile  string          `json:"brand_profile,omitempty"`
 }
 
 // EmailBlockTypeCampaign signals to email-AI providers that the call is for a
@@ -102,20 +107,22 @@ const (
 
 // EmailGenerationRequest is the input for AI email generation.
 type EmailGenerationRequest struct {
-	Instruction   string   `json:"instruction"`
-	ContextChunks []string `json:"context_chunks,omitempty"` // text from context packs
-	BrandProfile  string   `json:"brand_profile,omitempty"`  // brand voice/positioning summary
-	BlockType     string   `json:"block_type,omitempty"`     // "campaign" | "" (transactional)
-	BadgeCatalog  []string `json:"badge_catalog,omitempty"`  // list of available badges by name/public_id
+	Ctx           context.Context `json:"-"`
+	Instruction   string          `json:"instruction"`
+	ContextChunks []string        `json:"context_chunks,omitempty"` // text from context packs
+	BrandProfile  string          `json:"brand_profile,omitempty"`  // brand voice/positioning summary
+	BlockType     string          `json:"block_type,omitempty"`     // "campaign" | "" (transactional)
+	BadgeCatalog  []string        `json:"badge_catalog,omitempty"`  // list of available badges by name/public_id
 }
 
 // EmailEditRequest is the input for AI email editing.
 type EmailEditRequest struct {
-	Instruction    string   `json:"instruction"`
-	CurrentSubject string   `json:"current_subject"`
-	CurrentBody    string   `json:"current_body"`
-	ContextChunks  []string `json:"context_chunks,omitempty"`
-	BrandProfile   string   `json:"brand_profile,omitempty"`
+	Ctx            context.Context `json:"-"`
+	Instruction    string          `json:"instruction"`
+	CurrentSubject string          `json:"current_subject"`
+	CurrentBody    string          `json:"current_body"`
+	ContextChunks  []string        `json:"context_chunks,omitempty"`
+	BrandProfile   string          `json:"brand_profile,omitempty"`
 }
 
 // CampaignAudienceSuggestion holds the LLM's recommended audience badges for a
@@ -129,9 +136,9 @@ type CampaignAudienceSuggestion struct {
 
 // EmailGenerationResult is the output of AI email generation.
 type EmailGenerationResult struct {
-	Subject  string `json:"subject"`
-	Body     string `json:"body"` // HTML body
-	Summary  string `json:"summary,omitempty"`
+	Subject  string                      `json:"subject"`
+	Body     string                      `json:"body"` // HTML body
+	Summary  string                      `json:"summary,omitempty"`
 	Audience *CampaignAudienceSuggestion `json:"audience_suggestion,omitempty"`
 }
 
@@ -143,8 +150,8 @@ type ExtractedSection struct {
 	Body               string `json:"body,omitempty"`
 	ImageURL           string `json:"image_url,omitempty"`
 	ImageAlt           string `json:"image_alt,omitempty"`
-	ImageWidth         int    `json:"image_width,omitempty"`  // natural pixel width — drives renderer's object-fit choice
-	ImageHeight        int    `json:"image_height,omitempty"` // natural pixel height
+	ImageWidth         int    `json:"image_width,omitempty"`    // natural pixel width — drives renderer's object-fit choice
+	ImageHeight        int    `json:"image_height,omitempty"`   // natural pixel height
 	ImagePosition      string `json:"image_position,omitempty"` // "left" | "right" | "above" | "below" | "background"
 	CTAText            string `json:"cta_text,omitempty"`
 	CTAUrl             string `json:"cta_url,omitempty"`
@@ -172,6 +179,7 @@ type ExtractedGridItem struct {
 
 // SiteDuplicateRequest is the input for AI site duplication from a crawled URL.
 type SiteDuplicateRequest struct {
+	Ctx            context.Context    `json:"-"`
 	SourceURL      string             `json:"source_url"`
 	SiteName       string             `json:"site_name"`
 	NavLinks       []NavLinkResult    `json:"nav_links"`
@@ -194,6 +202,7 @@ type SiteDuplicateRequest struct {
 
 // SiteHTMLRequest is the input for vision-based high-fidelity HTML page generation.
 type SiteHTMLRequest struct {
+	Ctx            context.Context    `json:"-"`
 	SourceURL      string             `json:"source_url"`
 	PageTitle      string             `json:"page_title"`
 	MetaDesc       string             `json:"meta_desc"`
@@ -211,37 +220,40 @@ type SiteHTMLRequest struct {
 
 // SiteGenerationRequest is the input for generating a full website.
 type SiteGenerationRequest struct {
-	BusinessName    string   `json:"business_name"`
-	BusinessType    string   `json:"business_type"`
-	Description     string   `json:"description"`
-	Theme           string   `json:"theme,omitempty"`
-	PageCount       int      `json:"page_count,omitempty"`
-	IncludePages    []string `json:"include_pages,omitempty"`
-	BusinessContext string   `json:"business_context,omitempty"`
-	BrandProfile    string   `json:"brand_profile,omitempty"`
-	ContextChunks   []string `json:"context_chunks,omitempty"`
+	Ctx             context.Context `json:"-"`
+	BusinessName    string          `json:"business_name"`
+	BusinessType    string          `json:"business_type"`
+	Description     string          `json:"description"`
+	Theme           string          `json:"theme,omitempty"`
+	PageCount       int             `json:"page_count,omitempty"`
+	IncludePages    []string        `json:"include_pages,omitempty"`
+	BusinessContext string          `json:"business_context,omitempty"`
+	BrandProfile    string          `json:"brand_profile,omitempty"`
+	ContextChunks   []string        `json:"context_chunks,omitempty"`
 }
 
 // SitePageRequest is the input for single-page generation with business context.
 type SitePageRequest struct {
-	Prompt          string   `json:"prompt"`
-	BusinessContext string   `json:"business_context,omitempty"`
-	BrandProfile    string   `json:"brand_profile,omitempty"`
-	ContextChunks   []string `json:"context_chunks,omitempty"`
+	Ctx             context.Context `json:"-"`
+	Prompt          string          `json:"prompt"`
+	BusinessContext string          `json:"business_context,omitempty"`
+	BrandProfile    string          `json:"brand_profile,omitempty"`
+	ContextChunks   []string        `json:"context_chunks,omitempty"`
 }
 
 // SitePageSuggestRequest is the input for page suggestions based on product catalog.
 type SitePageSuggestRequest struct {
-	ProductSummary string `json:"product_summary"`
+	Ctx            context.Context `json:"-"`
+	ProductSummary string          `json:"product_summary"`
 }
 
 // PageSuggestion is a single suggested page from the AI.
 type PageSuggestion struct {
-	Name               string   `json:"name"`
-	Slug               string   `json:"slug"`
-	PageType           string   `json:"page_type"`
-	Reason             string   `json:"reason"`
-	RecommendedBlocks  []string `json:"blocks,omitempty"`
+	Name              string   `json:"name"`
+	Slug              string   `json:"slug"`
+	PageType          string   `json:"page_type"`
+	Reason            string   `json:"reason"`
+	RecommendedBlocks []string `json:"blocks,omitempty"`
 }
 
 // SiteGenerationResult is the output of AI website generation.
@@ -282,11 +294,19 @@ type PageGenerationResult struct {
 
 // PageEditRequest is the input for AI page editing.
 type PageEditRequest struct {
-	Instruction     string         `json:"instruction"`
-	CurrentDocument map[string]any `json:"current_document"`
-	BusinessContext string         `json:"business_context,omitempty"`
-	BrandProfile    string         `json:"brand_profile,omitempty"`
-	ContextChunks   []string       `json:"context_chunks,omitempty"`
+	Ctx             context.Context `json:"-"`
+	Instruction     string          `json:"instruction"`
+	CurrentDocument map[string]any  `json:"current_document"`
+	BusinessContext string          `json:"business_context,omitempty"`
+	BrandProfile    string          `json:"brand_profile,omitempty"`
+	ContextChunks   []string        `json:"context_chunks,omitempty"`
+}
+
+func requestContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // PageEditResult is the output of AI page editing — returns the full modified document.

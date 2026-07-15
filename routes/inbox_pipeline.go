@@ -92,13 +92,13 @@ func processInboundEmail(tenantID bson.ObjectId, agent *pkgmodels.InboxAgent, ac
 	}
 	_ = db.GetCollection(pkgmodels.EmailThreadCollection).UpdateId(thread.Id, bson.M{"$set": bson.M{"last_message_at": now}})
 
-	classification := classifyInboundEmail(in.Subject + "\n" + in.BodyText)
+	classification := classifyInboundEmail(tenantID, in.Subject+"\n"+in.BodyText)
 	retrieved := retrieveInboxContextForAgent(tenantID, agent.Id, in.BodyText)
 	reply := generateInboxDraftReply(tenantID, agent, contact, classification, in.BodyText, retrieved)
 
 	var audit *pkgmodels.AIReplyAudit
 	if agent.DoubleCheckEnabled {
-		if dc := doubleCheckDraft(reply, in.BodyText, classification); dc != nil {
+		if dc := doubleCheckDraft(tenantID, reply, in.BodyText, classification); dc != nil {
 			if dc.SuggestedRevision != "" {
 				reply = dc.SuggestedRevision
 			}

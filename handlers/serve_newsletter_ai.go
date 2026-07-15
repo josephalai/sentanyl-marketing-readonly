@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,11 +25,11 @@ import (
 // free by piping through GeneratePage / EditPage with newsletter-flavored
 // prompts.
 func RegisterNewsletterAIRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.POST("/newsletters/:productId/posts/ai/generate", handleNewsletterAIGenerate)
-	tenantAPI.POST("/newsletters/:productId/posts/:postId/ai/edit", handleNewsletterAIEdit)
-	tenantAPI.POST("/newsletters/:productId/posts/ai/series", handleNewsletterAISeries)
-	tenantAPI.POST("/newsletters/:productId/posts/ai/series/preview-outline", handleNewsletterAISeriesPreview)
-	tenantAPI.POST("/newsletters/:productId/preview-ai", handleNewsletterAIPreview)
+	tenantAPI.POST("/newsletters/:productId/posts/ai/generate", GovernAI("newsletter.generate", 16384), handleNewsletterAIGenerate)
+	tenantAPI.POST("/newsletters/:productId/posts/:postId/ai/edit", GovernAI("newsletter.edit", 16384), handleNewsletterAIEdit)
+	tenantAPI.POST("/newsletters/:productId/posts/ai/series", GovernAI("newsletter.series", 32768), handleNewsletterAISeries)
+	tenantAPI.POST("/newsletters/:productId/posts/ai/series/preview-outline", GovernAI("newsletter.series.outline", 4096), handleNewsletterAISeriesPreview)
+	tenantAPI.POST("/newsletters/:productId/preview-ai", GovernAI("newsletter.preview", 1024), handleNewsletterAIPreview)
 }
 
 type newsletterGenerateReq struct {
@@ -77,7 +78,7 @@ func handleNewsletterAIGenerate(c *gin.Context) {
 	if perr != nil || provider == nil {
 		log.Printf("newsletter AI: no provider configured, returning stub draft (%v)", perr)
 		doc = stubPuckDoc(req)
-	} else if d, err := provider.GeneratePage(ai.SitePageRequest{Prompt: puckPrompt}); err != nil {
+	} else if d, err := provider.GeneratePage(ai.SitePageRequest{Ctx: aiRequestContext(c), Prompt: puckPrompt}); err != nil {
 		log.Printf("newsletter AI generation failed, returning stub: %v", err)
 		doc = stubPuckDoc(req)
 	} else {
@@ -135,6 +136,7 @@ func handleNewsletterAIEdit(c *gin.Context) {
 		return
 	}
 	result, err := provider.EditPage(ai.PageEditRequest{
+		Ctx:             aiRequestContext(c),
 		Instruction:     "Edit this newsletter post: " + req.Instruction,
 		CurrentDocument: req.CurrentDocument,
 	})
@@ -240,15 +242,15 @@ func ensureNewsletterProduct(tenantID bson.ObjectId, productIDHex string) error 
 const seriesMaxIssueCount = 24
 
 type seriesGenerateReq struct {
-	Topic           string   `json:"topic"`
-	Audience        string   `json:"audience"`
-	Outcome         string   `json:"outcome"`
-	Tone            string   `json:"tone"`
-	Count           int      `json:"count"`
-	ScheduleMode    string   `json:"schedule_mode"` // "absolute" | "drip"
-	StartAt         string   `json:"start_at"`      // ISO8601, absolute mode
-	CadenceDays     int      `json:"cadence_days"`
-	ContextPackIDs  []string `json:"context_pack_ids"` // public_id or hex; either accepted
+	Topic          string   `json:"topic"`
+	Audience       string   `json:"audience"`
+	Outcome        string   `json:"outcome"`
+	Tone           string   `json:"tone"`
+	Count          int      `json:"count"`
+	ScheduleMode   string   `json:"schedule_mode"` // "absolute" | "drip"
+	StartAt        string   `json:"start_at"`      // ISO8601, absolute mode
+	CadenceDays    int      `json:"cadence_days"`
+	ContextPackIDs []string `json:"context_pack_ids"` // public_id or hex; either accepted
 }
 
 // handleNewsletterAISeries materialises N scheduled (or drip) posts grounded
@@ -317,10 +319,10 @@ func handleNewsletterAISeries(c *gin.Context) {
 
 	// Pass 1: outline
 	provider, _ := ai.GetConfiguredProvider()
-	outline := generateSeriesOutline(provider, req, refText)
+	outline := generateSeriesOutline(aiRequestContext(c), provider, req, refText)
 
 	// Pass 2: per-issue content (parallel pool)
-	docs := generateSeriesPostDocs(provider, req, outline, refText)
+	docs := generateSeriesPostDocs(aiRequestContext(c), provider, req, outline, refText)
 
 	// Materialise N posts.
 	seriesID := generatePublicID()
@@ -390,16 +392,17 @@ func handleNewsletterAISeriesPreview(c *gin.Context) {
 	}
 	_, refText := loadSeriesContextPacks(tenantID, &product, req.ContextPackIDs)
 	provider, _ := ai.GetConfiguredProvider()
-	outline := generateSeriesOutline(provider, req, refText)
+	outline := generateSeriesOutline(aiRequestContext(c), provider, req, refText)
 	c.JSON(http.StatusOK, gin.H{"outline": outline})
 }
 
 // generateSeriesOutline calls the LLM for the outline pass. Falls back to
 // a deterministic plan if the provider is missing or fails — same pattern
 // LMS uses, so the tenant always gets something to iterate on.
-func generateSeriesOutline(provider ai.SiteAIProvider, req seriesGenerateReq, refText string) *ai.SeriesOutlineResponse {
+func generateSeriesOutline(ctx context.Context, provider ai.SiteAIProvider, req seriesGenerateReq, refText string) *ai.SeriesOutlineResponse {
 	if provider != nil {
 		out, err := provider.GenerateNewsletterSeriesOutline(ai.SeriesOutlineRequest{
+			Ctx:           ctx,
 			Topic:         req.Topic,
 			Audience:      req.Audience,
 			Outcome:       req.Outcome,
@@ -443,7 +446,7 @@ type generatedPost struct {
 // generateSeriesPostDocs runs per-issue content generation in parallel
 // (concurrency 4 — same shape LMS uses for lesson bodies). Failed slots
 // fall back to a stub doc with NeedsReview=true.
-func generateSeriesPostDocs(provider ai.SiteAIProvider, req seriesGenerateReq, outline *ai.SeriesOutlineResponse, refText string) []generatedPost {
+func generateSeriesPostDocs(ctx context.Context, provider ai.SiteAIProvider, req seriesGenerateReq, outline *ai.SeriesOutlineResponse, refText string) []generatedPost {
 	results := make([]generatedPost, len(outline.Issues))
 	if provider == nil {
 		for i, issue := range outline.Issues {
@@ -469,6 +472,7 @@ func generateSeriesPostDocs(provider ai.SiteAIProvider, req seriesGenerateReq, o
 			defer wg.Done()
 			for j := range jobs {
 				doc, err := provider.GenerateNewsletterPostFromBrief(ai.PostFromBriefRequest{
+					Ctx:           ctx,
 					SeriesTitle:   outline.SeriesTitle,
 					IssueTitle:    j.issue.Title,
 					IssueBrief:    j.issue.Brief,
@@ -596,6 +600,7 @@ func handleNewsletterAIPreview(c *gin.Context) {
 		return
 	}
 	value, err := provider.GenerateText(ai.GenerateTextRequest{
+		Ctx:           aiRequestContext(c),
 		Prompt:        req.Prompt,
 		ReferenceText: refText,
 	})

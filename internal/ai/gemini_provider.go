@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +26,7 @@ func NewGeminiProvider(apiKey, model string) *GeminiProvider {
 
 func (p *GeminiProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
 	prompt := BuildSiteHTMLPrompt(req)
-	resp, err := p.generateContentPlain(prompt, 4096)
+	resp, err := p.generateContentPlain(req.Ctx, prompt, 4096)
 	if err != nil {
 		return "", err
 	}
@@ -41,7 +42,7 @@ func (p *GeminiProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
 
 func (p *GeminiProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGenerationResult, error) {
 	prompt := BuildSiteDuplicatePrompt(req)
-	resp, err := p.generateContent(siteDuplicateSystemPrompt + "\n\n" + prompt)
+	resp, err := p.generateContent(req.Ctx, siteDuplicateSystemPrompt+"\n\n"+prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +52,7 @@ func (p *GeminiProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGeneratio
 func (p *GeminiProvider) GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error) {
 	prompt := buildSiteGenerationPrompt(req)
 	fullPrompt := siteGenerationSystemPrompt + "\n\n" + prompt
-	resp, err := p.generateContent(fullPrompt)
+	resp, err := p.generateContent(req.Ctx, fullPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +66,7 @@ func (p *GeminiProvider) GenerateSite(req SiteGenerationRequest) (*SiteGeneratio
 func (p *GeminiProvider) GeneratePage(req SitePageRequest) (map[string]any, error) {
 	prompt := buildPageGenerationPrompt(req)
 	fullPrompt := pageGenerationSystemPrompt + "\n\n" + prompt
-	resp, err := p.generateContent(fullPrompt)
+	resp, err := p.generateContent(req.Ctx, fullPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,7 @@ func (p *GeminiProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 	docJSON, _ := json.Marshal(req.CurrentDocument)
 	prompt := buildEditPagePrompt(req, string(docJSON))
 	fullPrompt := pageEditSystemPrompt + "\n\n" + prompt
-	resp, err := p.generateContent(fullPrompt)
+	resp, err := p.generateContent(req.Ctx, fullPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +94,7 @@ func (p *GeminiProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 
 func (p *GeminiProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggestion, error) {
 	prompt := buildSuggestPagesPrompt(req.ProductSummary)
-	resp, err := p.generateContent(suggestPagesSystemPrompt + "\n\n" + prompt)
+	resp, err := p.generateContent(req.Ctx, suggestPagesSystemPrompt+"\n\n"+prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +108,7 @@ func (p *GeminiProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenera
 		systemPrompt = campaignEmailSystemPrompt
 		prompt = buildCampaignGenerationPrompt(req)
 	}
-	resp, err := p.generateContent(systemPrompt + "\n\n" + prompt)
+	resp, err := p.generateContent(req.Ctx, systemPrompt+"\n\n"+prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +121,7 @@ func (p *GeminiProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenera
 
 func (p *GeminiProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult, error) {
 	prompt := buildEmailEditPrompt(req)
-	resp, err := p.generateContent(emailGenerationSystemPrompt + "\n\n" + prompt)
+	resp, err := p.generateContent(req.Ctx, emailGenerationSystemPrompt+"\n\n"+prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +134,7 @@ func (p *GeminiProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult
 
 func (p *GeminiProvider) GenerateText(req GenerateTextRequest) (string, error) {
 	prompt := aiTextSystemPrompt + "\n\n" + buildAITextPrompt(req)
-	resp, err := p.generateContentPlain(prompt, req.MaxTokens)
+	resp, err := p.generateContentPlain(req.Ctx, prompt, req.MaxTokens)
 	if err != nil {
 		return "", err
 	}
@@ -141,7 +142,7 @@ func (p *GeminiProvider) GenerateText(req GenerateTextRequest) (string, error) {
 }
 
 func (p *GeminiProvider) GenerateNewsletterSeriesOutline(req SeriesOutlineRequest) (*SeriesOutlineResponse, error) {
-	resp, err := p.generateContent(seriesOutlineSystemPrompt + "\n\n" + buildSeriesOutlinePrompt(req))
+	resp, err := p.generateContent(req.Ctx, seriesOutlineSystemPrompt+"\n\n"+buildSeriesOutlinePrompt(req))
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +154,7 @@ func (p *GeminiProvider) GenerateNewsletterSeriesOutline(req SeriesOutlineReques
 }
 
 func (p *GeminiProvider) GenerateNewsletterPostFromBrief(req PostFromBriefRequest) (map[string]any, error) {
-	resp, err := p.generateContent(postFromBriefSystemPrompt + "\n\n" + buildPostFromBriefPrompt(req))
+	resp, err := p.generateContent(req.Ctx, postFromBriefSystemPrompt+"\n\n"+buildPostFromBriefPrompt(req))
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +165,7 @@ func (p *GeminiProvider) GenerateNewsletterPostFromBrief(req PostFromBriefReques
 	return result, nil
 }
 
-func (p *GeminiProvider) generateContent(prompt string) (string, error) {
+func (p *GeminiProvider) generateContent(ctx context.Context, prompt string) (string, error) {
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", p.Model, p.APIKey)
 
 	reqBody := map[string]any{
@@ -186,7 +187,7 @@ func (p *GeminiProvider) generateContent(prompt string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestContext(ctx), "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -228,7 +229,7 @@ func (p *GeminiProvider) generateContent(prompt string) (string, error) {
 
 // generateContentPlain is the same Gemini call without forcing JSON
 // response_mime_type, used by GenerateText so the model can emit bare prose.
-func (p *GeminiProvider) generateContentPlain(prompt string, maxTokens int) (string, error) {
+func (p *GeminiProvider) generateContentPlain(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	if maxTokens <= 0 {
 		maxTokens = 220
 	}
@@ -257,7 +258,7 @@ func (p *GeminiProvider) generateContentPlain(prompt string, maxTokens int) (str
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestContext(ctx), "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}

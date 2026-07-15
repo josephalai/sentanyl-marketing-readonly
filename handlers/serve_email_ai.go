@@ -15,8 +15,8 @@ import (
 
 // RegisterEmailAIRoutes wires AI email generation endpoints.
 func RegisterEmailAIRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.POST("/email-ai/generate", handleAIGenerateEmail)
-	tenantAPI.POST("/email-ai/edit", handleAIEditEmail)
+	tenantAPI.POST("/email-ai/generate", GovernAI("email.generate", 4096), handleAIGenerateEmail)
+	tenantAPI.POST("/email-ai/edit", GovernAI("email.edit", 4096), handleAIEditEmail)
 }
 
 // resolveContextPacks fetches context pack chunks for the given public IDs.
@@ -102,6 +102,7 @@ func handleAIGenerateEmail(c *gin.Context) {
 	brandProfile := resolveBrandProfile(tenantID)
 
 	result, err := provider.GenerateEmail(ai.EmailGenerationRequest{
+		Ctx:           aiRequestContext(c),
 		Instruction:   req.Instruction,
 		ContextChunks: chunks,
 		BrandProfile:  brandProfile,
@@ -147,6 +148,7 @@ func handleAIEditEmail(c *gin.Context) {
 	brandProfile := resolveBrandProfile(tenantID)
 
 	result, err := provider.EditEmail(ai.EmailEditRequest{
+		Ctx:            aiRequestContext(c),
 		Instruction:    req.Instruction,
 		CurrentSubject: req.CurrentSubject,
 		CurrentBody:    req.CurrentBody,

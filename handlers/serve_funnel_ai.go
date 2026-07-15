@@ -19,7 +19,7 @@ import (
 
 // RegisterFunnelAIRoutes wires AI funnel generation from template.
 func RegisterFunnelAIRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.POST("/funnel-ai/generate-from-template", handleAIGenerateFunnelFromTemplate)
+	tenantAPI.POST("/funnel-ai/generate-from-template", GovernAI("funnel.generate", 4096), handleAIGenerateFunnelFromTemplate)
 	tenantAPI.GET("/funnel-ai/templates", handleListFunnelTemplatesForAI)
 	tenantAPI.GET("/funnel-ai/default-template", handleGetDefaultTemplate)
 	tenantAPI.POST("/funnel-ai/materialize", handleMaterializeFunnelTemplate)
@@ -60,9 +60,9 @@ func handleGetDefaultTemplate(c *gin.Context) {
 
 	// System default — DefaultForPageType matching kind across any tenant.
 	if err := col.Find(bson.M{
-		"template_kind":          kind,
-		"default_for_page_type":  kind,
-		"timestamps.deleted_at":  nil,
+		"template_kind":         kind,
+		"default_for_page_type": kind,
+		"timestamps.deleted_at": nil,
 	}).One(&t); err == nil {
 		c.JSON(http.StatusOK, t)
 		return
@@ -219,6 +219,7 @@ func handleAIGenerateFunnelFromTemplate(c *gin.Context) {
 	// Build slot-aware prompt
 	prompt := buildFunnelSlotPrompt(req.Instruction, tmpl, chunks, brandProfile)
 	result, err := provider.GenerateEmail(ai.EmailGenerationRequest{
+		Ctx:           aiRequestContext(c),
 		Instruction:   prompt,
 		ContextChunks: nil, // already embedded in prompt
 		BrandProfile:  "",

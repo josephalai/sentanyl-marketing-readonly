@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -121,7 +122,7 @@ Classification: category=%s risk=%s. The drafted reply disposition is %q.`,
 		msg.FromName, msg.FromEmail, msg.Subject, truncate(msg.BodyText, 800),
 		c.PrimaryCategory, c.RiskLevel, draft.RecommendedAction)
 
-	raw, err := provider.GenerateText(ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 300})
+	raw, err := governedGenerateText(context.Background(), agent.TenantID, "inbox.actions", provider, ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 300})
 	if err != nil {
 		return fallbackInboxActions(agent, contact, thread, msg, draft)
 	}

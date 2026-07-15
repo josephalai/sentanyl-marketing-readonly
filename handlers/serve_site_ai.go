@@ -45,13 +45,13 @@ func recordSiteAIExecution(c *gin.Context, tenantID bson.ObjectId, surface strin
 
 // RegisterSiteAIRoutes registers AI generation/editing routes.
 func RegisterSiteAIRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.POST("/sites/:siteId/ai-generate", handleAIGenerateSite)
-	tenantAPI.POST("/sites/:siteId/pages/:pageId/ai-generate", handleAIGeneratePage)
-	tenantAPI.POST("/sites/:siteId/pages/:pageId/ai-edit", handleAIEditPage)
+	tenantAPI.POST("/sites/:siteId/ai-generate", GovernAI("site.generate", 16384), handleAIGenerateSite)
+	tenantAPI.POST("/sites/:siteId/pages/:pageId/ai-generate", GovernAI("site.page.generate", 16384), handleAIGeneratePage)
+	tenantAPI.POST("/sites/:siteId/pages/:pageId/ai-edit", GovernAI("site.page.edit", 16384), handleAIEditPage)
 	tenantAPI.POST("/sites/:siteId/pages/:pageId/patch", handlePatchPage)
-	tenantAPI.POST("/sites/:siteId/ai-generate-from-products", handleGenerateFromProducts)
-	tenantAPI.GET("/sites/:siteId/suggest-pages", handleSuggestPages)
-	tenantAPI.POST("/sites/:siteId/steal-style", handleStealStyle)
+	tenantAPI.POST("/sites/:siteId/ai-generate-from-products", GovernAI("site.products.generate", 16384), handleGenerateFromProducts)
+	tenantAPI.GET("/sites/:siteId/suggest-pages", GovernAI("site.pages.suggest", 2048), handleSuggestPages)
+	tenantAPI.POST("/sites/:siteId/steal-style", GovernAI("site.style.extract", 2048), handleStealStyle)
 }
 
 func handleAIGenerateSite(c *gin.Context) {
@@ -75,12 +75,6 @@ func handleAIGenerateSite(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI provider not configured"})
 		return
 	}
-	// AI-005: per-tenant daily AI-op budget.
-	if aigov.BudgetExceeded(tenantID) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "daily AI generation limit reached for this workspace"})
-		return
-	}
-
 	var req ai.SiteGenerationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -88,6 +82,7 @@ func handleAIGenerateSite(c *gin.Context) {
 	}
 
 	req.BusinessContext = fetchSiteAIContext(tenantID, req.ContextChunks)
+	req.Ctx = aiRequestContext(c)
 
 	result, err := provider.GenerateSite(req)
 	if err != nil {
@@ -198,12 +193,6 @@ func handleAIGeneratePage(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI provider not configured"})
 		return
 	}
-	// AI-005: per-tenant daily AI-op budget.
-	if aigov.BudgetExceeded(tenantID) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "daily AI generation limit reached for this workspace"})
-		return
-	}
-
 	var req struct {
 		Prompt         string   `json:"prompt" binding:"required"`
 		ContextPackIDs []string `json:"context_pack_ids"`
@@ -215,6 +204,7 @@ func handleAIGeneratePage(c *gin.Context) {
 
 	bizCtx := fetchSiteAIContext(tenantID, req.ContextPackIDs)
 	doc, err := provider.GeneratePage(ai.SitePageRequest{
+		Ctx:             aiRequestContext(c),
 		Prompt:          req.Prompt,
 		BusinessContext: bizCtx,
 	})
@@ -265,12 +255,6 @@ func handleAIEditPage(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI provider not configured"})
 		return
 	}
-	// AI-005: per-tenant daily AI-op budget.
-	if aigov.BudgetExceeded(tenantID) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "daily AI generation limit reached for this workspace"})
-		return
-	}
-
 	var req struct {
 		Instruction    string   `json:"instruction" binding:"required"`
 		ContextPackIDs []string `json:"context_pack_ids"`
@@ -292,6 +276,7 @@ func handleAIEditPage(c *gin.Context) {
 
 	bizCtx := fetchSiteAIContext(tenantID, req.ContextPackIDs)
 	editReq := ai.PageEditRequest{
+		Ctx:             aiRequestContext(c),
 		Instruction:     req.Instruction,
 		CurrentDocument: currentDoc,
 		BusinessContext: bizCtx,
@@ -417,6 +402,7 @@ func handleGenerateFromProducts(c *gin.Context) {
 	prompt := ai.BuildGenerateFromProductsPrompt(productDetails, req.PageType)
 
 	doc, err := provider.GeneratePage(ai.SitePageRequest{
+		Ctx:             aiRequestContext(c),
 		Prompt:          prompt,
 		BusinessContext: bizCtx,
 	})
@@ -443,7 +429,7 @@ func handleSuggestPages(c *gin.Context) {
 	}
 
 	summary := buildProductSummaryForSuggest(tenantID)
-	suggestions, err := provider.SuggestPages(ai.SitePageSuggestRequest{ProductSummary: summary})
+	suggestions, err := provider.SuggestPages(ai.SitePageSuggestRequest{Ctx: aiRequestContext(c), ProductSummary: summary})
 	if err != nil {
 		log.Printf("AI suggest-pages failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI suggestion failed"})
@@ -500,6 +486,7 @@ func handleStealStyle(c *gin.Context) {
 	}
 
 	styleJSON, err := provider.GenerateText(ai.GenerateTextRequest{
+		Ctx:       aiRequestContext(c),
 		Prompt:    fmt.Sprintf("Extract design tokens from this CSS:\n\n%s", cssContent),
 		MaxTokens: 300,
 	})

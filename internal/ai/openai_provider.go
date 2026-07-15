@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,7 +34,7 @@ func (p *OpenAIProvider) GenerateSiteHTML(req SiteHTMLRequest) (string, error) {
 	var err error
 
 	// Always use text-only generation — vision requests get refused for web cloning tasks.
-	resp, err = p.chatCompletionPlain(prompt,
+	resp, err = p.chatCompletionPlain(req.Ctx, prompt,
 		"You are an expert frontend developer. Generate production-quality HTML+CSS from the provided website content and design specifications. Return ONLY the complete HTML document starting with <!DOCTYPE html>. No explanation, no code blocks, no markdown fences — just the HTML.",
 		8192)
 	if err != nil {
@@ -89,7 +90,7 @@ The screenshot is the home page only. For nav-derived inner pages, you still syn
 // screenshot is available — the model reconciles structured-text sections
 // with what it actually sees in the screenshot, which is the largest
 // single fidelity lift over text-only cloning.
-func (p *OpenAIProvider) chatCompletionVisionJSON(userText, systemMessage, imageB64 string) (string, error) {
+func (p *OpenAIProvider) chatCompletionVisionJSON(ctx context.Context, userText, systemMessage, imageB64 string) (string, error) {
 	systemMsg := map[string]any{
 		"role":    "system",
 		"content": systemMessage,
@@ -112,7 +113,7 @@ func (p *OpenAIProvider) chatCompletionVisionJSON(userText, systemMessage, image
 		"max_tokens":      16384,
 	}
 	bodyBytes, _ := json.Marshal(reqBody)
-	httpReq, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestContext(ctx), "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
@@ -132,7 +133,9 @@ func (p *OpenAIProvider) chatCompletionVisionJSON(userText, systemMessage, image
 	}
 	var apiResp struct {
 		Choices []struct {
-			Message struct{ Content string `json:"content"` } `json:"message"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBytes, &apiResp); err != nil || len(apiResp.Choices) == 0 {
@@ -142,7 +145,7 @@ func (p *OpenAIProvider) chatCompletionVisionJSON(userText, systemMessage, image
 }
 
 // chatCompletionVision sends a vision request to GPT-4o with an image.
-func (p *OpenAIProvider) chatCompletionVision(userText, imageB64 string) (string, error) {
+func (p *OpenAIProvider) chatCompletionVision(ctx context.Context, userText, imageB64 string) (string, error) {
 	systemMsg := map[string]string{
 		"role":    "system",
 		"content": "You are an expert web designer. Given a screenshot and content from a website, generate production-quality HTML+CSS that replicates it as closely as possible. Return ONLY the HTML starting with <!DOCTYPE html>.",
@@ -167,7 +170,7 @@ func (p *OpenAIProvider) chatCompletionVision(userText, imageB64 string) (string
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
-	httpReq, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestContext(ctx), "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
@@ -190,7 +193,9 @@ func (p *OpenAIProvider) chatCompletionVision(userText, imageB64 string) (string
 
 	var apiResp struct {
 		Choices []struct {
-			Message struct{ Content string `json:"content"` } `json:"message"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBytes, &apiResp); err != nil || len(apiResp.Choices) == 0 {
@@ -211,13 +216,13 @@ func (p *OpenAIProvider) DuplicateSite(req SiteDuplicateRequest) (*SiteGeneratio
 	var resp string
 	var err error
 	if req.ScreenshotB64 != "" {
-		resp, err = p.chatCompletionVisionJSON(prompt, siteDuplicateSystemPrompt+visionAddendum, req.ScreenshotB64)
+		resp, err = p.chatCompletionVisionJSON(req.Ctx, prompt, siteDuplicateSystemPrompt+visionAddendum, req.ScreenshotB64)
 		if err != nil {
 			log.Printf("DuplicateSite: vision call failed (%v) — falling back to text-only", err)
-			resp, err = p.chatCompletion(prompt, siteDuplicateSystemPrompt)
+			resp, err = p.chatCompletion(req.Ctx, prompt, siteDuplicateSystemPrompt)
 		}
 	} else {
-		resp, err = p.chatCompletion(prompt, siteDuplicateSystemPrompt)
+		resp, err = p.chatCompletion(req.Ctx, prompt, siteDuplicateSystemPrompt)
 	}
 	if err != nil {
 		return nil, err
@@ -469,7 +474,7 @@ func normalizePage(p map[string]json.RawMessage) *PageGenerationResult {
 
 func (p *OpenAIProvider) GenerateSite(req SiteGenerationRequest) (*SiteGenerationResult, error) {
 	prompt := buildSiteGenerationPrompt(req)
-	resp, err := p.chatCompletion(prompt, siteGenerationSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, prompt, siteGenerationSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +483,7 @@ func (p *OpenAIProvider) GenerateSite(req SiteGenerationRequest) (*SiteGeneratio
 
 func (p *OpenAIProvider) GeneratePage(req SitePageRequest) (map[string]any, error) {
 	prompt := buildPageGenerationPrompt(req)
-	resp, err := p.chatCompletion(prompt, pageGenerationSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, prompt, pageGenerationSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +497,7 @@ func (p *OpenAIProvider) GeneratePage(req SitePageRequest) (map[string]any, erro
 func (p *OpenAIProvider) EditPage(req PageEditRequest) (*PageEditResult, error) {
 	docJSON, _ := json.Marshal(req.CurrentDocument)
 	prompt := buildEditPagePrompt(req, string(docJSON))
-	resp, err := p.chatCompletion(prompt, pageEditSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, prompt, pageEditSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +510,7 @@ func (p *OpenAIProvider) EditPage(req PageEditRequest) (*PageEditResult, error) 
 
 func (p *OpenAIProvider) SuggestPages(req SitePageSuggestRequest) ([]PageSuggestion, error) {
 	prompt := buildSuggestPagesPrompt(req.ProductSummary)
-	resp, err := p.chatCompletion(prompt, suggestPagesSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, prompt, suggestPagesSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +524,7 @@ func (p *OpenAIProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenera
 		systemPrompt = campaignEmailSystemPrompt
 		prompt = buildCampaignGenerationPrompt(req)
 	}
-	resp, err := p.chatCompletion(prompt, systemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, prompt, systemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +537,7 @@ func (p *OpenAIProvider) GenerateEmail(req EmailGenerationRequest) (*EmailGenera
 
 func (p *OpenAIProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult, error) {
 	prompt := buildEmailEditPrompt(req)
-	resp, err := p.chatCompletion(prompt, emailGenerationSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, prompt, emailGenerationSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -547,7 +552,7 @@ func (p *OpenAIProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult
 // we explicitly do NOT request response_format=json_object so the model can
 // return bare prose.
 func (p *OpenAIProvider) GenerateText(req GenerateTextRequest) (string, error) {
-	resp, err := p.chatCompletionPlain(buildAITextPrompt(req), aiTextSystemPrompt, req.MaxTokens)
+	resp, err := p.chatCompletionPlain(req.Ctx, buildAITextPrompt(req), aiTextSystemPrompt, req.MaxTokens)
 	if err != nil {
 		return "", err
 	}
@@ -556,7 +561,7 @@ func (p *OpenAIProvider) GenerateText(req GenerateTextRequest) (string, error) {
 
 // GenerateNewsletterSeriesOutline returns the structured plan for a series.
 func (p *OpenAIProvider) GenerateNewsletterSeriesOutline(req SeriesOutlineRequest) (*SeriesOutlineResponse, error) {
-	resp, err := p.chatCompletion(buildSeriesOutlinePrompt(req), seriesOutlineSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, buildSeriesOutlinePrompt(req), seriesOutlineSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +575,7 @@ func (p *OpenAIProvider) GenerateNewsletterSeriesOutline(req SeriesOutlineReques
 // GenerateNewsletterPostFromBrief produces one issue's Puck doc from the
 // outline-stage brief. Returned doc plugs straight into the post's BodyDoc.
 func (p *OpenAIProvider) GenerateNewsletterPostFromBrief(req PostFromBriefRequest) (map[string]any, error) {
-	resp, err := p.chatCompletion(buildPostFromBriefPrompt(req), postFromBriefSystemPrompt)
+	resp, err := p.chatCompletion(req.Ctx, buildPostFromBriefPrompt(req), postFromBriefSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +586,7 @@ func (p *OpenAIProvider) GenerateNewsletterPostFromBrief(req PostFromBriefReques
 	return result, nil
 }
 
-func (p *OpenAIProvider) chatCompletion(userMessage, systemMessage string) (string, error) {
+func (p *OpenAIProvider) chatCompletion(ctx context.Context, userMessage, systemMessage string) (string, error) {
 	reqBody := map[string]any{
 		"model": p.Model,
 		"messages": []map[string]string{
@@ -602,7 +607,7 @@ func (p *OpenAIProvider) chatCompletion(userMessage, systemMessage string) (stri
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestContext(ctx), "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
@@ -645,7 +650,7 @@ func (p *OpenAIProvider) chatCompletion(userMessage, systemMessage string) (stri
 // the json_object response format, so the model can return bare prose. Used
 // for inline handlebar resolution where the result is substituted directly
 // into HTML.
-func (p *OpenAIProvider) chatCompletionPlain(userMessage, systemMessage string, maxTokens int) (string, error) {
+func (p *OpenAIProvider) chatCompletionPlain(ctx context.Context, userMessage, systemMessage string, maxTokens int) (string, error) {
 	if maxTokens <= 0 {
 		maxTokens = 220
 	}
@@ -662,7 +667,7 @@ func (p *OpenAIProvider) chatCompletionPlain(userMessage, systemMessage string, 
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
-	httpReq, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestContext(ctx), "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}

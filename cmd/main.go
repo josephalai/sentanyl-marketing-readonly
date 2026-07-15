@@ -73,6 +73,7 @@ func main() {
 	// AI executions are ledgered from the inbox/site AI paths (AI-001).
 	auth.EnsurePrincipalIndexes()
 	aigov.EnsureIndexes()
+	aigov.EnsureOperationIndexes()
 	// Migration control plane (MIG-001..005): source-map idempotency indexes
 	// + the durable execute job.
 	migration.EnsureIndexes()
@@ -202,6 +203,7 @@ func main() {
 	routes.RegisterEcommerceRoutes(tenantAPI)
 	routes.RegisterInboxCloserRoutes(tenantAPI)
 	routes.RegisterTodoRoutes(tenantAPI)
+	handlers.RegisterAIOperationRoutes(tenantAPI)
 	// Outbound webhook CRUD — was on the public group scoped by a trusted
 	// subscriber_id query param; now JWT-scoped and tenant-authed.
 	routes.RegisterOutboundWebhookRoutes(tenantAPI)
@@ -248,6 +250,7 @@ func main() {
 	handlers.RegisterAnalyticsRoutes(legacyTenantAPI)
 
 	// Email AI generation and editing.
+	handlers.RegisterAIOperationRoutes(legacyTenantAPI)
 	handlers.RegisterEmailAIRoutes(legacyTenantAPI)
 
 	// Campaigns — one-off email sends with badge-defined audience.

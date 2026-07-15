@@ -2,9 +2,9 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"context"
 	"io"
 	"log"
 	"net/http"
@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/josephalai/sentanyl/pkg/egress"
 	"github.com/gin-gonic/gin"
+	"github.com/josephalai/sentanyl/pkg/egress"
 	"gopkg.in/mgo.v2/bson"
 
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
@@ -27,7 +27,7 @@ import (
 
 // RegisterSiteDuplicateRoutes registers the site cloning endpoint.
 func RegisterSiteDuplicateRoutes(tenantAPI *gin.RouterGroup) {
-	tenantAPI.POST("/sites/duplicate-from-url", handleDuplicateSiteFromURL)
+	tenantAPI.POST("/sites/duplicate-from-url", GovernAI("site.duplicate", 16384), handleDuplicateSiteFromURL)
 }
 
 func handleDuplicateSiteFromURL(c *gin.Context) {
@@ -82,6 +82,7 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 	}
 
 	dupReq := ai.SiteDuplicateRequest{
+		Ctx:            aiRequestContext(c),
 		SourceURL:      req.URL,
 		SiteName:       siteName,
 		NavLinks:       extracted.NavLinks,
@@ -176,12 +177,12 @@ func handleDuplicateSiteFromURL(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":        "ok",
-		"site_id":       newSite.Id.Hex(),
+		"status":         "ok",
+		"site_id":        newSite.Id.Hex(),
 		"site_public_id": newSite.PublicId,
-		"site_name":     siteName,
-		"pages_created": len(createdPages),
-		"style":         newSite.GlobalStyle,
+		"site_name":      siteName,
+		"pages_created":  len(createdPages),
+		"style":          newSite.GlobalStyle,
 	})
 }
 
@@ -216,13 +217,13 @@ func crawlViaSandboxOrDirect(targetURL string) (*crawledSite, error) {
 
 // sandboxResponse mirrors the JSON returned by site-sandbox/server.js.
 type sandboxResponse struct {
-	Title          string           `json:"title"`
-	MetaDesc       string           `json:"metaDesc"`
-	NavLinks       []sandboxNavLink `json:"navLinks"`
-	Colors         []string         `json:"colors"`
-	Fonts          []string         `json:"fonts"`
-	Sections       []sandboxSection `json:"sections"`
-	ScreenshotB64  string           `json:"screenshotBase64"`
+	Title         string           `json:"title"`
+	MetaDesc      string           `json:"metaDesc"`
+	NavLinks      []sandboxNavLink `json:"navLinks"`
+	Colors        []string         `json:"colors"`
+	Fonts         []string         `json:"fonts"`
+	Sections      []sandboxSection `json:"sections"`
+	ScreenshotB64 string           `json:"screenshotBase64"`
 }
 
 type sandboxNavLink struct {
@@ -231,23 +232,23 @@ type sandboxNavLink struct {
 }
 
 type sandboxSection struct {
-	Heading            string             `json:"heading"`
-	HeadingLevel       int                `json:"headingLevel"`
-	HeadingAccentColor string             `json:"headingAccentColor"`
-	Body               string             `json:"body"`
-	ImageURL           string             `json:"imageURL"`
-	ImageAlt           string             `json:"imageAlt"`
-	ImageWidth         int                `json:"imageWidth"`
-	ImageHeight        int                `json:"imageHeight"`
-	ImagePosition      string             `json:"imagePosition"`
-	CTAText            string             `json:"ctaText"`
-	CTAUrl             string             `json:"ctaUrl"`
-	IsDark             bool               `json:"isDark"`
-	BgColor            string             `json:"bgColor"`
-	FormType           string             `json:"formType"`
-	FormButtonText     string             `json:"formButtonText"`
-	FormHasName        bool               `json:"formHasName"`
-	GridItems          []sandboxGridItem  `json:"gridItems"`
+	Heading            string            `json:"heading"`
+	HeadingLevel       int               `json:"headingLevel"`
+	HeadingAccentColor string            `json:"headingAccentColor"`
+	Body               string            `json:"body"`
+	ImageURL           string            `json:"imageURL"`
+	ImageAlt           string            `json:"imageAlt"`
+	ImageWidth         int               `json:"imageWidth"`
+	ImageHeight        int               `json:"imageHeight"`
+	ImagePosition      string            `json:"imagePosition"`
+	CTAText            string            `json:"ctaText"`
+	CTAUrl             string            `json:"ctaUrl"`
+	IsDark             bool              `json:"isDark"`
+	BgColor            string            `json:"bgColor"`
+	FormType           string            `json:"formType"`
+	FormButtonText     string            `json:"formButtonText"`
+	FormHasName        bool              `json:"formHasName"`
+	GridItems          []sandboxGridItem `json:"gridItems"`
 }
 
 type sandboxGridItem struct {
@@ -582,7 +583,10 @@ func extractHexColors(css string) []string {
 		}
 		counts[c]++
 	}
-	type kv struct{ k string; v int }
+	type kv struct {
+		k string
+		v int
+	}
 	var sorted []kv
 	for k, v := range counts {
 		sorted = append(sorted, kv{k, v})
@@ -675,4 +679,3 @@ func minInt(a, b int) int {
 	}
 	return b
 }
-

@@ -1,14 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/josephalai/sentanyl/pkg/aigov"
 	"github.com/josephalai/sentanyl/pkg/db"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
@@ -24,6 +27,72 @@ func jsonMarshalImpl(v interface{}) ([]byte, error) { return json.Marshal(v) }
 func RegisterE2ETestRoutes(rg *gin.RouterGroup) {
 	rg.POST("/simulate-purchase", handleSimulatePurchase)
 	rg.POST("/simulate-refund", handleSimulateRefund)
+	rg.POST("/ai-operation", handleE2EAIOperation)
+	rg.POST("/ai-operation/:publicId/cancel", handleE2ECancelAIOperation)
+}
+
+type e2eAIOperationRequest struct {
+	TenantID     string `json:"tenant_id" binding:"required"`
+	Surface      string `json:"surface"`
+	InputChars   int64  `json:"input_chars"`
+	OutputTokens int64  `json:"output_tokens"`
+	HoldMillis   int64  `json:"hold_millis"`
+}
+
+// handleE2EAIOperation drives the production admission/lease/cancellation
+// kernel without spending provider tokens. It exists only in E2E mode.
+func handleE2EAIOperation(c *gin.Context) {
+	if os.Getenv("SENTANYL_E2E_MODE") != "1" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "e2e mode disabled"})
+		return
+	}
+	var req e2eAIOperationRequest
+	if err := c.ShouldBindJSON(&req); err != nil || !bson.IsObjectIdHex(req.TenantID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid tenant_id required"})
+		return
+	}
+	if req.Surface == "" {
+		req.Surface = "e2e.audit"
+	}
+	op, err := aigov.Begin(bson.ObjectIdHex(req.TenantID), req.Surface, aigov.Estimate{
+		InputCharacters: req.InputChars, OutputTokens: req.OutputTokens,
+	}, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := aigov.Context(context.Background(), op)
+	defer cancel()
+	if req.HoldMillis > 0 {
+		select {
+		case <-time.After(time.Duration(req.HoldMillis) * time.Millisecond):
+		case <-ctx.Done():
+			_ = aigov.Fail(op, ctx.Err(), time.Now().UTC())
+			c.JSON(http.StatusConflict, gin.H{"public_id": op.PublicID, "status": pkgmodels.AIOperationCanceled})
+			return
+		}
+	}
+	_ = aigov.Complete(op, aigov.Usage{}, time.Now().UTC())
+	c.JSON(http.StatusOK, gin.H{"public_id": op.PublicID, "status": pkgmodels.AIOperationCompleted})
+}
+
+func handleE2ECancelAIOperation(c *gin.Context) {
+	if os.Getenv("SENTANYL_E2E_MODE") != "1" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "e2e mode disabled"})
+		return
+	}
+	var req struct {
+		TenantID string `json:"tenant_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || !bson.IsObjectIdHex(req.TenantID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid tenant_id required"})
+		return
+	}
+	if err := aigov.RequestCancel(bson.ObjectIdHex(req.TenantID), c.Param("publicId"), time.Now().UTC()); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "active AI operation not found"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": pkgmodels.AIOperationCancelRequested})
 }
 
 // handleSimulateRefund drives the production refund handler with a synthetic

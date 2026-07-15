@@ -15,8 +15,8 @@ import (
 
 // RegisterCampaignAIRoutes wires AI generate/edit for campaigns.
 func RegisterCampaignAIRoutes(rg *gin.RouterGroup) {
-	rg.POST("/campaigns/ai-generate", handleAIGenerateCampaign)
-	rg.POST("/campaigns/:publicId/ai-edit-body", handleAIEditCampaignBody)
+	rg.POST("/campaigns/ai-generate", GovernAI("campaign.generate", 4096), handleAIGenerateCampaign)
+	rg.POST("/campaigns/:publicId/ai-edit-body", GovernAI("campaign.edit", 4096), handleAIEditCampaignBody)
 }
 
 // listTenantBadges returns badge identifiers (public_id and name) so the LLM
@@ -67,6 +67,7 @@ func handleAIGenerateCampaign(c *gin.Context) {
 	badges := listTenantBadges(tenantID)
 
 	result, err := provider.GenerateEmail(ai.EmailGenerationRequest{
+		Ctx:           aiRequestContext(c),
 		Instruction:   req.Instruction,
 		ContextChunks: chunks,
 		BrandProfile:  brandProfile,
@@ -119,6 +120,7 @@ func handleAIEditCampaignBody(c *gin.Context) {
 	brandProfile := resolveBrandProfile(tenantID)
 
 	result, err := provider.EditEmail(ai.EmailEditRequest{
+		Ctx:            aiRequestContext(c),
 		Instruction:    req.Instruction,
 		CurrentSubject: camp.Subject,
 		CurrentBody:    camp.Body,

@@ -15,16 +15,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/josephalai/sentanyl/marketing-service/internal/ai"
-	"github.com/josephalai/sentanyl/pkg/sendauth"
-	"github.com/josephalai/sentanyl/pkg/untrusted"
 	imapsync "github.com/josephalai/sentanyl/marketing-service/internal/imap"
 	"github.com/josephalai/sentanyl/pkg/auth"
-	"github.com/josephalai/sentanyl/pkg/emailer"
 	"github.com/josephalai/sentanyl/pkg/db"
+	"github.com/josephalai/sentanyl/pkg/emailer"
 	"github.com/josephalai/sentanyl/pkg/jobs"
 	"github.com/josephalai/sentanyl/pkg/mcptools"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 	"github.com/josephalai/sentanyl/pkg/plans"
+	"github.com/josephalai/sentanyl/pkg/sendauth"
+	"github.com/josephalai/sentanyl/pkg/untrusted"
 	"github.com/josephalai/sentanyl/pkg/utils"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -641,7 +641,7 @@ func handleInboxRegenerateDraft(c *gin.Context) {
 	}
 	_ = db.GetCollection(pkgmodels.EmailMessageCollection).FindId(draft.EmailMessageID).One(&message)
 	_ = db.GetCollection(pkgmodels.UserCollection).FindId(draft.ContactID).One(&contact)
-	classification := classifyInboundEmail(message.Subject + "\n" + message.BodyText)
+	classification := classifyInboundEmail(tenantID, message.Subject+"\n"+message.BodyText)
 	retrieved := retrieveInboxContext(tenantID, message.BodyText)
 	next := generateInboxDraftReply(tenantID, &agent, &contact, classification, message.BodyText, retrieved)
 	now := time.Now()
@@ -980,17 +980,17 @@ func findOrCreateThread(tenantID, accountID bson.ObjectId, providerThreadID, sub
 	return &thread, nil
 }
 
-func classifyInboundEmail(text string) inboxClassification {
+func classifyInboundEmail(tenantID bson.ObjectId, text string) inboxClassification {
 	// Try LLM first; fall back to keyword heuristics.
 	if provider, err := ai.GetConfiguredProvider(); err == nil && provider != nil {
-		if clf, err := classifyWithAI(provider, text); err == nil {
+		if clf, err := classifyWithAI(tenantID, provider, text); err == nil {
 			return clf
 		}
 	}
 	return classifyKeyword(text)
 }
 
-func classifyWithAI(provider ai.SiteAIProvider, text string) (inboxClassification, error) {
+func classifyWithAI(tenantID bson.ObjectId, provider ai.SiteAIProvider, text string) (inboxClassification, error) {
 	prompt := `Classify this inbound email. Return ONLY valid JSON matching this structure exactly:
 {"primary_category":"","secondary_categories":[],"intent":"","urgency":"","emotional_tone":"","buyer_readiness":"","risk_level":"","confidence_score":0.0,"recommended_action":""}
 
@@ -1008,7 +1008,7 @@ LOW RISK for: simple questions, sales inquiries, access issues.
 Email:
 ` + truncate(text, 1200)
 
-	raw, err := provider.GenerateText(ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 200})
+	raw, err := governedGenerateText(context.Background(), tenantID, "inbox.classify", provider, ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 200})
 	if err != nil {
 		return inboxClassification{}, err
 	}
@@ -1184,7 +1184,7 @@ func generateInboxDraftReply(tenantID bson.ObjectId, agent *pkgmodels.InboxAgent
 	}
 	prompt := buildInboxReplyPrompt(agent, contact, classification, emailBody, contextChunks, brand, memory, settings, playbook)
 	if provider, err := ai.GetConfiguredProvider(); err == nil && provider != nil {
-		if text, err := provider.GenerateText(ai.GenerateTextRequest{
+		if text, err := governedGenerateText(context.Background(), tenantID, "inbox.reply", provider, ai.GenerateTextRequest{
 			Prompt:        prompt,
 			ReferenceText: strings.Join(contextChunks, "\n\n---\n\n"),
 			BrandProfile:  brand,
@@ -1261,7 +1261,7 @@ func buildInboxReplyPrompt(agent *pkgmodels.InboxAgent, contact *pkgmodels.User,
 
 // doubleCheckDraft runs a second LLM pass to audit the generated reply.
 // Returns the audit result and optionally a revised draft body.
-func doubleCheckDraft(draftBody, emailBody string, classification inboxClassification) *pkgmodels.AIReplyAudit {
+func doubleCheckDraft(tenantID bson.ObjectId, draftBody, emailBody string, classification inboxClassification) *pkgmodels.AIReplyAudit {
 	provider, err := ai.GetConfiguredProvider()
 	if err != nil || provider == nil {
 		return nil
@@ -1290,7 +1290,7 @@ suggested_revision should be null or a corrected reply string.`,
 		classification.RiskLevel,
 	)
 
-	raw, err := provider.GenerateText(ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 300})
+	raw, err := governedGenerateText(context.Background(), tenantID, "inbox.double_check", provider, ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 300})
 	if err != nil {
 		return nil
 	}
@@ -1302,11 +1302,11 @@ suggested_revision should be null or a corrected reply string.`,
 		raw = raw[:i+1]
 	}
 	var result struct {
-		ApprovedForSend    bool     `json:"approved_for_send"`
-		Issues             []string `json:"issues"`
-		SuggestedRevision  *string  `json:"suggested_revision"`
-		FinalRiskLevel     string   `json:"final_risk_level"`
-		FinalConfidenceScore float64 `json:"final_confidence_score"`
+		ApprovedForSend      bool     `json:"approved_for_send"`
+		Issues               []string `json:"issues"`
+		SuggestedRevision    *string  `json:"suggested_revision"`
+		FinalRiskLevel       string   `json:"final_risk_level"`
+		FinalConfidenceScore float64  `json:"final_confidence_score"`
 	}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		return nil
@@ -1811,7 +1811,7 @@ Brand context: %s
 Email reply samples:
 %s`, brand, truncate(samplesText, 2000))
 
-	raw, err := provider.GenerateText(ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 400})
+	raw, err := governedGenerateText(c.Request.Context(), tenantID, "inbox.voice_profile", provider, ai.GenerateTextRequest{Prompt: prompt, MaxTokens: 400})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI generation failed"})
 		return
