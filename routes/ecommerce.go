@@ -148,6 +148,14 @@ func handleTenantCreateProduct(c *gin.Context) {
 	if req.Status != "" {
 		status = req.Status
 	}
+	if !pkgmodels.ValidProductType(req.ProductType) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "product_type must be course, coaching, service, digital_download, or newsletter"})
+		return
+	}
+	if !pkgmodels.ValidProductStatusTransition(pkgmodels.ProductStatusDraft, status) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be draft, active, or archived"})
+		return
+	}
 
 	product := &pkgmodels.Product{
 		Id:           bson.NewObjectId(),
@@ -222,6 +230,14 @@ func handleTenantUpdateProduct(c *gin.Context) {
 		return
 	}
 
+	var current pkgmodels.Product
+	if err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+		"_id": bson.ObjectIdHex(productID), "tenant_id": tenantID, "timestamps.deleted_at": nil,
+	}).One(&current); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
+		return
+	}
+
 	update := bson.M{}
 	if req.Name != "" {
 		update["name"] = req.Name
@@ -230,15 +246,23 @@ func handleTenantUpdateProduct(c *gin.Context) {
 		update["description"] = req.Description
 	}
 	if req.ProductType != "" {
+		if !pkgmodels.ValidProductType(req.ProductType) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported product_type"})
+			return
+		}
+		// Existing supported product types are immutable because changing the
+		// discriminator would invalidate their builder data and fulfillment
+		// history. A legacy unsupported value may be repaired once.
+		if current.ProductType != req.ProductType && pkgmodels.ValidProductType(current.ProductType) {
+			c.JSON(http.StatusConflict, gin.H{"error": "product type cannot be changed after creation"})
+			return
+		}
 		update["product_type"] = req.ProductType
 	}
 	if req.ThumbnailURL != "" {
 		update["thumbnail_url"] = req.ThumbnailURL
 	}
 	if req.Status != "" {
-		var current pkgmodels.Product
-		_ = db.GetCollection(pkgmodels.ProductCollection).Find(
-			bson.M{"_id": bson.ObjectIdHex(productID), "tenant_id": tenantID}).One(&current)
 		if !pkgmodels.ValidProductStatusTransition(current.Status, req.Status) {
 			c.JSON(http.StatusConflict, gin.H{"error": "invalid product status transition from " + current.Status + " to " + req.Status})
 			return
@@ -371,6 +395,29 @@ func offerProductIDs(items []pkgmodels.OfferItem) []bson.ObjectId {
 	return out
 }
 
+func validatePublishedOfferProducts(tenantID bson.ObjectId, productIDs []bson.ObjectId) []string {
+	invalid := make([]string, 0)
+	for _, productID := range productIDs {
+		var product pkgmodels.Product
+		err := db.GetCollection(pkgmodels.ProductCollection).Find(bson.M{
+			"_id": productID, "tenant_id": tenantID, "timestamps.deleted_at": nil,
+		}).One(&product)
+		if err != nil || product.Status != pkgmodels.ProductStatusActive {
+			invalid = append(invalid, productID.Hex())
+		}
+	}
+	return invalid
+}
+
+func validPricingModel(model string) bool {
+	switch model {
+	case "free", "one_time", "recurring", "payment_plan":
+		return true
+	default:
+		return false
+	}
+}
+
 func legacyOfferItemRequests(ids []string) []offerItemRequest {
 	out := make([]offerItemRequest, 0, len(ids))
 	for _, id := range ids {
@@ -459,6 +506,14 @@ func handleCreateOffer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title and pricing_model are required"})
 		return
 	}
+	if !validPricingModel(req.PricingModel) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pricing_model must be free, one_time, recurring, or payment_plan"})
+		return
+	}
+	if req.Amount < 0 || (req.PricingModel == "free" && req.Amount != 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be zero for free offers and non-negative otherwise"})
+		return
+	}
 
 	offer := pkgmodels.NewOffer(req.Title, tenantID)
 	offer.Status = pkgmodels.OfferStatusDraft
@@ -505,6 +560,12 @@ func handleCreateOffer(c *gin.Context) {
 	}
 	offer.Items = items
 	offer.IncludedProducts = offerProductIDs(items)
+	if offer.Status == pkgmodels.OfferStatusPublished {
+		if invalid := validatePublishedOfferProducts(tenantID, offer.IncludedProducts); len(invalid) > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "all products must be active before an offer can be published", "inactive_products": invalid})
+			return
+		}
+	}
 
 	if err := db.GetCollection(pkgmodels.OfferCollection).Insert(offer); err != nil {
 		log.Println("Error creating offer:", err)
@@ -576,27 +637,18 @@ func handleUpdateOffer(c *gin.Context) {
 	}
 
 	update := bson.M{}
+	if req.PricingModel != "" && !validPricingModel(req.PricingModel) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported pricing_model"})
+		return
+	}
+	if req.Amount != nil && *req.Amount < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount cannot be negative"})
+		return
+	}
 	if req.Status != "" {
 		if !pkgmodels.ValidOfferStatusTransition(current.Status, req.Status) {
 			c.JSON(http.StatusConflict, gin.H{"error": "invalid offer status transition from " + current.Status + " to " + req.Status})
 			return
-		}
-		// Publishing requires at least one included product (COM-CC-008/003):
-		// a live offer that grants nothing is invalid.
-		if req.Status == pkgmodels.OfferStatusPublished {
-			effective := current.IncludedProducts
-			if req.Items != nil || req.IncludedProducts != nil {
-				itemReqs := req.Items
-				if itemReqs == nil {
-					itemReqs = legacyOfferItemRequests(req.IncludedProducts)
-				}
-				resolved, _, _ := resolveOfferItems(tenantID, itemReqs, current.Items)
-				effective = offerProductIDs(resolved)
-			}
-			if len(effective) == 0 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "cannot publish an offer with no included products"})
-				return
-			}
 		}
 		update["status"] = req.Status
 	}
@@ -646,6 +698,46 @@ func handleUpdateOffer(c *gin.Context) {
 		}
 		update["items"] = items
 		update["included_products"] = offerProductIDs(items)
+	}
+
+	// Validate the final state, not merely explicit publish transitions. This
+	// also prevents a partial API update from attaching a draft product to an
+	// offer that is already live while omitting the status field.
+	effectiveStatus := current.Status
+	if effectiveStatus == "" {
+		effectiveStatus = pkgmodels.OfferStatusPublished // legacy offers were live
+	}
+	if req.Status != "" {
+		effectiveStatus = req.Status
+	}
+	effectiveProducts := current.IncludedProducts
+	if len(effectiveProducts) == 0 {
+		effectiveProducts = offerProductIDs(current.Items)
+	}
+	if ids, ok := update["included_products"].([]bson.ObjectId); ok {
+		effectiveProducts = ids
+	}
+	if effectiveStatus == pkgmodels.OfferStatusPublished {
+		if len(effectiveProducts) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot publish an offer with no included products"})
+			return
+		}
+		if invalid := validatePublishedOfferProducts(tenantID, effectiveProducts); len(invalid) > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "all products must be active before an offer can be published", "inactive_products": invalid})
+			return
+		}
+	}
+	effectivePricingModel := current.PricingModel
+	if req.PricingModel != "" {
+		effectivePricingModel = req.PricingModel
+	}
+	effectiveAmount := current.Amount
+	if req.Amount != nil {
+		effectiveAmount = *req.Amount
+	}
+	if effectivePricingModel == "free" && effectiveAmount != 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "free offers must have an amount of zero"})
+		return
 	}
 
 	if len(update) == 0 {
