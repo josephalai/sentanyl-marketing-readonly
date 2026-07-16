@@ -196,6 +196,7 @@ func handleAIGeneratePage(c *gin.Context) {
 	var req struct {
 		Prompt         string   `json:"prompt" binding:"required"`
 		ContextPackIDs []string `json:"context_pack_ids"`
+		StylePresetID  string   `json:"style_preset_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "prompt is required"})
@@ -203,6 +204,9 @@ func handleAIGeneratePage(c *gin.Context) {
 	}
 
 	bizCtx := fetchSiteAIContext(tenantID, req.ContextPackIDs)
+	if siteID := c.Param("siteId"); bson.IsObjectIdHex(siteID) {
+		bizCtx = applySitePresetForGen(tenantID, bson.ObjectIdHex(siteID), req.StylePresetID, bizCtx)
+	}
 	doc, err := provider.GeneratePage(ai.SitePageRequest{
 		Ctx:             aiRequestContext(c),
 		Prompt:          req.Prompt,
@@ -382,6 +386,7 @@ func handleGenerateFromProducts(c *gin.Context) {
 		ProductIDs     []string `json:"product_ids" binding:"required"`
 		PageType       string   `json:"page_type"`
 		ContextPackIDs []string `json:"context_pack_ids"`
+		StylePresetID  string   `json:"style_preset_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || len(req.ProductIDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "product_ids is required"})
@@ -399,6 +404,9 @@ func handleGenerateFromProducts(c *gin.Context) {
 
 	productDetails := buildProductDetailsForGeneration(products)
 	bizCtx := fetchSiteAIContext(tenantID, req.ContextPackIDs)
+	if siteID := c.Param("siteId"); bson.IsObjectIdHex(siteID) {
+		bizCtx = applySitePresetForGen(tenantID, bson.ObjectIdHex(siteID), req.StylePresetID, bizCtx)
+	}
 	prompt := ai.BuildGenerateFromProductsPrompt(productDetails, req.PageType)
 
 	doc, err := provider.GeneratePage(ai.SitePageRequest{

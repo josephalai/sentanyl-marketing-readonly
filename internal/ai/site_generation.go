@@ -295,6 +295,19 @@ Section, Stack, and Grid are now real editable containers (Puck slots) — their
 **SentanylFunnelCTA** — Funnel call-to-action section
   props: id, heading (string), description (string), buttonText (string), buttonUrl (string)
 
+**SentanylPricingTable** — Pricing tiers table (author-defined, presentational)
+  props: id, heading (string), subheading (string), tiers (array of {name, price, period, description, features:[{value}], ctaText, ctaUrl, featured:"yes"})
+  Use for plan/pricing comparisons. Mark the recommended tier featured:"yes".
+
+**SentanylCoupon** — Promo/discount banner bound to a coupon
+  props: id, heading (string), couponId (coupon public id)
+
+**SentanylCoaching** — Coaching/appointment booking block
+  props: id, heading (string), programId (coaching program public id), ctaText (string)
+
+**SentanylStoryline** — CTA into a storyline/sequence
+  props: id, heading (string), description (string), storylineId (storyline public id), ctaText (string)
+
 ## Video pages (VSL / squeeze) — Phase 11 pattern
 
 Pages that lead with a video earn the highest conversion rates when the video sits at the top and a single conversion section closes the page below. Sentanyl wires the attribution automatically:

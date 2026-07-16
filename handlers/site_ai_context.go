@@ -75,6 +75,80 @@ func fetchSiteAIContext(tenantID bson.ObjectId, contextPackIDs []string) string 
 	return sb.String()
 }
 
+// resolveStylePreset loads a tenant's style preset by public id (nil if unset/not found).
+func resolveStylePreset(tenantID bson.ObjectId, presetID string) *pkgmodels.StylePreset {
+	if presetID == "" {
+		return nil
+	}
+	var p pkgmodels.StylePreset
+	if err := db.GetCollection(pkgmodels.StylePresetCollection).Find(bson.M{
+		"public_id":             presetID,
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&p); err != nil {
+		return nil
+	}
+	return &p
+}
+
+// stylePresetDirective renders a preset as a prompt directive appended to the
+// business context, so generated copy + block styling stay on-brand.
+func stylePresetDirective(p *pkgmodels.StylePreset) string {
+	if p == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n### Brand Style Preset — MATCH THIS\n")
+	if p.BrandVoice != "" {
+		sb.WriteString(fmt.Sprintf("Voice: %s\n", p.BrandVoice))
+	}
+	gs := p.GlobalStyle
+	var vis []string
+	if gs.PrimaryColor != "" {
+		vis = append(vis, "primary "+gs.PrimaryColor)
+	}
+	if gs.AccentColor != "" {
+		vis = append(vis, "accent "+gs.AccentColor)
+	}
+	if gs.HeadingFont != "" {
+		vis = append(vis, "heading font "+gs.HeadingFont)
+	}
+	if gs.BodyFont != "" {
+		vis = append(vis, "body font "+gs.BodyFont)
+	}
+	if len(vis) > 0 {
+		sb.WriteString("Visual tokens: " + strings.Join(vis, ", ") + "\n")
+	}
+	if p.DefaultTone != "" {
+		sb.WriteString(fmt.Sprintf("Prefer section band tone: %s\n", p.DefaultTone))
+	}
+	return sb.String()
+}
+
+// applyPresetToSite writes the preset's GlobalStyle onto the site so the SSR
+// tokens (buildGlobalStyleVars / the worker's EditorDesignTokens) reflect the
+// intended brand on published pages.
+func applyPresetToSite(tenantID, siteID bson.ObjectId, gs pkgmodels.GlobalStyle) {
+	_ = db.GetCollection(pkgmodels.SiteCollection).Update(
+		bson.M{"_id": siteID, "tenant_id": tenantID},
+		bson.M{"$set": bson.M{"global_style": gs}},
+	)
+}
+
+// applySitePresetForGen resolves the preset, appends its directive to the
+// business-context string, and applies its GlobalStyle to the site. Returns the
+// (possibly augmented) business context. No-op when presetID is empty.
+func applySitePresetForGen(tenantID, siteID bson.ObjectId, presetID, bizCtx string) string {
+	p := resolveStylePreset(tenantID, presetID)
+	if p == nil {
+		return bizCtx
+	}
+	if siteID.Valid() {
+		applyPresetToSite(tenantID, siteID, p.GlobalStyle)
+	}
+	return bizCtx + stylePresetDirective(p)
+}
+
 // resolveContextPackChunks fetches text chunks from the given context pack public IDs.
 func resolveContextPackChunks(tenantID bson.ObjectId, packIDs []string) []string {
 	var chunks []string

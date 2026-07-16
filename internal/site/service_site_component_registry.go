@@ -634,5 +634,50 @@ func buildComponentRegistry() []ComponentDef {
 				"buttonText": "Get Started",
 			},
 		},
+		// ——————— WS-C: feature-coverage blocks ———————
+		{
+			Type:     "SentanylPricingTable",
+			Label:    "Pricing Table",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "subheading", Label: "Subheading", Type: FieldTypeText},
+				{Name: "tiers", Label: "Tiers", Type: FieldTypeArray},
+			},
+			DefaultProps: map[string]any{},
+		},
+		{
+			Type:     "SentanylCoupon",
+			Label:    "Coupon / Discount",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "couponId", Label: "Coupon", Type: FieldTypeText},
+			},
+			DefaultProps: map[string]any{},
+		},
+		{
+			Type:     "SentanylCoaching",
+			Label:    "Coaching / Booking",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "programId", Label: "Coaching program public id", Type: FieldTypeText},
+				{Name: "ctaText", Label: "CTA text", Type: FieldTypeText},
+			},
+			DefaultProps: map[string]any{},
+		},
+		{
+			Type:     "SentanylStoryline",
+			Label:    "Storyline / Sequence",
+			Category: CategorySentanyl,
+			Fields: []ComponentField{
+				{Name: "heading", Label: "Heading", Type: FieldTypeText},
+				{Name: "description", Label: "Description", Type: FieldTypeTextarea},
+				{Name: "storylineId", Label: "Storyline", Type: FieldTypeText},
+				{Name: "ctaText", Label: "CTA text", Type: FieldTypeText},
+			},
+			DefaultProps: map[string]any{},
+		},
 	}
 }

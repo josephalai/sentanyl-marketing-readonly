@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"regexp"
 	"strings"
 
 	"gopkg.in/mgo.v2/bson"
@@ -170,7 +171,11 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 		globalStyle = site.GlobalStyle
 	}
 	if body, err := renderViaPuckSSR(doc, globalStyle); err == nil {
-		sb.WriteString(body)
+		// Data-bound Sentanyl blocks render as <div data-sentanyl-island> markers
+		// in the worker output (it has no DB access). Replace each marker with the
+		// Go server render (real offers/products/courses, checkout wiring, video
+		// runtime scripts) using the original document's props.
+		sb.WriteString(hydrateServerIslands(body, doc, tenantID))
 	} else {
 		if !errors.Is(err, errPuckRendererDisabled) {
 			log.Printf("puck-renderer SSR failed, falling back to Go renderer: %v", err)
@@ -200,6 +205,200 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 
 	sb.WriteString("</body>\n</html>")
 	return sb.String()
+}
+
+var (
+	islandMarkerRe = regexp.MustCompile(`<div [^>]*data-sentanyl-island="[^"]*"[^>]*></div>`)
+	islandIDRe     = regexp.MustCompile(`data-sentanyl-id="([^"]*)"`)
+)
+
+// renderPricingTable renders author-defined pricing tiers (presentational).
+func renderPricingTable(sb *strings.Builder, props map[string]any, esc func(string) string) {
+	heading, _ := props["heading"].(string)
+	subheading, _ := props["subheading"].(string)
+	tiers := coerceContentSlice(props["tiers"])
+	sb.WriteString("<section class=\"section\"><div class=\"container container--wide\">\n")
+	if heading != "" {
+		sb.WriteString(fmt.Sprintf("<h2 style=\"text-align:center\">%s</h2>\n", esc(heading)))
+	}
+	if subheading != "" {
+		sb.WriteString(fmt.Sprintf("<p style=\"text-align:center;color:#525866\">%s</p>\n", esc(subheading)))
+	}
+	sb.WriteString("<div class=\"columns\">\n")
+	for _, raw := range tiers {
+		t := coerceMap(raw)
+		if t == nil {
+			continue
+		}
+		name, _ := t["name"].(string)
+		price, _ := t["price"].(string)
+		period, _ := t["period"].(string)
+		desc, _ := t["description"].(string)
+		ctaText, _ := t["ctaText"].(string)
+		ctaURL, _ := t["ctaUrl"].(string)
+		featured := t["featured"] == "yes" || t["featured"] == true
+		if ctaText == "" {
+			ctaText = "Choose plan"
+		}
+		if ctaURL == "" {
+			ctaURL = "#"
+		}
+		border := "1px solid #e5e7eb"
+		if featured {
+			border = "2px solid var(--color-accent, #22c55e)"
+		}
+		sb.WriteString(fmt.Sprintf("<div class=\"card\" style=\"border:%s;display:flex;flex-direction:column;gap:8px\">\n", border))
+		sb.WriteString(fmt.Sprintf("<div style=\"font-weight:700\">%s</div>\n", esc(name)))
+		sb.WriteString(fmt.Sprintf("<div style=\"font-size:2rem;font-weight:800\">%s<span style=\"font-size:1rem;color:#6b7280\">%s</span></div>\n", esc(price), func() string {
+			if period != "" {
+				return "/" + esc(period)
+			}
+			return ""
+		}()))
+		if desc != "" {
+			sb.WriteString(fmt.Sprintf("<p style=\"color:#525866;margin:0\">%s</p>\n", esc(desc)))
+		}
+		for _, f := range coerceContentSlice(t["features"]) {
+			fm := coerceMap(f)
+			val := ""
+			if fm != nil {
+				val, _ = fm["value"].(string)
+			} else if s, ok := f.(string); ok {
+				val = s
+			}
+			if val != "" {
+				sb.WriteString(fmt.Sprintf("<div>✓ %s</div>\n", esc(val)))
+			}
+		}
+		bg := "#0a0a0a"
+		fg := "#fff"
+		if featured {
+			bg = "var(--color-accent, #22c55e)"
+			fg = "#0a0a0a"
+		}
+		sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\" style=\"margin-top:auto;background:%s;color:%s\">%s</a>\n", esc(ctaURL), bg, fg, esc(ctaText)))
+		sb.WriteString("</div>\n")
+	}
+	sb.WriteString("</div>\n</div></section>\n")
+}
+
+// renderCouponBlock fetches the tenant's coupon and renders a promo banner.
+func renderCouponBlock(sb *strings.Builder, props map[string]any, tenantID bson.ObjectId, esc func(string) string) {
+	heading, _ := props["heading"].(string)
+	if heading == "" {
+		heading = "Special Offer"
+	}
+	couponID, _ := props["couponId"].(string)
+	code := ""
+	discount := ""
+	if couponID != "" {
+		var coupon pkgmodels.Coupon
+		if err := db.GetCollection(pkgmodels.CouponCollection).Find(bson.M{
+			"public_id":             couponID,
+			"tenant_id":             tenantID,
+			"timestamps.deleted_at": nil,
+		}).One(&coupon); err == nil {
+			code = coupon.Code
+			if coupon.Value > 0 {
+				if coupon.DiscountType == "percent" {
+					discount = fmt.Sprintf("%d%% off", coupon.Value)
+				} else {
+					discount = fmt.Sprintf("$%d off", coupon.Value/100)
+				}
+			}
+		}
+	}
+	if code == "" {
+		code = "PROMO"
+	}
+	sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
+	sb.WriteString("<div style=\"display:inline-flex;flex-direction:column;gap:8px;border:2px dashed var(--color-accent,#22c55e);border-radius:16px;padding:24px 40px;background:#f0fdf4\">\n")
+	sb.WriteString(fmt.Sprintf("<div style=\"font-weight:700;font-size:1.1rem\">%s</div>\n", esc(heading)))
+	if discount != "" {
+		sb.WriteString(fmt.Sprintf("<div style=\"color:#166534\">%s</div>\n", esc(discount)))
+	}
+	sb.WriteString(fmt.Sprintf("<code style=\"font-size:1.4rem;font-weight:800;letter-spacing:0.1em\">%s</code>\n", esc(code)))
+	sb.WriteString("</div>\n</section>\n")
+}
+
+// renderStorylineBlock resolves the storyline name and renders a CTA card.
+func renderStorylineBlock(sb *strings.Builder, props map[string]any, esc func(string) string) {
+	heading, _ := props["heading"].(string)
+	description, _ := props["description"].(string)
+	ctaText, _ := props["ctaText"].(string)
+	storylineID, _ := props["storylineId"].(string)
+	if ctaText == "" {
+		ctaText = "Start"
+	}
+	href := "#"
+	if storylineID != "" {
+		var story struct {
+			PublicId string `bson:"public_id"`
+			Name     string `bson:"name"`
+		}
+		if err := db.GetCollection(pkgmodels.StorylineCollection).Find(bson.M{"public_id": storylineID}).One(&story); err == nil {
+			if heading == "" && story.Name != "" {
+				heading = story.Name
+			}
+		}
+		href = "/s/" + html.EscapeString(storylineID)
+	}
+	if heading == "" {
+		heading = "Continue your journey"
+	}
+	sb.WriteString("<section class=\"section\" style=\"background:#f7f7f8;text-align:center\"><div class=\"container container--normal\">\n")
+	sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+	if description != "" {
+		sb.WriteString(fmt.Sprintf("<p style=\"color:#525866\">%s</p>\n", esc(description)))
+	}
+	sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", esc(href), esc(ctaText)))
+	sb.WriteString("</div></section>\n")
+}
+
+// hydrateServerIslands replaces <div data-sentanyl-island> markers emitted by
+// the SSR worker with the Go server render of the corresponding block (real
+// data / checkout / runtime scripts). Blocks are matched by their props.id from
+// the original document (walking nested slot content too). Unmatched markers are
+// left as-is (harmless empty divs).
+func hydrateServerIslands(body string, doc map[string]any, tenantID bson.ObjectId) string {
+	index := map[string]map[string]any{}
+	var walk func(nodes []any)
+	walk = func(nodes []any) {
+		for _, raw := range nodes {
+			comp := coerceMap(raw)
+			if comp == nil {
+				continue
+			}
+			if props := coerceMap(comp["props"]); props != nil {
+				if id, _ := props["id"].(string); id != "" {
+					index[id] = comp
+				}
+				if child, ok := props["content"].([]any); ok {
+					walk(child)
+				}
+			}
+		}
+	}
+	if content, ok := doc["content"].([]any); ok {
+		walk(content)
+	}
+	if len(index) == 0 {
+		return body
+	}
+
+	return islandMarkerRe.ReplaceAllStringFunc(body, func(marker string) string {
+		m := islandIDRe.FindStringSubmatch(marker)
+		if m == nil {
+			return marker
+		}
+		comp := index[m[1]]
+		if comp == nil {
+			return marker
+		}
+		var b strings.Builder
+		renderComponent(&b, comp, tenantID)
+		return b.String()
+	})
 }
 
 // renderComponent renders a single Puck component to HTML.
@@ -816,6 +1015,35 @@ function submitSentanylForm(ev,f){
 		}
 		sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"%s\">%s</a>\n", esc(buttonURL), esc(buttonText)))
 		sb.WriteString("</section>\n")
+
+	case "SentanylPricingTable":
+		renderPricingTable(sb, props, esc)
+
+	case "SentanylCoupon":
+		renderCouponBlock(sb, props, tenantID, esc)
+
+	case "SentanylCoaching":
+		heading, _ := props["heading"].(string)
+		programID, _ := props["programId"].(string)
+		ctaText, _ := props["ctaText"].(string)
+		if heading == "" {
+			heading = "Book a coaching session"
+		}
+		if ctaText == "" {
+			ctaText = "View available times"
+		}
+		sb.WriteString("<section class=\"section\" style=\"text-align:center\">\n")
+		sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(heading)))
+		// Client-side coaching runtime hydrates this element (Sentanyl.coaching).
+		if programID != "" {
+			sb.WriteString(fmt.Sprintf("<div data-sentanyl-coaching=\"%s\" data-cta=\"%s\"></div>\n", esc(programID), esc(ctaText)))
+		} else {
+			sb.WriteString(fmt.Sprintf("<a class=\"cta-button\" href=\"#\">%s</a>\n", esc(ctaText)))
+		}
+		sb.WriteString("</section>\n")
+
+	case "SentanylStoryline":
+		renderStorylineBlock(sb, props, esc)
 
 	case "Section":
 		renderSectionContainer(sb, props, tenantID)
