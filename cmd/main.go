@@ -268,6 +268,9 @@ func main() {
 	// Funnel AI — template-based generation.
 	handlers.RegisterFunnelAIRoutes(legacyTenantAPI)
 
+	// Universal Advisor — multi-turn Claude tool-use chat over pkg/mcptools.
+	routes.RegisterAdvisorRoutes(legacyTenantAPI)
+
 	// Site themes and starter kits.
 	handlers.RegisterSiteThemeRoutes(legacyTenantAPI)
 
