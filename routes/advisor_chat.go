@@ -14,6 +14,7 @@ import (
 
 	"github.com/josephalai/sentanyl/pkg/aigov"
 	pkgauth "github.com/josephalai/sentanyl/pkg/auth"
+	"github.com/josephalai/sentanyl/pkg/db"
 	"github.com/josephalai/sentanyl/pkg/llm"
 	"github.com/josephalai/sentanyl/pkg/mcptools"
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
@@ -45,11 +46,14 @@ Guidelines:
 // tenant API group (Caddy routes /api/tenant/advisor* to marketing-service).
 func RegisterAdvisorRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.POST("/advisor/chat", handleAdvisorChat)
+	tenantAPI.GET("/advisor/threads", handleListAdvisorThreads)
+	tenantAPI.GET("/advisor/threads/:threadId", handleGetAdvisorThread)
 }
 
 type advisorChatRequest struct {
 	Messages []llm.Message     `json:"messages"`
-	Resolve  map[string]string `json:"resolve"` // tool_use_id → "approve" | "reject"
+	Resolve  map[string]string `json:"resolve"`   // tool_use_id → "approve" | "reject"
+	ThreadID string            `json:"thread_id"` // "" on the first turn → a thread is created
 }
 
 type advisorToolCall struct {
@@ -72,6 +76,7 @@ type advisorChatResponse struct {
 	ToolCalls        []advisorToolCall `json:"tool_calls"`
 	PendingApprovals []advisorPending  `json:"pending_approvals"`
 	Done             bool              `json:"done"`
+	ThreadID         string            `json:"thread_id"`
 }
 
 func handleAdvisorChat(c *gin.Context) {
@@ -114,7 +119,48 @@ func handleAdvisorChat(c *gin.Context) {
 	defer cancel()
 
 	messages := req.Messages
+	threadID := req.ThreadID
 	var toolCalls []advisorToolCall
+	var usage aigov.Usage
+
+	// Budget + concurrency gate (aigov): reserve on the way in, settle on the way
+	// out. Concurrency is always capped; the daily cost budget applies when
+	// AI_DAILY_COST_MICROS is set. A DB hiccup in Begin must not take the Advisor
+	// down, so only the explicit gate errors are fatal.
+	op, gerr := aigov.Begin(tenantID, pkgmodels.AISurfaceAdvisor, aigov.Estimate{
+		InputCharacters: advisorInputChars(messages),
+		OutputTokens:    int64(maxAdvisorTurns) * 4096,
+	}, time.Now())
+	switch gerr {
+	case nil:
+		var opCancel context.CancelFunc
+		ctx, opCancel = aigov.Context(ctx, op)
+		defer opCancel()
+	case aigov.ErrConcurrencyLimit:
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "The Advisor is handling another request for this workspace — try again in a moment."})
+		return
+	case aigov.ErrCostBudgetExceeded:
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "This workspace has reached its daily AI budget."})
+		return
+	default:
+		log.Printf("advisor: aigov.Begin: %v", gerr)
+		op = nil
+	}
+
+	// finish persists the transcript, ledgers the turn (linked to the thread),
+	// and settles the budget lease. Called before every response.
+	finish := func(outcome string, failErr error) string {
+		threadID = persistAdvisorThread(tenantID, threadID, messages)
+		recordAdvisor(tenantID, client.Model(), toolCalls, outcome, threadID)
+		if op != nil {
+			if failErr != nil {
+				_ = aigov.Fail(op, failErr, time.Now())
+			} else {
+				_ = aigov.Complete(op, usage, time.Now())
+			}
+		}
+		return threadID
+	}
 
 	// Resume path: the previous turn paused for approval. Answer every tool_use
 	// block in the last assistant turn — approval-gated ones per the user's
@@ -136,20 +182,23 @@ func handleAdvisorChat(c *gin.Context) {
 		})
 		if err != nil {
 			log.Printf("advisor: model call: %v", err)
-			recordAdvisor(tenantID, client.Model(), toolCalls, pkgmodels.AIOutcomeError)
+			finish(pkgmodels.AIOutcomeError, err)
 			c.JSON(http.StatusBadGateway, gin.H{"error": "advisor model call failed"})
 			return
 		}
+		usage.InputTokens += int64(resp.Usage.InputTokens)
+		usage.OutputTokens += int64(resp.Usage.OutputTokens)
 		messages = append(messages, llm.Message{Role: "assistant", Content: resp.Content})
 
 		uses := resp.ToolUses()
 		if len(uses) == 0 {
-			recordAdvisor(tenantID, client.Model(), toolCalls, advisorOutcome(toolCalls))
+			tid := finish(advisorOutcome(toolCalls), nil)
 			c.JSON(http.StatusOK, advisorChatResponse{
 				Messages:      messages,
 				AssistantText: resp.TextContent(),
 				ToolCalls:     toolCalls,
 				Done:          true,
+				ThreadID:      tid,
 			})
 			return
 		}
@@ -169,13 +218,14 @@ func handleAdvisorChat(c *gin.Context) {
 		if len(pending) > 0 {
 			// Pause the whole turn for a human OK. The assistant turn is already
 			// appended; the client resolves and re-posts to continue.
-			recordAdvisor(tenantID, client.Model(), toolCalls, pkgmodels.AIOutcomeDraft)
+			tid := finish(pkgmodels.AIOutcomeDraft, nil)
 			c.JSON(http.StatusOK, advisorChatResponse{
 				Messages:         messages,
 				AssistantText:    resp.TextContent(),
 				ToolCalls:        toolCalls,
 				PendingApprovals: pending,
 				Done:             false,
+				ThreadID:         tid,
 			})
 			return
 		}
@@ -191,12 +241,13 @@ func handleAdvisorChat(c *gin.Context) {
 	}
 
 	// Hit the turn cap without a natural end.
-	recordAdvisor(tenantID, client.Model(), toolCalls, advisorOutcome(toolCalls))
+	tid := finish(advisorOutcome(toolCalls), nil)
 	c.JSON(http.StatusOK, advisorChatResponse{
 		Messages:      messages,
 		AssistantText: "I've reached the step limit for one message. Tell me how you'd like to continue.",
 		ToolCalls:     toolCalls,
 		Done:          true,
+		ThreadID:      tid,
 	})
 }
 
@@ -322,11 +373,16 @@ func advisorOutcome(calls []advisorToolCall) string {
 	return pkgmodels.AIOutcomeDraft
 }
 
-// recordAdvisor ledgers one Advisor turn under the tenant's advisor principal.
-func recordAdvisor(tenantID bson.ObjectId, model string, calls []advisorToolCall, outcome string) {
+// recordAdvisor ledgers one Advisor turn under the tenant's advisor principal,
+// linked to its conversation thread via Refs.
+func recordAdvisor(tenantID bson.ObjectId, model string, calls []advisorToolCall, outcome, threadID string) {
 	proposals := make([]bson.M, 0, len(calls))
 	for _, c := range calls {
 		proposals = append(proposals, bson.M{"tool": c.Tool, "ok": c.Ok})
+	}
+	var refs map[string]string
+	if threadID != "" {
+		refs = map[string]string{"advisor_thread_id": threadID}
 	}
 	aigov.Record(&pkgmodels.AIExecution{
 		TenantID:      tenantID,
@@ -337,5 +393,115 @@ func recordAdvisor(tenantID bson.ObjectId, model string, calls []advisorToolCall
 		Model:         model,
 		Proposals:     proposals,
 		Outcome:       outcome,
+		Refs:          refs,
 	})
+}
+
+// advisorInputChars sums the visible text across the conversation, a cheap proxy
+// for the aigov cost estimate (Estimate divides characters by 4 for tokens).
+func advisorInputChars(messages []llm.Message) int64 {
+	var n int64
+	for _, m := range messages {
+		for _, b := range m.Content {
+			n += int64(len(b.Text))
+			if s, ok := b.Content.(string); ok {
+				n += int64(len(s))
+			}
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// deriveAdvisorTitle names a thread from its first user text, truncated.
+func deriveAdvisorTitle(messages []llm.Message) string {
+	for _, m := range messages {
+		if m.Role != "user" {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+				return truncate(strings.TrimSpace(b.Text), 80)
+			}
+		}
+	}
+	return "New conversation"
+}
+
+// persistAdvisorThread upserts the durable transcript. Creates a thread when
+// threadID is empty (returning the new public id); otherwise rewrites the
+// existing thread's transcript. Best-effort: a failure never breaks the chat.
+func persistAdvisorThread(tenantID bson.ObjectId, threadID string, messages []llm.Message) string {
+	blob, err := json.Marshal(messages)
+	if err != nil {
+		log.Printf("advisor: marshal transcript: %v", err)
+		return threadID
+	}
+	col := db.GetCollection(pkgmodels.AdvisorThreadCollection)
+	now := time.Now()
+	if threadID == "" {
+		th := pkgmodels.NewAdvisorThread(tenantID, deriveAdvisorTitle(messages))
+		th.Transcript = string(blob)
+		th.TurnCount = 1
+		if err := col.Insert(th); err != nil {
+			log.Printf("advisor: create thread: %v", err)
+			return ""
+		}
+		return th.PublicId
+	}
+	if err := col.Update(
+		bson.M{"public_id": threadID, "tenant_id": tenantID, "timestamps.deleted_at": nil},
+		bson.M{
+			"$set": bson.M{"transcript": string(blob), "last_message_at": now, "timestamps.updated_at": now},
+			"$inc": bson.M{"turn_count": 1},
+		},
+	); err != nil {
+		log.Printf("advisor: update thread %s: %v", threadID, err)
+	}
+	return threadID
+}
+
+// handleListAdvisorThreads returns the tenant's conversations, newest first
+// (metadata only — no transcripts).
+func handleListAdvisorThreads(c *gin.Context) {
+	tenantID := pkgauth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	var threads []pkgmodels.AdvisorThread
+	if err := db.GetCollection(pkgmodels.AdvisorThreadCollection).
+		Find(bson.M{"tenant_id": tenantID, "timestamps.deleted_at": nil}).
+		Select(bson.M{"transcript": 0}).
+		Sort("-last_message_at").Limit(50).All(&threads); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list threads"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "threads": threads})
+}
+
+// handleGetAdvisorThread returns one conversation incl. its transcript, so the
+// client can resume it after a reload.
+func handleGetAdvisorThread(c *gin.Context) {
+	tenantID := pkgauth.GetTenantObjectID(c)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	var th pkgmodels.AdvisorThread
+	if err := db.GetCollection(pkgmodels.AdvisorThreadCollection).Find(bson.M{
+		"public_id":             c.Param("threadId"),
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&th); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "thread not found"})
+		return
+	}
+	var msgs []llm.Message
+	if th.Transcript != "" {
+		_ = json.Unmarshal([]byte(th.Transcript), &msgs)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "thread": th, "messages": msgs})
 }
