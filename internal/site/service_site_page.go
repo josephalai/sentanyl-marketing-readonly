@@ -73,15 +73,10 @@ func ServiceDeletePage(pageID, tenantID bson.ObjectId) error {
 // ServiceSaveDocument saves a Puck document as the draft for a page.
 // Creates a draft_snapshot version and updates the page's draft_version_id.
 func ServiceSaveDocument(pageID, tenantID bson.ObjectId, document map[string]any) error {
-	// Flatten Section/Container wrappers before validation — Puck's editor
-	// has no UI for nested-array `content` props, so a Section wrapping a
-	// RichTextSection becomes uneditable. Flattening hoists the children to
-	// the parent level while stamping the wrapper's tone/padding onto each
-	// child. The published HTML is visually identical.
-	if content, ok := document["content"].([]any); ok {
-		document["content"] = flattenContainerWrappers(content)
-	}
-
+	// Section/Stack/Grid are now Puck slots (real nested drag-into containers),
+	// so nested `content` is first-class and must be preserved as-is — no
+	// flattening. Children live inline in each container's props.content and
+	// render natively via the Puck SSR worker.
 	if err := ValidatePuckDocument(document); err != nil {
 		return fmt.Errorf("document validation failed: %w", err)
 	}
@@ -156,90 +151,12 @@ func ensureNodeID(comp map[string]any) {
 }
 
 // ServiceGetDocument returns the current draft document for a page.
-// Container wrappers (Section/Container) are flattened on read so the
-// editor can reach every block. The Save path re-flattens defensively.
+// Section/Stack/Grid are Puck slots now, so nested `content` is returned as-is
+// — the editor selects and edits nested blocks natively (no flattening).
 func ServiceGetDocument(pageID, tenantID bson.ObjectId) (map[string]any, error) {
 	page, err := GetSitePageByID(pageID, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	doc := page.DraftDocument
-	if doc != nil {
-		if content, ok := doc["content"].([]any); ok {
-			doc["content"] = flattenContainerWrappers(content)
-		}
-	}
-	return doc, nil
-}
-
-// flattenContainerWrappers unwraps Section and Container nodes by hoisting
-// their nested children to the parent level. Each child inherits any
-// tone / paddingY / maxWidth / backgroundImage from the wrapper that the
-// child doesn't already define — so the published page renders the same
-// band semantics, but every block becomes a first-class top-level node
-// the Puck editor can select and edit.
-//
-// Stack and Grid intentionally stay intact: their nested layout has
-// semantic meaning (vertical-gap stack / multi-column grid) that
-// flattening would destroy. Those will be addressed when the Puck SSR
-// renderer lands and we can use real DropZones.
-func flattenContainerWrappers(nodes []any) []any {
-	out := make([]any, 0, len(nodes))
-	for _, raw := range nodes {
-		node := coerceMap(raw)
-		if node == nil {
-			out = append(out, raw)
-			continue
-		}
-		t, _ := node["type"].(string)
-		if t != "Section" && t != "Container" {
-			out = append(out, node)
-			continue
-		}
-		props := coerceMap(node["props"])
-		children, _ := props["content"].([]any)
-		if len(children) == 0 {
-			// Empty wrapper — drop it.
-			continue
-		}
-		// Stamp wrapper styling onto each child if the child doesn't set it.
-		for _, childRaw := range children {
-			child := coerceMap(childRaw)
-			if child == nil {
-				out = append(out, childRaw)
-				continue
-			}
-			cprops, _ := child["props"].(map[string]any)
-			if cprops == nil {
-				cprops = map[string]any{}
-				child["props"] = cprops
-			}
-			for _, k := range []string{"tone", "paddingY", "maxWidth", "backgroundImage"} {
-				if v, ok := props[k]; ok && v != nil && v != "" {
-					if existing, exists := cprops[k]; !exists || existing == nil || existing == "" {
-						cprops[k] = v
-					}
-				}
-			}
-			out = append(out, child)
-		}
-	}
-	// Recurse: a Section may have wrapped another Section (rare but possible).
-	// Run flatten until stable, capped at 4 passes to avoid pathological cases.
-	for pass := 0; pass < 4; pass++ {
-		changed := false
-		for _, n := range out {
-			if m := coerceMap(n); m != nil {
-				if t, _ := m["type"].(string); t == "Section" || t == "Container" {
-					changed = true
-					break
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-		out = flattenContainerWrappers(out)
-	}
-	return out
+	return page.DraftDocument, nil
 }

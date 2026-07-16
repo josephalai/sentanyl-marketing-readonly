@@ -183,9 +183,11 @@ Almost every block accepts these shared style props (omit to use defaults):
   • paddingY — "sm" | "md" | "lg" | "xl" — vertical breathing room
   • eyebrow (string) — small uppercase label rendered above the heading
 
-### Layout: keep it FLAT
+### Layout: prefer flat, nest only with intent
 
-DO NOT use Section, Container, Stack, or Grid wrappers. Emit content blocks directly at the top level. Each content block already accepts ` + "`tone`" + ` ("default" | "muted" | "inverse" | "branded" | "accent") and ` + "`paddingY`" + ` ("sm" | "md" | "lg" | "xl") props — set those on the block itself to control the band background and spacing. Wrapping blocks in a Section is silently flattened on save and breaks editor selection. Use FeatureGrid for multi-column feature lists, Pricing for tier comparisons, Stats for metric callouts, MediaSection for image+text rows.
+DEFAULT to emitting content blocks directly at the top level — a well-designed page is a sequence of full-width bands, and most blocks already accept ` + "`tone`" + ` ("default" | "muted" | "inverse" | "branded" | "accent") and ` + "`paddingY`" + ` ("sm" | "md" | "lg" | "xl") props to control their own band background and spacing. Use FeatureGrid for multi-column feature lists, Pricing for tier comparisons, Stats for metric callouts, MediaSection for image+text rows.
+
+Section, Stack, and Grid are now real editable containers (Puck slots) — their ` + "`content`" + ` prop is an array of nested child blocks that render and drag natively. Reach for them ONLY when you genuinely need nesting a single-purpose block can't express: a Section to group several blocks under one shared background band, a Grid to place arbitrary blocks (not just feature cards) in columns, a Stack for a tight vertical cluster. Do not wrap every block in a Section — that adds noise without design value.
 
 ### Hero & CTA — visual anchors
 

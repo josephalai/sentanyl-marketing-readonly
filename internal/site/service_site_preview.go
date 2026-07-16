@@ -1,8 +1,10 @@
 package site
 
 import (
+	"errors"
 	"fmt"
 	"html"
+	"log"
 	"strings"
 
 	"gopkg.in/mgo.v2/bson"
@@ -158,18 +160,29 @@ func RenderPuckDocumentToHTML(doc map[string]any, seo *pkgmodels.SEOConfig, site
 		sb.WriteString("</ul></nav>\n")
 	}
 
-	// Render Puck content array.
+	// Render the block body. Prefer the Puck SSR worker (the SAME shared registry
+	// the editor uses → WYSIWYG parity); fall back to the in-process Go renderer
+	// on any error or when PUCK_RENDERER_URL is unset (bake-in safety).
 	var tenantID bson.ObjectId
+	var globalStyle *pkgmodels.GlobalStyle
 	if site != nil {
 		tenantID = site.TenantID
+		globalStyle = site.GlobalStyle
 	}
-	if content, ok := doc["content"].([]any); ok {
-		for _, item := range content {
-			comp, ok := item.(map[string]any)
-			if !ok {
-				continue
+	if body, err := renderViaPuckSSR(doc, globalStyle); err == nil {
+		sb.WriteString(body)
+	} else {
+		if !errors.Is(err, errPuckRendererDisabled) {
+			log.Printf("puck-renderer SSR failed, falling back to Go renderer: %v", err)
+		}
+		if content, ok := doc["content"].([]any); ok {
+			for _, item := range content {
+				comp, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				renderComponent(&sb, comp, tenantID)
 			}
-			renderComponent(&sb, comp, tenantID)
 		}
 	}
 
