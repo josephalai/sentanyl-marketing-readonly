@@ -132,6 +132,16 @@ func (p *GeminiProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult
 	return &result, nil
 }
 
+// GenerateJSON runs an arbitrary instruction through Gemini's JSON mime mode
+// and returns the raw JSON string. See the SiteAIProvider interface doc.
+func (p *GeminiProvider) GenerateJSON(req GenerateTextRequest) (string, error) {
+	resp, err := p.generateContent(req.Ctx, funnelSlotSystemPrompt+"\n\n"+req.Prompt)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp), nil
+}
+
 func (p *GeminiProvider) GenerateText(req GenerateTextRequest) (string, error) {
 	prompt := aiTextSystemPrompt + "\n\n" + buildAITextPrompt(req)
 	resp, err := p.generateContentPlain(req.Ctx, prompt, req.MaxTokens)

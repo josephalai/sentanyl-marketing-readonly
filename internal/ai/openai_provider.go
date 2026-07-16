@@ -548,6 +548,20 @@ func (p *OpenAIProvider) EditEmail(req EmailEditRequest) (*EmailGenerationResult
 	return &result, nil
 }
 
+// funnelSlotSystemPrompt is a neutral JSON-mode system message: the caller's
+// prompt (buildFunnelSlotPrompt) fully specifies the required object shape.
+const funnelSlotSystemPrompt = "You are a precise data generator. Return ONLY a single valid JSON object exactly as the instruction specifies — no prose, no markdown fences, no commentary."
+
+// GenerateJSON runs an arbitrary instruction through json_object mode and
+// returns the raw JSON string. See the SiteAIProvider interface doc.
+func (p *OpenAIProvider) GenerateJSON(req GenerateTextRequest) (string, error) {
+	resp, err := p.chatCompletion(req.Ctx, req.Prompt, funnelSlotSystemPrompt)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp), nil
+}
+
 // GenerateText resolves a single inline {{ai}} handlebar. Plain-text path —
 // we explicitly do NOT request response_format=json_object so the model can
 // return bare prose.

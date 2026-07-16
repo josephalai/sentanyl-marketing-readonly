@@ -51,12 +51,26 @@ type rawClassification struct {
 	Reasoning       []string `json:"reasoning_signals"`
 }
 
+type rawRepeater struct {
+	Key          string                 `json:"key"`
+	Type         string                 `json:"type"`
+	Required     bool                   `json:"required"`
+	Description  string                 `json:"description"`
+	PerItemShape map[string]interface{} `json:"per_item_shape"`
+}
+
 type rawPage struct {
-	SourceHTML   string    `json:"source_html"`
-	TemplateHTML string    `json:"template_html"`
-	PageRole     string    `json:"page_role"`
-	TitleGuess   string    `json:"title_guess"`
-	Slots        []rawSlot `json:"slots"`
+	SourceHTML   string        `json:"source_html"`
+	TemplateHTML string        `json:"template_html"`
+	PageRole     string        `json:"page_role"`
+	TitleGuess   string        `json:"title_guess"`
+	Slots        []rawSlot     `json:"slots"`
+	Repeaters    []rawRepeater `json:"repeaters"`
+}
+
+type rawAIGeneration struct {
+	Prompt        string                 `json:"prompt"`
+	ResponseShape map[string]interface{} `json:"response_shape"`
 }
 
 type rawManifest struct {
@@ -67,7 +81,9 @@ type rawManifest struct {
 	Classification   rawClassification      `json:"classification"`
 	Pages            []rawPage              `json:"pages"`
 	StyleProfile     map[string]interface{} `json:"style_profile"`
+	StyleTokens      map[string]interface{} `json:"style_tokens"`
 	MasterPrompt     string                 `json:"master_prompt"`
+	AIGeneration     rawAIGeneration        `json:"ai_generation"`
 }
 
 func main() {
@@ -79,6 +95,7 @@ func main() {
 		mongoPort             string
 		mongoDB               string
 		allowMissingManifest  bool
+		markShared            bool
 	)
 	flag.StringVar(&tenantHex, "tenant-id", "", "Tenant ObjectId hex (required)")
 	flag.StringVar(&sourceDir, "source-dir", "lead-pages-templates/templates", "Templates root dir")
@@ -87,6 +104,7 @@ func main() {
 	flag.StringVar(&mongoPort, "mongo-port", envOr("MONGO_PORT", "27017"), "Mongo port")
 	flag.StringVar(&mongoDB, "mongo-db", envOr("MONGO_DB", "sentanyl"), "Mongo database name")
 	flag.BoolVar(&allowMissingManifest, "allow-missing-manifest", false, "Synthesize a minimal manifest from meta.json + index.html when template.manifest.json is absent (LLM-pipeline failed templates)")
+	flag.BoolVar(&markShared, "mark-shared", false, "Mark imported templates Shared=true so they appear in every tenant's gallery (curated system corpus)")
 	flag.Parse()
 
 	if tenantHex == "" || !bson.IsObjectIdHex(tenantHex) {
@@ -169,6 +187,7 @@ func main() {
 		}
 
 		tmpl := buildTemplate(tenantID, m, page, string(htmlBytes))
+		tmpl.Shared = markShared
 		if dryRun {
 			log.Printf("[%s] would upsert %s (kind=%s, slots=%d)",
 				e.Name(), tmpl.Name, tmpl.TemplateKind, len(tmpl.SlotManifest.Slots))
@@ -189,7 +208,7 @@ func main() {
 // defaults for fields the manifest doesn't carry directly so the resulting
 // record passes validation when stored.
 func buildTemplate(tenantID bson.ObjectId, m rawManifest, page rawPage, html string) pkgmodels.FunnelTemplate {
-	slots := make([]pkgmodels.FunnelSlot, 0, len(page.Slots))
+	slots := make([]pkgmodels.FunnelSlot, 0, len(page.Slots)+len(page.Repeaters))
 	for _, s := range page.Slots {
 		slots = append(slots, pkgmodels.FunnelSlot{
 			Key:         s.Key,
@@ -197,6 +216,25 @@ func buildTemplate(tenantID bson.ObjectId, m rawManifest, page rawPage, html str
 			SlotType:    s.Type,
 			Required:    s.Required,
 			Description: s.Description,
+		})
+	}
+	// Repeaters become array-type slots so the slot prompt asks the model for
+	// a JSON array and the materializer's {{#each}} expander can render each
+	// item. The per-item shape is folded into the description as a hint.
+	for _, r := range page.Repeaters {
+		desc := r.Description
+		// list_text (and single-field shapes) render via {{this}} in the HTML,
+		// so ask for a plain string array; richer shapes ask for objects.
+		if r.Type == "list_text" || len(r.PerItemShape) <= 1 {
+			desc = strings.TrimSpace(desc + " — a JSON array of plain strings")
+		} else if shape, err := json.Marshal(r.PerItemShape); err == nil {
+			desc = strings.TrimSpace(desc + " — a JSON array of objects: " + string(shape))
+		}
+		slots = append(slots, pkgmodels.FunnelSlot{
+			Key:         r.Key,
+			SlotType:    "array",
+			Required:    r.Required,
+			Description: desc,
 		})
 	}
 	now := time.Now()
@@ -212,6 +250,9 @@ func buildTemplate(tenantID bson.ObjectId, m rawManifest, page rawPage, html str
 		SlotManifest:     &pkgmodels.SlotManifest{Slots: slots},
 		MasterPrompt:     deriveMasterPrompt(m, page),
 	}
+	if len(m.AIGeneration.ResponseShape) > 0 {
+		tmpl.ExpectedOutputSchema = bson.M(m.AIGeneration.ResponseShape)
+	}
 	if m.StyleProfile != nil {
 		tmpl.StyleProfile = &pkgmodels.TemplateStyleProfile{
 			Tone:               strFromMap(m.StyleProfile, "tone"),
@@ -226,6 +267,11 @@ func buildTemplate(tenantID bson.ObjectId, m rawManifest, page rawPage, html str
 }
 
 func deriveMasterPrompt(m rawManifest, page rawPage) string {
+	// Prefer the templatize pipeline's rich ai_generation.prompt, then a
+	// top-level master_prompt, then a generic derived fallback.
+	if strings.TrimSpace(m.AIGeneration.Prompt) != "" {
+		return m.AIGeneration.Prompt
+	}
 	if m.MasterPrompt != "" {
 		return m.MasterPrompt
 	}

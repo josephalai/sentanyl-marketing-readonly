@@ -207,6 +207,11 @@ func mergeSlotValues(llmOutput, structured map[string]interface{}) map[string]in
 // (e.g. `page.bio.paragraphs[0]`).
 var slotPlaceholder = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.\[\]\-]+)\s*\}\}`)
 
+// eachBlock matches a Handlebars `{{#each KEY}} … {{/each}}` repeater. The
+// templatize pipeline emits these for list slots (per_item_shape). Non-greedy
+// inner body; flat (non-nested) blocks, which is all the pipeline produces.
+var eachBlock = regexp.MustCompile(`(?s)\{\{#each\s+([a-zA-Z0-9_.\[\]\-]+)\s*\}\}(.*?)\{\{/each\}\}`)
+
 // renderTemplate substitutes every `{{ key }}` placeholder in the template's
 // HTMLContent with the matching slot value. Unknown keys are blanked rather
 // than left visible to avoid leaking template syntax to public visitors.
@@ -217,6 +222,9 @@ func renderTemplate(tmpl *pkgmodels.FunnelTemplate, values map[string]interface{
 	if tmpl.GlobalCSS != "" && !strings.Contains(html, "<style") {
 		html = "<style>" + tmpl.GlobalCSS + "</style>\n" + html
 	}
+	// Expand `{{#each}}` repeater blocks first, then substitute scalars. Any
+	// unmatched scalar is blanked so no template syntax leaks to visitors.
+	html = expandEachBlocks(html, values)
 	out := slotPlaceholder.ReplaceAllStringFunc(html, func(match string) string {
 		key := strings.TrimSpace(match[2 : len(match)-2])
 		v := lookupSlot(values, key)
@@ -226,6 +234,54 @@ func renderTemplate(tmpl *pkgmodels.FunnelTemplate, values map[string]interface{
 		return slotValueToString(v)
 	})
 	return out
+}
+
+// expandEachBlocks replaces every `{{#each KEY}}BODY{{/each}}` with BODY
+// repeated once per element of the KEY array. Inside the body, `{{this}}`
+// resolves to the element (for primitive lists) and `{{field}}` resolves to
+// element[field] (for object lists / per_item_shape). A missing or empty
+// array blanks the whole block.
+func expandEachBlocks(htmlStr string, values map[string]interface{}) string {
+	return eachBlock.ReplaceAllStringFunc(htmlStr, func(match string) string {
+		m := eachBlock.FindStringSubmatch(match)
+		if len(m) != 3 {
+			return ""
+		}
+		arr, ok := lookupSlot(values, strings.TrimSpace(m[1])).([]interface{})
+		if !ok || len(arr) == 0 {
+			return ""
+		}
+		var sb strings.Builder
+		for _, item := range arr {
+			sb.WriteString(renderEachItem(m[2], item))
+		}
+		return sb.String()
+	})
+}
+
+// renderEachItem substitutes the scalar placeholders inside one `{{#each}}`
+// iteration against the current element.
+func renderEachItem(body string, item interface{}) string {
+	return slotPlaceholder.ReplaceAllStringFunc(body, func(match string) string {
+		key := strings.TrimSpace(match[2 : len(match)-2])
+		if key == "this" || key == "." {
+			// `{{this}}` expects a primitive. If the model returned a
+			// single-field object (e.g. {"text": "…"} for a list_text slot),
+			// unwrap it so the value renders instead of raw JSON.
+			if mp, ok := item.(map[string]interface{}); ok && len(mp) == 1 {
+				for _, vv := range mp {
+					return slotValueToString(vv)
+				}
+			}
+			return slotValueToString(item)
+		}
+		if mp, ok := item.(map[string]interface{}); ok {
+			if v := lookupSlot(mp, key); v != nil {
+				return slotValueToString(v)
+			}
+		}
+		return ""
+	})
 }
 
 // lookupSlot resolves a dotted/indexed slot key against the values map.

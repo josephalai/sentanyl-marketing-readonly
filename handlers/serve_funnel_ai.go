@@ -165,8 +165,13 @@ func handleListFunnelTemplatesForAI(c *gin.Context) {
 		return
 	}
 	var templates []pkgmodels.FunnelTemplate
+	// The caller's own templates plus the curated Shared system corpus (the
+	// "beat Kajabi" starter gallery, visible to every tenant).
 	db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
-		"tenant_id":             tenantID,
+		"$or": []bson.M{
+			{"tenant_id": tenantID},
+			{"shared": true},
+		},
 		"timestamps.deleted_at": nil,
 	}).All(&templates)
 	if templates == nil {
@@ -193,14 +198,22 @@ func handleAIGenerateFunnelFromTemplate(c *gin.Context) {
 		return
 	}
 
-	// Load template
+	// Load template — tenant-owned first, then the Shared system corpus so the
+	// curated gallery generates for every tenant (mirrors the materialize
+	// fallback in handleMaterializeFunnelTemplate).
 	var tmpl pkgmodels.FunnelTemplate
-	if err := db.GetCollection(pkgmodels.FunnelTemplateCollection).Find(bson.M{
+	col := db.GetCollection(pkgmodels.FunnelTemplateCollection)
+	if err := col.Find(bson.M{
 		"public_id": req.TemplateID,
 		"tenant_id": tenantID,
 	}).One(&tmpl); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
-		return
+		if err = col.Find(bson.M{
+			"public_id": req.TemplateID,
+			"shared":    true,
+		}).One(&tmpl); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+			return
+		}
 	}
 
 	provider, err := ai.GetConfiguredProvider()
@@ -216,13 +229,14 @@ func handleAIGenerateFunnelFromTemplate(c *gin.Context) {
 	chunks := resolveContextPacks(tenantID, req.ContextPacks)
 	brandProfile := resolveBrandProfile(tenantID)
 
-	// Build slot-aware prompt
+	// Build slot-aware prompt and run it through JSON mode. The prompt fully
+	// specifies the {slotKey: value} object; GenerateJSON returns it verbatim
+	// (GenerateEmail would coerce it into email-shaped fields and drop it).
 	prompt := buildFunnelSlotPrompt(req.Instruction, tmpl, chunks, brandProfile)
-	result, err := provider.GenerateEmail(ai.EmailGenerationRequest{
-		Ctx:           aiRequestContext(c),
-		Instruction:   prompt,
-		ContextChunks: nil, // already embedded in prompt
-		BrandProfile:  "",
+	raw, err := provider.GenerateJSON(ai.GenerateTextRequest{
+		Ctx:       aiRequestContext(c),
+		Prompt:    prompt,
+		MaxTokens: 4096,
 	})
 	if err != nil {
 		log.Printf("[funnel-ai] generation error: %v", err)
@@ -230,12 +244,10 @@ func handleAIGenerateFunnelFromTemplate(c *gin.Context) {
 		return
 	}
 
-	// result.Body contains the JSON slot map from the LLM
 	c.JSON(http.StatusOK, gin.H{
 		"template_id":   req.TemplateID,
 		"template_name": tmpl.Name,
-		"slot_content":  result.Body,
-		"summary":       result.Summary,
+		"slot_content":  raw,
 	})
 }
 

@@ -28,6 +28,13 @@ type SiteAIProvider interface {
 	// to draw any factual claims or quotes exclusively from it.
 	GenerateText(req GenerateTextRequest) (string, error)
 
+	// GenerateJSON runs an arbitrary instruction through the model's JSON
+	// mode and returns the raw JSON string (no parsing, no word cap). Used by
+	// the funnel-template slot-fill path, which needs a free-form
+	// {slotKey: value} object back — unlike GenerateEmail (email-shaped) or
+	// GenerateText (short prose).
+	GenerateJSON(req GenerateTextRequest) (string, error)
+
 	// GenerateNewsletterSeriesOutline plans a multi-issue newsletter series.
 	// Mirrors the LMS course-outline call: one LLM hit returns a structured
 	// series_title + N issue titles + briefs + key_points anchored to the
