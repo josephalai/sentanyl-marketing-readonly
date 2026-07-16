@@ -262,8 +262,33 @@ func buildTemplate(tenantID bson.ObjectId, m rawManifest, page rawPage, html str
 			AudienceAssumption: strFromMap(m.StyleProfile, "audience_assumption"),
 		}
 	}
+	tmpl.PreviewBg, tmpl.PreviewAccent = previewColors(m.StyleTokens)
 	tmpl.SoftDeletes.CreatedAt = &now
 	return tmpl
+}
+
+// previewColors picks a background + accent from the source style tokens for the
+// gallery-card poster. Token keys vary across templates, so each is resolved from
+// an ordered list of likely names, with sensible defaults.
+func previewColors(tokens map[string]interface{}) (bg, accent string) {
+	colors, _ := tokens["colors"].(map[string]interface{})
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := colors[k].(string); ok && strings.HasPrefix(strings.TrimSpace(v), "#") {
+				return strings.TrimSpace(v)
+			}
+		}
+		return ""
+	}
+	bg = pick("page_background", "background", "bg", "white")
+	accent = pick("primary_accent", "primary_button_background", "secondary_accent", "accent_yellow", "accent", "social_blue")
+	if bg == "" {
+		bg = "#111827"
+	}
+	if accent == "" {
+		accent = "#6366f1"
+	}
+	return bg, accent
 }
 
 func deriveMasterPrompt(m rawManifest, page rawPage) string {
