@@ -95,12 +95,11 @@ func handlePreviewPage(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
-	html, err := site.ServicePreviewPage(bson.ObjectIdHex(pageID), tenantID)
+	html, err := site.ServicePreviewPage(pid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -114,12 +113,11 @@ func handlePublishPage(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
-	html, err := site.ServicePublishPage(bson.ObjectIdHex(pageID), tenantID)
+	html, err := site.ServicePublishPage(pid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

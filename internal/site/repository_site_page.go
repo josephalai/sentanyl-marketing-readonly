@@ -28,6 +28,20 @@ func GetSitePageByID(id, tenantID bson.ObjectId) (*SitePage, error) {
 	return &page, nil
 }
 
+// GetSitePageByPublicID fetches a page by its public_id scoped to tenant.
+func GetSitePageByPublicID(publicID string, tenantID bson.ObjectId) (*SitePage, error) {
+	var page SitePage
+	err := db.GetCollection(pkgmodels.SitePageCollection).Find(bson.M{
+		"public_id":             publicID,
+		"tenant_id":             tenantID,
+		"timestamps.deleted_at": nil,
+	}).One(&page)
+	if err != nil {
+		return nil, err
+	}
+	return &page, nil
+}
+
 // ListPagesBySite returns all non-deleted pages for a site.
 func ListPagesBySite(siteID, tenantID bson.ObjectId) ([]SitePage, error) {
 	var pages []SitePage

@@ -12,6 +12,30 @@ import (
 	pkgmodels "github.com/josephalai/sentanyl/pkg/models"
 )
 
+// resolveSiteParam resolves the {siteId} path param — an internal ObjectId hex
+// or the platform public_id — to a site ObjectId scoped to tenantID. On failure
+// it writes a 404 and returns ok=false.
+func resolveSiteParam(c *gin.Context, tenantID bson.ObjectId) (bson.ObjectId, bool) {
+	sid, err := site.ResolveSiteID(c.Param("siteId"), tenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
+		return "", false
+	}
+	return sid, true
+}
+
+// resolvePageParam resolves the {pageId} path param (ObjectId hex or public_id)
+// to a page ObjectId scoped to tenantID. On failure it writes a 404 and returns
+// ok=false.
+func resolvePageParam(c *gin.Context, tenantID bson.ObjectId) (bson.ObjectId, bool) {
+	pid, err := site.ResolvePageID(c.Param("pageId"), tenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
+		return "", false
+	}
+	return pid, true
+}
+
 // RegisterSiteRoutes registers all website builder API routes.
 func RegisterSiteRoutes(tenantAPI *gin.RouterGroup) {
 	tenantAPI.POST("/sites", handleCreateSite)
@@ -64,12 +88,11 @@ func handleGetSite(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
-	s, err := site.ServiceGetSite(bson.ObjectIdHex(siteID), tenantID)
+	s, err := site.ServiceGetSite(sid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 		return
@@ -83,9 +106,8 @@ func handleUpdateSite(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
 	var req site.SiteUpdateRequest
@@ -93,7 +115,7 @@ func handleUpdateSite(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	if err := site.ServiceUpdateSite(bson.ObjectIdHex(siteID), tenantID, req); err != nil {
+	if err := site.ServiceUpdateSite(sid, tenantID, req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -106,12 +128,11 @@ func handleDeleteSite(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
-	if err := site.ServiceDeleteSite(bson.ObjectIdHex(siteID), tenantID); err != nil {
+	if err := site.ServiceDeleteSite(sid, tenantID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete site"})
 		return
 	}
@@ -124,9 +145,8 @@ func handleAttachDomain(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
 	domainID := c.Param("domainId")
@@ -143,7 +163,7 @@ func handleAttachDomain(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "domain id or hostname is required"})
 		return
 	}
-	if err := site.ServiceAttachDomain(bson.ObjectIdHex(siteID), tenantID, domainRef); err != nil {
+	if err := site.ServiceAttachDomain(sid, tenantID, domainRef); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -161,13 +181,12 @@ func handleGetSiteStyle(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
 	var s pkgmodels.Site
-	if err := db.GetCollection(pkgmodels.SiteCollection).FindId(bson.ObjectIdHex(siteID)).One(&s); err != nil {
+	if err := db.GetCollection(pkgmodels.SiteCollection).FindId(sid).One(&s); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 		return
 	}
@@ -188,13 +207,12 @@ func handleUpdateSiteStyle(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
 	var s pkgmodels.Site
-	if err := db.GetCollection(pkgmodels.SiteCollection).FindId(bson.ObjectIdHex(siteID)).One(&s); err != nil {
+	if err := db.GetCollection(pkgmodels.SiteCollection).FindId(sid).One(&s); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "site not found"})
 		return
 	}
@@ -208,7 +226,7 @@ func handleUpdateSiteStyle(c *gin.Context) {
 		return
 	}
 	if err := db.GetCollection(pkgmodels.SiteCollection).UpdateId(
-		bson.ObjectIdHex(siteID),
+		sid,
 		bson.M{"$set": bson.M{"global_style": gs}},
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update style"})

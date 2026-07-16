@@ -33,9 +33,8 @@ func handleCreatePage(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
 	var req site.PageCreateRequest
@@ -43,7 +42,7 @@ func handleCreatePage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	page, err := site.ServiceCreatePage(req, bson.ObjectIdHex(siteID), tenantID)
+	page, err := site.ServiceCreatePage(req, sid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -65,12 +64,11 @@ func handleListPages(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	siteID := c.Param("siteId")
-	if !bson.IsObjectIdHex(siteID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
+	sid, ok := resolveSiteParam(c, tenantID)
+	if !ok {
 		return
 	}
-	pages, err := site.ServiceListPages(bson.ObjectIdHex(siteID), tenantID)
+	pages, err := site.ServiceListPages(sid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list pages"})
 		return
@@ -84,12 +82,11 @@ func handleGetPage(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
-	page, err := site.ServiceGetPage(bson.ObjectIdHex(pageID), tenantID)
+	page, err := site.ServiceGetPage(pid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
 		return
@@ -103,9 +100,8 @@ func handleUpdatePage(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
 	var req site.PageUpdateRequest
@@ -113,7 +109,7 @@ func handleUpdatePage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	if err := site.ServiceUpdatePage(bson.ObjectIdHex(pageID), tenantID, req); err != nil {
+	if err := site.ServiceUpdatePage(pid, tenantID, req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -126,12 +122,11 @@ func handleDeletePage(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
-	if err := site.ServiceDeletePage(bson.ObjectIdHex(pageID), tenantID); err != nil {
+	if err := site.ServiceDeletePage(pid, tenantID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete page"})
 		return
 	}
@@ -144,12 +139,11 @@ func handleGetDocument(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
-	doc, err := site.ServiceGetDocument(bson.ObjectIdHex(pageID), tenantID)
+	doc, err := site.ServiceGetDocument(pid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
 		return
@@ -163,9 +157,8 @@ func handleSaveDocument(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -175,7 +168,7 @@ func handleSaveDocument(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "document is required"})
 		return
 	}
-	if err := site.ServiceSaveDocument(bson.ObjectIdHex(pageID), tenantID, req.Document); err != nil {
+	if err := site.ServiceSaveDocument(pid, tenantID, req.Document); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save document"})
 		return
 	}
@@ -188,12 +181,11 @@ func handleListVersions(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
-	if !bson.IsObjectIdHex(pageID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page id"})
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
 		return
 	}
-	versions, err := site.ListVersionsByPage(bson.ObjectIdHex(pageID), tenantID)
+	versions, err := site.ListVersionsByPage(pid, tenantID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list versions"})
 		return
@@ -207,13 +199,16 @@ func handleRestoreVersion(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	pageID := c.Param("pageId")
 	versionID := c.Param("versionId")
-	if !bson.IsObjectIdHex(pageID) || !bson.IsObjectIdHex(versionID) {
+	if !bson.IsObjectIdHex(versionID) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if err := site.ServiceRestoreVersion(bson.ObjectIdHex(pageID), bson.ObjectIdHex(versionID), tenantID); err != nil {
+	pid, ok := resolvePageParam(c, tenantID)
+	if !ok {
+		return
+	}
+	if err := site.ServiceRestoreVersion(pid, bson.ObjectIdHex(versionID), tenantID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
