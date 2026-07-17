@@ -197,6 +197,43 @@ func TestDeliveryBuilderBlockContracts(t *testing.T) {
 	}
 }
 
+// TestGenericFallbackRendersReadableAndPreservesIslands guards the "bake-in"
+// cleanup: the Go renderer no longer has dedicated cases for presentational or
+// layout blocks (Puck SSR worker is authoritative). On a worker outage this Go
+// path must still degrade gracefully — surfacing readable text and, crucially,
+// recursing into container children so nested data islands are not dropped.
+func TestGenericFallbackRendersReadableAndPreservesIslands(t *testing.T) {
+	doc := map[string]any{"content": []any{
+		map[string]any{"type": "HeroSection", "props": map[string]any{
+			"heading": "Welcome Home", "description": "Body copy here.",
+		}},
+		// A now-deleted layout container wrapping a data island: the fallback
+		// must recurse so the island still renders during an outage.
+		map[string]any{"type": "Section", "props": map[string]any{"content": []any{
+			map[string]any{"type": "SentanylLeadForm", "props": map[string]any{
+				"title": "Join the list", "buttonText": "Subscribe",
+			}},
+		}}},
+		map[string]any{"type": "CTASection", "props": map[string]any{"heading": "Act now"}},
+	}}
+
+	html := RenderPuckDocumentToHTML(doc, nil, nil)
+
+	// Presentational blocks degrade to readable text, not the old "[Type]" stub.
+	for _, want := range []string{"Welcome Home", "Body copy here.", "Act now"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("generic fallback missing readable text %q", want)
+		}
+	}
+	if strings.Contains(html, "[HeroSection]") || strings.Contains(html, "[CTASection]") {
+		t.Error("fallback emitted the old unknown-component stub instead of readable text")
+	}
+	// The lead-form island nested inside the deleted Section survives.
+	if !strings.Contains(html, "/api/marketing/site/form/submit") || !strings.Contains(html, "lead-form-block") {
+		t.Error("data island nested in a container was dropped by the fallback")
+	}
+}
+
 func TestGetComponentsByCategory(t *testing.T) {
 	groups := GetComponentsByCategory()
 	if len(groups) == 0 {

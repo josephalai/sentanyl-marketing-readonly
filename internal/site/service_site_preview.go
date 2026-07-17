@@ -426,36 +426,6 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 			sb.WriteString("<!--paywall-break-->\n")
 		}
 
-	case "HeroSection":
-		renderHeroSection(sb, props, esc)
-
-	case "RichTextSection":
-		content, _ := props["content"].(string)
-		tone := normalizeTone(props["tone"])
-		pad := normalizePadding(props["paddingY"])
-		sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--normal\"><div class=\"prose\">\n", toneClass(tone), padClass(pad)))
-		sb.WriteString(content) // Rich text is intentionally unescaped HTML
-		sb.WriteString("\n</div></div></section>\n")
-
-	case "ImageSection":
-		src, _ := props["src"].(string)
-		alt, _ := props["alt"].(string)
-		caption, _ := props["caption"].(string)
-		if assetID, ok := props["assetId"].(string); ok && assetID != "" && bson.IsObjectIdHex(assetID) {
-			if assetURL := resolveAssetURL(assetID); assetURL != "" {
-				src = assetURL
-			}
-		}
-		if src != "" {
-			tone := normalizeTone(props["tone"])
-			pad := normalizePadding(props["paddingY"])
-			sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--wide\">\n<div class=\"img-wide\"><img src=\"%s\" alt=\"%s\"></div>\n", toneClass(tone), padClass(pad), esc(src), esc(alt)))
-			if caption != "" {
-				sb.WriteString(fmt.Sprintf("<p class=\"img-caption\">%s</p>\n", esc(caption)))
-			}
-			sb.WriteString("</div></section>\n")
-		}
-
 	case "VideoSection", "SentanylVideoPlayer":
 		// Phase 11A Step 2: emit the augmented <video data-sentanyl> tag so
 		// the runtime sentanyl-video.js (loaded once via the <script> tag
@@ -513,48 +483,8 @@ func renderComponent(sb *strings.Builder, comp map[string]any, tenantID bson.Obj
 			sb.WriteString(`<script src="/static/sentanyl-video-v1.js" defer></script>` + "\n")
 		}
 
-	case "CTASection":
-		renderCTASection(sb, props, esc)
-
 	case "TestimonialsSection", "SentanylTestimonials":
 		renderTestimonialsSection(sb, props, esc)
-
-	case "FAQSection":
-		renderFAQSection(sb, props, esc)
-
-	case "Spacer":
-		height, _ := props["height"].(string)
-		if height == "" {
-			height = "40px"
-		}
-		sb.WriteString(fmt.Sprintf("<div style=\"height:%s\"></div>\n", esc(height)))
-
-	case "Button":
-		label, _ := props["label"].(string)
-		href, _ := props["href"].(string)
-		if href == "" {
-			href = "#"
-		}
-		sb.WriteString(fmt.Sprintf("<div class=\"section\" style=\"text-align:center\"><a class=\"cta-button\" href=\"%s\">%s</a></div>\n", esc(href), esc(label)))
-
-	case "Columns":
-		sb.WriteString("<section class=\"section\"><div class=\"columns\">\n")
-		if cols, ok := props["columns"].([]any); ok {
-			for _, col := range cols {
-				if colMap, ok := col.(map[string]any); ok {
-					sb.WriteString("<div class=\"card\">\n")
-					if children, ok := colMap["children"].([]any); ok {
-						for _, child := range children {
-							if childComp, ok := child.(map[string]any); ok {
-								renderComponent(sb, childComp, tenantID)
-							}
-						}
-					}
-					sb.WriteString("</div>\n")
-				}
-			}
-		}
-		sb.WriteString("</div></section>\n")
 
 	case "NavigationBar":
 		// Rendered at site level, skip here.
@@ -1045,38 +975,56 @@ function submitSentanylForm(ev,f){
 	case "SentanylStoryline":
 		renderStorylineBlock(sb, props, esc)
 
-	case "Section":
-		renderSectionContainer(sb, props, tenantID)
-
-	case "Stack":
-		renderStackContainer(sb, props, tenantID)
-
-	case "Grid":
-		renderGridContainer(sb, props, tenantID)
-
-	case "Container":
-		// Bare container = a Section with default tone, no extra padding band.
-		renderSectionContainer(sb, props, tenantID)
-
-	case "MediaSection":
-		renderMediaSection(sb, props, esc)
-
-	case "FeatureGrid":
-		renderFeatureGrid(sb, props, esc)
-
-	case "Pricing":
-		renderPricing(sb, props, esc)
-
-	case "Stats":
-		renderStats(sb, props, esc)
-
-	case "LogoCloud":
-		renderLogoCloud(sb, props, esc)
-
 	default:
-		// Unknown component — render as a generic section.
-		sb.WriteString(fmt.Sprintf("<section class=\"section\"><div class=\"container container--normal\"><p>[%s]</p></div></section>\n", esc(compType)))
+		// Presentational + layout blocks (Hero, CTA, FAQ, Section/Stack/Grid,
+		// FeatureGrid, Pricing, Stats, …) are rendered by the Puck SSR worker
+		// (puck-renderer), which is authoritative on prod and local. This Go
+		// renderer only runs as the fallback for a worker outage — so unknown
+		// and formerly-presentational types both land here. Emit a readable,
+		// unstyled fallback that surfaces any heading/body text and recurses
+		// into nested content so container blocks (and the data islands they
+		// wrap, which are re-hydrated separately) survive a degraded publish.
+		renderGenericFallback(sb, compType, props, tenantID)
 	}
+}
+
+// renderGenericFallback renders a best-effort, unstyled version of any block the
+// Go renderer no longer has a dedicated case for. It is only reached when the
+// Puck SSR worker is unavailable (see renderViaPuckSSR fallback). It pulls the
+// common heading/body prop aliases into a plain <section>, then recurses into
+// container children (slot "content" and legacy Columns "columns[].children") so
+// nested blocks — including data islands — are not dropped on an outage.
+func renderGenericFallback(sb *strings.Builder, compType string, props map[string]any, tenantID bson.ObjectId) {
+	esc := func(s string) string { return html.EscapeString(s) }
+	firstString := func(keys ...string) string {
+		for _, k := range keys {
+			if s, ok := props[k].(string); ok && strings.TrimSpace(s) != "" {
+				return s
+			}
+		}
+		return ""
+	}
+	heading := firstString("heading", "title", "headline", "eyebrow", "label")
+	body := firstString("subheading", "subtitle", "description", "text", "content", "body")
+
+	sb.WriteString("<section class=\"section\">\n<div class=\"container container--normal\">\n")
+	if heading != "" {
+		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
+	}
+	if body != "" {
+		sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(body)))
+	}
+	// Recurse into container slot children so islands nested in a Section/Stack/
+	// Grid still render during a worker outage.
+	renderChildren(sb, props["content"], tenantID)
+	if cols, ok := props["columns"].([]any); ok {
+		for _, col := range cols {
+			if colMap := coerceMap(col); colMap != nil {
+				renderChildren(sb, colMap["children"], tenantID)
+			}
+		}
+	}
+	sb.WriteString("</div></section>\n")
 }
 
 // --- New-style component renderers ------------------------------------------
@@ -1100,26 +1048,6 @@ func normalizePadding(v any) string {
 	s, _ := v.(string)
 	switch s {
 	case "sm", "md", "lg", "xl":
-		return s
-	}
-	return "md"
-}
-
-// normalizeMaxWidth coerces a maxWidth prop into a known container size.
-func normalizeMaxWidth(v any) string {
-	s, _ := v.(string)
-	switch s {
-	case "narrow", "normal", "wide", "full":
-		return s
-	}
-	return "normal"
-}
-
-// normalizeGap coerces a gap prop into a known step.
-func normalizeGap(v any) string {
-	s, _ := v.(string)
-	switch s {
-	case "sm", "md", "lg":
 		return s
 	}
 	return "md"
@@ -1164,19 +1092,6 @@ func padClass(step string) string {
 	return ""
 }
 
-// gapClass maps a gap step to a stack/grid gap class.
-func gapClass(prefix, step string) string {
-	switch step {
-	case "sm":
-		return prefix + "--gap-sm"
-	case "lg":
-		return prefix + "--gap-lg"
-	case "xl":
-		return prefix + "--gap-xl"
-	}
-	return prefix + "--gap-md"
-}
-
 // renderChildren renders a content array (containers' nested blocks) by
 // calling renderComponent on each entry. Tolerates the same map/bson shapes
 // as the top-level renderer.
@@ -1188,281 +1103,6 @@ func renderChildren(sb *strings.Builder, content any, tenantID bson.ObjectId) {
 		}
 		renderComponent(sb, comp, tenantID)
 	}
-}
-
-// renderSectionContainer renders a <section> wrapper with tone/padding/maxWidth
-// and recurses into props.content for nested children.
-func renderSectionContainer(sb *strings.Builder, props map[string]any, tenantID bson.ObjectId) {
-	tone := normalizeTone(props["tone"])
-	if tone == "default" {
-		// Allow legacy "variant" alias used in earlier prompts.
-		tone = normalizeTone(props["variant"])
-	}
-	pad := normalizePadding(props["paddingY"])
-	mw := normalizeMaxWidth(props["maxWidth"])
-	bg, _ := props["backgroundImage"].(string)
-	id, _ := props["id"].(string)
-
-	bgAttr := ""
-	if bg != "" {
-		bgAttr = fmt.Sprintf(` data-bg-image="1" style="background-image:url('%s')"`, html.EscapeString(bg))
-	}
-	idAttr := ""
-	if id != "" {
-		idAttr = fmt.Sprintf(` id="%s"`, html.EscapeString(id))
-	}
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\"%s%s>\n<div class=\"container container--%s\">\n",
-		toneClass(tone), padClass(pad), idAttr, bgAttr, mw))
-	renderChildren(sb, props["content"], tenantID)
-	sb.WriteString("</div></section>\n")
-}
-
-// renderStackContainer renders a vertical flex stack of children.
-func renderStackContainer(sb *strings.Builder, props map[string]any, tenantID bson.ObjectId) {
-	gap := normalizeGap(props["gap"])
-	align, _ := props["align"].(string)
-	cls := "stack " + gapClass("stack", gap)
-	if align == "center" {
-		cls += " stack--center"
-	} else if align == "end" {
-		cls += " stack--end"
-	}
-	sb.WriteString(fmt.Sprintf("<div class=\"%s\">\n", cls))
-	renderChildren(sb, props["content"], tenantID)
-	sb.WriteString("</div>\n")
-}
-
-// renderGridContainer renders a CSS grid of children. Supports col counts 2/3/4/12.
-func renderGridContainer(sb *strings.Builder, props map[string]any, tenantID bson.ObjectId) {
-	cols := 2
-	switch v := props["cols"].(type) {
-	case int:
-		cols = v
-	case float64:
-		cols = int(v)
-	case string:
-		fmt.Sscanf(v, "%d", &cols)
-	}
-	if cols < 2 {
-		cols = 2
-	}
-	if cols > 12 {
-		cols = 12
-	}
-	colsClass := "grid-cols-2"
-	switch cols {
-	case 2:
-		colsClass = "grid-cols-2"
-	case 3:
-		colsClass = "grid-cols-3"
-	case 4:
-		colsClass = "grid-cols-4"
-	case 12:
-		colsClass = "grid-cols-12"
-	default:
-		colsClass = "grid-cols-3"
-	}
-	gap := normalizeGap(props["gap"])
-	sb.WriteString(fmt.Sprintf("<div class=\"grid %s %s\">\n", colsClass, gapClass("grid", gap)))
-	renderChildren(sb, props["content"], tenantID)
-	sb.WriteString("</div>\n")
-}
-
-// renderHeroSection draws a Hero with one of: centered, split, gradient, image.
-func renderHeroSection(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	subheading, _ := props["subheading"].(string)
-	if subheading == "" {
-		// LLMs sometimes use "tagline" / "subtitle" — alias them.
-		subheading, _ = props["tagline"].(string)
-		if subheading == "" {
-			subheading, _ = props["subtitle"].(string)
-		}
-	}
-	description, _ := props["description"].(string)
-	if description == "" {
-		// Common LLM drift: "body" used in place of "description".
-		description, _ = props["body"].(string)
-	}
-	ctaText, _ := props["ctaText"].(string)
-	ctaURL, _ := props["ctaUrl"].(string)
-	secondaryCTAText, _ := props["secondaryCtaText"].(string)
-	secondaryCTAURL, _ := props["secondaryCtaUrl"].(string)
-	imageURL, _ := props["imageUrl"].(string)
-	if imageURL == "" {
-		imageURL, _ = props["imageSrc"].(string)
-	}
-	bgImage, _ := props["backgroundImage"].(string)
-	eyebrow, _ := props["eyebrow"].(string)
-
-	variant, _ := props["variant"].(string)
-	if variant == "" {
-		// Auto-pick: split if image exists, else centered.
-		if imageURL != "" && bgImage == "" {
-			variant = "split"
-		} else if bgImage != "" {
-			variant = "image"
-		} else {
-			variant = "centered"
-		}
-	}
-	tone := normalizeTone(props["tone"])
-	if variant == "image" || variant == "gradient" {
-		tone = "inverse"
-	}
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "xl"
-	}
-
-	bgAttr := ""
-	if variant == "image" && bgImage != "" {
-		bgAttr = fmt.Sprintf(` data-bg-image="1" style="background-image:url('%s')"`, html.EscapeString(bgImage))
-	}
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\"%s>\n<div class=\"container container--wide\">\n", toneClass(tone), padClass(pad), bgAttr))
-
-	classes := "hero"
-	imagePosition, _ := props["imagePosition"].(string)
-	// No renderer-side default: when imagePosition is empty, layout follows
-	// DOM order (text first → image right). The LLM and sandbox are
-	// responsible for emitting imagePosition='left' when the source has
-	// image-left. The earlier 'default to left' opinion was dropped — it
-	// flipped the layout for image-right sources too.
-	switch variant {
-	case "split":
-		classes += " hero--split"
-		if imagePosition == "left" {
-			classes += " hero--image-left"
-		}
-	case "centered":
-		classes += " hero--centered"
-	case "gradient":
-		classes += " hero--gradient hero--centered"
-	default:
-		classes += " hero--centered"
-	}
-	sb.WriteString(fmt.Sprintf("<div class=\"%s\">\n", classes))
-
-	// Text column
-	sb.WriteString("<div class=\"stack stack--md\">\n")
-	if eyebrow != "" {
-		sb.WriteString(fmt.Sprintf("<span class=\"eyebrow\">%s</span>\n", esc(eyebrow)))
-	}
-	if heading != "" {
-		sb.WriteString(fmt.Sprintf("<h1>%s</h1>\n", esc(heading)))
-	}
-	leadText := subheading
-	if leadText == "" {
-		leadText = description
-	}
-	if leadText != "" {
-		sb.WriteString(fmt.Sprintf("<p class=\"lead\">%s</p>\n", esc(leadText)))
-	}
-	if description != "" && subheading != "" {
-		sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(description)))
-	}
-	if ctaText != "" || secondaryCTAText != "" {
-		sb.WriteString("<div class=\"btn-row\">")
-		if ctaText != "" {
-			if ctaURL == "" {
-				ctaURL = "#"
-			}
-			btnClass := "btn btn--accent btn--lg"
-			if tone == "inverse" || tone == "branded" {
-				btnClass = "btn btn--inverse btn--lg"
-			}
-			sb.WriteString(fmt.Sprintf("<a class=\"%s\" href=\"%s\">%s</a>", btnClass, esc(ctaURL), esc(ctaText)))
-		}
-		if secondaryCTAText != "" {
-			if secondaryCTAURL == "" {
-				secondaryCTAURL = "#"
-			}
-			sb.WriteString(fmt.Sprintf("<a class=\"btn btn--outline btn--lg\" href=\"%s\">%s</a>", esc(secondaryCTAURL), esc(secondaryCTAText)))
-		}
-		sb.WriteString("</div>\n")
-	}
-	sb.WriteString("</div>\n")
-
-	// Image column for split variant
-	if variant == "split" && imageURL != "" {
-		aspect, _ := props["imageAspect"].(string)
-		aspectAttr := ""
-		if aspect != "" {
-			aspectAttr = fmt.Sprintf(" data-aspect=\"%s\"", esc(aspect))
-		}
-		sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\"%s>\n", esc(imageURL), esc(heading), aspectAttr))
-	}
-
-	sb.WriteString("</div>\n</div></section>\n")
-}
-
-// renderCTASection draws a CTA with one of: centered, split, banner.
-func renderCTASection(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	description, _ := props["description"].(string)
-	buttonText, _ := props["buttonText"].(string)
-	buttonURL, _ := props["buttonUrl"].(string)
-	secondaryText, _ := props["secondaryButtonText"].(string)
-	secondaryURL, _ := props["secondaryButtonUrl"].(string)
-
-	variant, _ := props["variant"].(string)
-	if variant == "" {
-		variant = "centered"
-	}
-	tone := normalizeTone(props["tone"])
-	if tone == "default" {
-		// Legacy: theme=dark mapped to inverse tone.
-		if t, _ := props["theme"].(string); t == "dark" {
-			tone = "inverse"
-		}
-	}
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "lg"
-	}
-
-	if variant == "banner" {
-		sb.WriteString(fmt.Sprintf("<section class=\"section %s\">\n<div class=\"container container--wide\">\n<div class=\"cta cta--banner cta--centered\">\n", padClass(pad)))
-	} else {
-		sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--normal\">\n", toneClass(tone), padClass(pad)))
-		if variant == "split" {
-			sb.WriteString("<div class=\"cta cta--split\">\n")
-		} else {
-			sb.WriteString("<div class=\"cta cta--centered\">\n")
-		}
-	}
-
-	sb.WriteString("<div class=\"stack stack--sm\">\n")
-	if heading != "" {
-		sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
-	}
-	if description != "" {
-		sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(description)))
-	}
-	sb.WriteString("</div>\n")
-
-	if buttonText != "" || secondaryText != "" {
-		sb.WriteString("<div class=\"btn-row\" style=\"display:flex;gap:12px;flex-wrap:wrap;justify-content:center\">")
-		if buttonText != "" {
-			if buttonURL == "" {
-				buttonURL = "#"
-			}
-			btnClass := "btn btn--accent btn--lg"
-			if variant == "banner" || tone == "inverse" || tone == "branded" {
-				btnClass = "btn btn--inverse btn--lg"
-			}
-			sb.WriteString(fmt.Sprintf("<a class=\"%s\" href=\"%s\">%s</a>", btnClass, esc(buttonURL), esc(buttonText)))
-		}
-		if secondaryText != "" {
-			if secondaryURL == "" {
-				secondaryURL = "#"
-			}
-			sb.WriteString(fmt.Sprintf("<a class=\"btn btn--outline btn--lg\" href=\"%s\">%s</a>", esc(secondaryURL), esc(secondaryText)))
-		}
-		sb.WriteString("</div>\n")
-	}
-
-	sb.WriteString("</div>\n</div></section>\n")
 }
 
 // renderTestimonialsSection draws testimonials in cards/quote/marquee variants.
@@ -1536,344 +1176,6 @@ func renderTestimonialsSection(sb *strings.Builder, props map[string]any, esc fu
 	}
 
 	sb.WriteString("</div></section>\n")
-}
-
-// renderFAQSection draws a FAQ list with optional 2-column layout.
-func renderFAQSection(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	tone := normalizeTone(props["tone"])
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "lg"
-	}
-	variant, _ := props["variant"].(string)
-
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--normal\">\n", toneClass(tone), padClass(pad)))
-	if heading != "" {
-		sb.WriteString(fmt.Sprintf("<div class=\"stack stack--sm stack--center\" style=\"margin-bottom:32px\"><h2>%s</h2></div>\n", esc(heading)))
-	}
-
-	listClass := "faq"
-	if variant == "cols" {
-		listClass = "faq faq--cols"
-	}
-	sb.WriteString(fmt.Sprintf("<div class=\"%s\">\n", listClass))
-	if items, ok := props["items"].([]any); ok {
-		for _, item := range items {
-			if faq, ok := item.(map[string]any); ok {
-				q, _ := faq["question"].(string)
-				a, _ := faq["answer"].(string)
-				sb.WriteString("<div class=\"faq__item\">\n")
-				sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(q)))
-				sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(a)))
-				sb.WriteString("</div>\n")
-			}
-		}
-	}
-	sb.WriteString("</div>\n</div></section>\n")
-}
-
-// renderMediaSection draws a side-by-side image+text block (left/right).
-func renderMediaSection(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	body, _ := props["body"].(string)
-	eyebrow, _ := props["eyebrow"].(string)
-	imageSrc, _ := props["imageSrc"].(string)
-	if imageSrc == "" {
-		imageSrc, _ = props["imageUrl"].(string)
-	}
-	imageAlt, _ := props["imageAlt"].(string)
-	ctaText, _ := props["ctaText"].(string)
-	ctaURL, _ := props["ctaUrl"].(string)
-	tone := normalizeTone(props["tone"])
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "lg"
-	}
-	layout, _ := props["layout"].(string)
-	if layout == "" {
-		layout = "right"
-	}
-	mediaClass := "media media--right"
-	if layout == "left" {
-		mediaClass = "media media--left"
-	}
-
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--wide\">\n<div class=\"%s\">\n", toneClass(tone), padClass(pad), mediaClass))
-
-	textFirst := layout == "right"
-	writeText := func() {
-		sb.WriteString("<div class=\"stack stack--md\">\n")
-		if eyebrow != "" {
-			sb.WriteString(fmt.Sprintf("<span class=\"eyebrow\">%s</span>\n", esc(eyebrow)))
-		}
-		if heading != "" {
-			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
-		}
-		if body != "" {
-			sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(body)))
-		}
-		if ctaText != "" {
-			if ctaURL == "" {
-				ctaURL = "#"
-			}
-			btnClass := "btn btn--accent"
-			if tone == "inverse" || tone == "branded" {
-				btnClass = "btn btn--inverse"
-			}
-			sb.WriteString(fmt.Sprintf("<a class=\"%s\" href=\"%s\" style=\"align-self:flex-start\">%s</a>\n", btnClass, esc(ctaURL), esc(ctaText)))
-		}
-		sb.WriteString("</div>\n")
-	}
-	writeImage := func() {
-		if imageSrc != "" {
-			aspect, _ := props["imageAspect"].(string)
-			aspectAttr := ""
-			if aspect != "" {
-				aspectAttr = fmt.Sprintf(" data-aspect=\"%s\"", esc(aspect))
-			}
-			sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\"%s>\n", esc(imageSrc), esc(imageAlt), aspectAttr))
-		}
-	}
-	if textFirst {
-		writeText()
-		writeImage()
-	} else {
-		writeImage()
-		writeText()
-	}
-
-	sb.WriteString("</div>\n</div></section>\n")
-}
-
-// renderFeatureGrid draws a grid of feature cards.
-func renderFeatureGrid(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	subheading, _ := props["subheading"].(string)
-	eyebrow, _ := props["eyebrow"].(string)
-	tone := normalizeTone(props["tone"])
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "lg"
-	}
-	cols := 3
-	switch v := props["columns"].(type) {
-	case float64:
-		cols = int(v)
-	case int:
-		cols = v
-	}
-	if cols < 2 {
-		cols = 2
-	}
-	if cols > 4 {
-		cols = 4
-	}
-	gridCols := fmt.Sprintf("grid-cols-%d", cols)
-	cardStyle, _ := props["cardStyle"].(string)
-	cardClass := "card card--lift"
-	if cardStyle == "quiet" {
-		cardClass = "card card--quiet"
-	} else if cardStyle == "ghost" {
-		cardClass = "card card--ghost"
-	}
-
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s feature-grid\">\n<div class=\"container container--wide\">\n", toneClass(tone), padClass(pad)))
-	if heading != "" || subheading != "" {
-		sb.WriteString("<div class=\"stack stack--sm stack--center\" style=\"margin-bottom:48px;max-width:680px;margin-inline:auto\">\n")
-		if eyebrow != "" {
-			sb.WriteString(fmt.Sprintf("<span class=\"eyebrow\">%s</span>\n", esc(eyebrow)))
-		}
-		if heading != "" {
-			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
-		}
-		if subheading != "" {
-			sb.WriteString(fmt.Sprintf("<p class=\"lead\">%s</p>\n", esc(subheading)))
-		}
-		sb.WriteString("</div>\n")
-	}
-	sb.WriteString(fmt.Sprintf("<div class=\"grid %s\">\n", gridCols))
-	if items, ok := props["items"].([]any); ok {
-		for _, item := range items {
-			if f, ok := item.(map[string]any); ok {
-				icon, _ := f["icon"].(string)
-				title, _ := f["title"].(string)
-				body, _ := f["body"].(string)
-				sb.WriteString(fmt.Sprintf("<div class=\"%s\">\n", cardClass))
-				if icon != "" {
-					sb.WriteString(fmt.Sprintf("<div class=\"icon\">%s</div>\n", esc(icon)))
-				}
-				if title != "" {
-					sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(title)))
-				}
-				if body != "" {
-					sb.WriteString(fmt.Sprintf("<p>%s</p>\n", esc(body)))
-				}
-				sb.WriteString("</div>\n")
-			}
-		}
-	}
-	sb.WriteString("</div>\n</div></section>\n")
-}
-
-// renderPricing draws a pricing-tier comparison.
-func renderPricing(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	subheading, _ := props["subheading"].(string)
-	tone := normalizeTone(props["tone"])
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "lg"
-	}
-	tiers, _ := props["tiers"].([]any)
-	cols := len(tiers)
-	if cols < 2 {
-		cols = 2
-	}
-	if cols > 4 {
-		cols = 4
-	}
-
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--wide\">\n", toneClass(tone), padClass(pad)))
-	if heading != "" || subheading != "" {
-		sb.WriteString("<div class=\"stack stack--sm stack--center\" style=\"margin-bottom:48px;max-width:680px;margin-inline:auto\">\n")
-		if heading != "" {
-			sb.WriteString(fmt.Sprintf("<h2>%s</h2>\n", esc(heading)))
-		}
-		if subheading != "" {
-			sb.WriteString(fmt.Sprintf("<p class=\"lead\">%s</p>\n", esc(subheading)))
-		}
-		sb.WriteString("</div>\n")
-	}
-	sb.WriteString(fmt.Sprintf("<div class=\"pricing grid grid-cols-%d\">\n", cols))
-	for _, tier := range tiers {
-		t, ok := tier.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := t["name"].(string)
-		price, _ := t["price"].(string)
-		cadence, _ := t["cadence"].(string)
-		desc, _ := t["description"].(string)
-		ctaText, _ := t["ctaText"].(string)
-		ctaURL, _ := t["ctaUrl"].(string)
-		featured, _ := t["featured"].(bool)
-		features, _ := t["features"].([]any)
-
-		cls := "pricing__tier"
-		if featured {
-			cls += " pricing__tier--featured"
-		}
-		sb.WriteString(fmt.Sprintf("<div class=\"%s\">\n", cls))
-		if name != "" {
-			sb.WriteString(fmt.Sprintf("<h3>%s</h3>\n", esc(name)))
-		}
-		if desc != "" {
-			sb.WriteString(fmt.Sprintf("<p style=\"color:var(--color-muted-fg)\">%s</p>\n", esc(desc)))
-		}
-		if price != "" {
-			sb.WriteString(fmt.Sprintf("<div class=\"pricing__price\">%s", esc(price)))
-			if cadence != "" {
-				sb.WriteString(fmt.Sprintf(" <small>%s</small>", esc(cadence)))
-			}
-			sb.WriteString("</div>\n")
-		}
-		if len(features) > 0 {
-			sb.WriteString("<ul class=\"pricing__features\">\n")
-			for _, f := range features {
-				if s, ok := f.(string); ok {
-					sb.WriteString(fmt.Sprintf("<li>%s</li>\n", esc(s)))
-				}
-			}
-			sb.WriteString("</ul>\n")
-		}
-		if ctaText != "" {
-			if ctaURL == "" {
-				ctaURL = "#"
-			}
-			btnClass := "btn btn--primary"
-			if featured {
-				btnClass = "btn btn--accent"
-			}
-			sb.WriteString(fmt.Sprintf("<a class=\"%s\" href=\"%s\" style=\"justify-content:center\">%s</a>\n", btnClass, esc(ctaURL), esc(ctaText)))
-		}
-		sb.WriteString("</div>\n")
-	}
-	sb.WriteString("</div>\n</div></section>\n")
-}
-
-// renderStats draws a metric callout grid.
-func renderStats(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	tone := normalizeTone(props["tone"])
-	if tone == "default" {
-		tone = "muted"
-	}
-	pad := normalizePadding(props["paddingY"])
-
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--wide\">\n", toneClass(tone), padClass(pad)))
-	if heading != "" {
-		sb.WriteString(fmt.Sprintf("<div class=\"stack stack--sm stack--center\" style=\"margin-bottom:32px\"><h2>%s</h2></div>\n", esc(heading)))
-	}
-	items, _ := props["items"].([]any)
-	cols := len(items)
-	if cols < 2 {
-		cols = 2
-	}
-	if cols > 4 {
-		cols = 4
-	}
-	sb.WriteString(fmt.Sprintf("<div class=\"stats grid grid-cols-%d\">\n", cols))
-	for _, item := range items {
-		if s, ok := item.(map[string]any); ok {
-			num, _ := s["value"].(string)
-			if num == "" {
-				num, _ = s["number"].(string)
-			}
-			label, _ := s["label"].(string)
-			sb.WriteString("<div class=\"stats__item\">\n")
-			sb.WriteString(fmt.Sprintf("<div class=\"num\">%s</div>\n", esc(num)))
-			sb.WriteString(fmt.Sprintf("<div class=\"label\">%s</div>\n", esc(label)))
-			sb.WriteString("</div>\n")
-		}
-	}
-	sb.WriteString("</div>\n</div></section>\n")
-}
-
-// renderLogoCloud draws a row of partner/customer logos.
-func renderLogoCloud(sb *strings.Builder, props map[string]any, esc func(string) string) {
-	heading, _ := props["heading"].(string)
-	tone := normalizeTone(props["tone"])
-	if tone == "default" {
-		tone = "muted"
-	}
-	pad := normalizePadding(props["paddingY"])
-	if pad == "md" {
-		pad = "sm"
-	}
-
-	sb.WriteString(fmt.Sprintf("<section class=\"section %s %s\">\n<div class=\"container container--wide\">\n", toneClass(tone), padClass(pad)))
-	if heading != "" {
-		sb.WriteString(fmt.Sprintf("<p class=\"text-center\" style=\"color:var(--color-muted-fg);margin-bottom:24px\">%s</p>\n", esc(heading)))
-	}
-	sb.WriteString("<div class=\"logo-cloud\">\n")
-	if logos, ok := props["logos"].([]any); ok {
-		for _, l := range logos {
-			if m, ok := l.(map[string]any); ok {
-				src, _ := m["src"].(string)
-				alt, _ := m["alt"].(string)
-				name, _ := m["name"].(string)
-				if src != "" {
-					sb.WriteString(fmt.Sprintf("<img src=\"%s\" alt=\"%s\">\n", esc(src), esc(alt)))
-				} else if name != "" {
-					sb.WriteString(fmt.Sprintf("<span>%s</span>\n", esc(name)))
-				}
-			} else if s, ok := l.(string); ok {
-				sb.WriteString(fmt.Sprintf("<span>%s</span>\n", esc(s)))
-			}
-		}
-	}
-	sb.WriteString("</div>\n</div></section>\n")
 }
 
 // resolveAssetURL looks up a Sentanyl asset by ObjectId and returns its
@@ -2142,8 +1444,7 @@ h1 { font-size: clamp(2.25rem, 5vw + 1rem, 4.5rem); letter-spacing: -0.02em; fon
 h2 { font-size: clamp(1.875rem, 3vw + 0.8rem, 3.25rem); letter-spacing: -0.02em; font-weight: 800; }
 h3 { font-size: clamp(1.25rem, 1vw + 0.9rem, 1.625rem); font-weight: 700; }
 p { font-size: 1.0625rem; line-height: 1.65; }
-.lead, .hero p, .cta p { font-size: clamp(1.125rem, 0.5vw + 1rem, 1.3125rem); line-height: 1.55; }
-.lead { font-size: clamp(1.05rem, 0.4vw + 1rem, 1.25rem); color: var(--color-muted-fg); }
+.lead { font-size: clamp(1.05rem, 0.4vw + 1rem, 1.25rem); line-height: 1.55; color: var(--color-muted-fg); }
 .eyebrow { display: inline-block; text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.78rem; font-weight: 700; color: var(--color-accent); margin-bottom: var(--space-3); }
 
 /* --- Layout primitives --- */
@@ -2217,65 +1518,12 @@ p { font-size: 1.0625rem; line-height: 1.65; }
 .site-footer { background: var(--color-inverse-bg); color: var(--color-inverse-muted); padding: var(--space-7) var(--space-5); text-align: center; font-size: 0.9rem; }
 .site-footer a { color: inherit; margin: 0 var(--space-2); text-decoration: none; }
 
-/* --- Hero variants --- */
-.section:has(.hero), section.section.hero-section { padding-block: var(--space-9); }
-.hero { display: grid; gap: var(--space-7); align-items: center; }
-.hero--centered { justify-items: center; text-align: center; max-width: 820px; margin-inline: auto; }
-.hero--split { grid-template-columns: 1fr 1fr; gap: var(--space-8); }
-.hero--split img { width: 100%; aspect-ratio: 1 / 1; max-height: 560px; object-fit: cover; border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); }
-.hero--split img[data-aspect=wide], .hero--split img[data-aspect=auto] { aspect-ratio: auto; object-fit: contain; max-height: 380px; padding: var(--space-4); background: rgba(0,0,0,0.04); }
-.hero--image-left .stack { order: 2; }
-.hero--image-left img { order: 1; }
-.hero--gradient { background: linear-gradient(135deg, var(--color-secondary), var(--color-primary)); color: var(--color-inverse-fg); padding: var(--space-9) var(--space-6); border-radius: var(--radius-lg); }
-.hero--gradient p { color: rgba(255,255,255,0.85); }
-.hero h1 { margin-bottom: var(--space-4); font-size: clamp(2.5rem, 5.5vw + 1rem, 4.75rem); }
-.hero p { margin-bottom: var(--space-6); max-width: 60ch; }
-.hero .btn-row { display: flex; gap: var(--space-3); flex-wrap: wrap; }
-.hero .btn { padding: 18px 36px; font-size: 1.05rem; }
-.hero .btn--accent { box-shadow: 0 8px 20px -8px color-mix(in srgb, var(--color-accent) 60%, transparent); }
-@media (max-width: 860px) { .hero--split { grid-template-columns: 1fr; } }
-
-/* --- CTA variants --- */
-.cta { display: grid; gap: var(--space-5); align-items: center; }
-.cta--centered { justify-items: center; text-align: center; max-width: 760px; margin-inline: auto; }
-.cta--split { grid-template-columns: 1.4fr 1fr; }
-.cta--banner { padding: var(--space-9) var(--space-7); border-radius: var(--radius-lg); background: linear-gradient(135deg, var(--color-secondary), var(--color-primary)); color: #ffffff; box-shadow: var(--shadow-lg); }
-.cta--banner p { color: rgba(255,255,255,0.85); }
-.cta--banner h2 { font-size: clamp(2rem, 3.5vw + 1rem, 3rem); }
-.cta--banner .btn { padding: 18px 40px; font-size: 1.05rem; }
-@media (max-width: 740px) { .cta--split { grid-template-columns: 1fr; text-align: center; } }
-
-/* --- Cards & feature grids --- */
+/* --- Cards --- */
 .card { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-5); transition: transform 0.2s ease, box-shadow 0.2s ease; display: flex; flex-direction: column; gap: var(--space-3); }
 .card--quiet { background: var(--color-muted-bg); border-color: transparent; }
 .card--ghost { background: transparent; border-color: transparent; padding-inline: 0; }
 .card--lift:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); }
 .card .icon { width: 44px; height: 44px; border-radius: var(--radius); background: color-mix(in srgb, var(--color-accent) 18%, transparent); display: grid; place-items: center; font-size: 1.4rem; }
-
-/* --- Feature grid --- */
-.feature-grid h3 { margin-bottom: var(--space-2); }
-.feature-grid .card p { color: var(--color-muted-fg); }
-
-/* --- Pricing --- */
-.pricing { display: grid; gap: var(--space-5); }
-.pricing__tier { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-4); }
-.pricing__tier--featured { border-color: var(--color-accent); box-shadow: var(--shadow-lg); transform: translateY(-4px); }
-.pricing__price { font-family: var(--font-heading); font-size: 2.5rem; font-weight: 800; line-height: 1; }
-.pricing__price small { font-size: 0.95rem; font-weight: 500; color: var(--color-muted-fg); }
-.pricing__features { list-style: none; display: flex; flex-direction: column; gap: var(--space-2); font-size: 0.95rem; }
-.pricing__features li { display: flex; gap: var(--space-2); align-items: flex-start; }
-.pricing__features li::before { content: "✓"; color: var(--color-accent); font-weight: 800; }
-
-/* --- Stats --- */
-.stats { display: grid; gap: var(--space-5); text-align: center; }
-.stats__item .num { font-family: var(--font-heading); font-size: clamp(2rem, 3vw + 1rem, 3.5rem); font-weight: 800; line-height: 1; color: var(--color-accent); }
-.stats__item .label { font-size: 0.92rem; color: var(--color-muted-fg); margin-top: var(--space-2); text-transform: uppercase; letter-spacing: 0.08em; }
-.section--tone-inverse .stats__item .label { color: var(--color-inverse-muted); }
-
-/* --- Logo cloud --- */
-.logo-cloud { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-6); align-items: center; opacity: 0.85; }
-.logo-cloud img { max-height: 36px; width: auto; margin: 0 auto; filter: grayscale(1) contrast(0.8); }
-.logo-cloud span { color: var(--color-muted-fg); text-align: center; font-weight: 600; font-size: 0.95rem; }
 
 /* --- Testimonials --- */
 .testimonial { background: var(--color-muted-bg); padding: var(--space-5); border-radius: var(--radius-lg); display: flex; flex-direction: column; gap: var(--space-3); }
@@ -2285,27 +1533,6 @@ p { font-size: 1.0625rem; line-height: 1.65; }
 .testimonial--quote blockquote { font-size: 1.4rem; font-style: italic; }
 .testimonial--marquee { background: transparent; padding: 0; flex-direction: row; gap: var(--space-4); flex-wrap: nowrap; overflow-x: auto; }
 .testimonial--marquee .testimonial-card { min-width: 320px; }
-
-/* --- FAQ --- */
-.faq { display: flex; flex-direction: column; }
-.faq__item { border-top: 1px solid var(--color-border); padding: var(--space-4) 0; display: flex; flex-direction: column; gap: var(--space-2); }
-.faq__item:last-child { border-bottom: 1px solid var(--color-border); }
-.faq__item h3 { font-size: 1.1rem; }
-.faq__item p { color: var(--color-muted-fg); }
-.faq--cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4) var(--space-7); }
-@media (max-width: 740px) { .faq--cols { grid-template-columns: 1fr; } }
-
-/* --- Image / Media --- */
-.media { display: grid; gap: var(--space-7); align-items: center; }
-.media--right { grid-template-columns: 1fr 1.05fr; }
-.media--left { grid-template-columns: 1.05fr 1fr; }
-.media img { width: 100%; max-height: 520px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--radius-lg); background: rgba(0,0,0,0.04); }
-.media img[data-aspect=wide], .media img[data-aspect=auto] { aspect-ratio: auto; object-fit: contain; max-height: 420px; padding: var(--space-4); background: rgba(0,0,0,0.03); border: 1px solid var(--color-border); }
-.section--tone-inverse .media img { background: rgba(255,255,255,0.05); }
-.section--tone-inverse .media img[data-aspect=wide], .section--tone-inverse .media img[data-aspect=auto] { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
-.media .stack p { color: var(--color-muted-fg); }
-.section--tone-inverse .media .stack p { color: var(--color-inverse-muted); }
-@media (max-width: 740px) { .media--left, .media--right { grid-template-columns: 1fr; } }
 
 /* --- Forms --- */
 .form { display: flex; flex-direction: column; gap: var(--space-3); max-width: 480px; }
@@ -2333,11 +1560,6 @@ p { font-size: 1.0625rem; line-height: 1.65; }
   .lead-form-block__form textarea { flex: 1 1 100%; }
   .lead-form-block__form .btn { flex: 0 0 auto; width: auto; }
 }
-
-/* --- Image-wide block --- */
-.img-wide { width: 100%; max-height: 600px; overflow: hidden; border-radius: var(--radius-lg); }
-.img-wide img { width: 100%; height: 100%; object-fit: cover; }
-.img-caption { color: var(--color-muted-fg); font-size: 0.85rem; text-align: center; margin-top: var(--space-2); }
 
 /* --- Rich text helpers --- */
 .prose { max-width: 68ch; }
